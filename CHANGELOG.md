@@ -9,6 +9,7 @@
 - Runtime 設定可選 Apple Silicon 模型：`Qwen3-ASR 1.7B 8-bit`、`1.7B BF16`、`0.6B 8-bit`（含鎖定 revision）。
 - 模型選擇旁提供「下載模型／匯入本機模型」：優先從 `~/.cache/huggingface` 匯入，否則下載到 App Models 目錄。
 - 預設輸出檔名後綴改為 `_逐字稿`（例如 `原檔名_逐字稿.txt`）。
+- 啟動時唯讀掃描 system temp 與 Temp-Recovery，分類可復原／孤立／損壞；不自動刪除。
 - 建立 `record-to-text` SwiftPM 專案與原生 SwiftUI App。
 - Apple Silicon MLX-Audio JSONL helper 與 Intel Experimental helper。
 - 專有名詞、Prompt、詞庫、設定、佇列、輸出命名與原子寫入。

@@ -1,0 +1,620 @@
+import Foundation
+
+/// Classification for leftover App-managed temp / recovery directories.
+public enum RecoveryItemKind: String, Codable, Equatable, Sendable {
+    /// Temp-Recovery with valid recovery.json and usable WAV (or equivalent).
+    case recoverable
+    /// UUID job directory under App roots, but incomplete or leftover work temp.
+    case orphaned
+    /// UUID-named directory under App roots with broken / unexpected schema.
+    case damaged
+}
+
+public enum RecoveryItemLocation: String, Codable, Equatable, Sendable {
+    case systemTemp
+    case tempRecovery
+}
+
+public struct RecoveryScanItem: Equatable, Identifiable, Sendable {
+    public var id: String { directoryPath }
+    public let jobID: UUID?
+    public let location: RecoveryItemLocation
+    public let kind: RecoveryItemKind
+    public let directoryPath: String
+    public let summary: String
+    public let detail: String
+    public let sourcePath: String?
+    public let failureStage: String?
+    public let hasNormalizedWAV: Bool
+    public let hasRecoveryJSON: Bool
+    public let hasSegmentManifest: Bool
+    public let recognizedFileNames: [String]
+    public let unknownEntryNames: [String]
+
+    public init(
+        jobID: UUID?,
+        location: RecoveryItemLocation,
+        kind: RecoveryItemKind,
+        directoryPath: String,
+        summary: String,
+        detail: String,
+        sourcePath: String? = nil,
+        failureStage: String? = nil,
+        hasNormalizedWAV: Bool,
+        hasRecoveryJSON: Bool,
+        hasSegmentManifest: Bool,
+        recognizedFileNames: [String],
+        unknownEntryNames: [String]
+    ) {
+        self.jobID = jobID
+        self.location = location
+        self.kind = kind
+        self.directoryPath = directoryPath
+        self.summary = summary
+        self.detail = detail
+        self.sourcePath = sourcePath
+        self.failureStage = failureStage
+        self.hasNormalizedWAV = hasNormalizedWAV
+        self.hasRecoveryJSON = hasRecoveryJSON
+        self.hasSegmentManifest = hasSegmentManifest
+        self.recognizedFileNames = recognizedFileNames
+        self.unknownEntryNames = unknownEntryNames
+    }
+}
+
+public struct RecoveryScanReport: Equatable, Sendable {
+    public let scannedAt: Date
+    public let systemTempRoot: String
+    public let tempRecoveryRoot: String
+    public let items: [RecoveryScanItem]
+    public let ignoredNonUUIDDirectoryCount: Int
+
+    public init(
+        scannedAt: Date = Date(),
+        systemTempRoot: String,
+        tempRecoveryRoot: String,
+        items: [RecoveryScanItem],
+        ignoredNonUUIDDirectoryCount: Int
+    ) {
+        self.scannedAt = scannedAt
+        self.systemTempRoot = systemTempRoot
+        self.tempRecoveryRoot = tempRecoveryRoot
+        self.items = items
+        self.ignoredNonUUIDDirectoryCount = ignoredNonUUIDDirectoryCount
+    }
+
+    public var isEmpty: Bool { items.isEmpty }
+
+    public var recoverableCount: Int {
+        items.filter { $0.kind == .recoverable }.count
+    }
+
+    public var orphanedCount: Int {
+        items.filter { $0.kind == .orphaned }.count
+    }
+
+    public var damagedCount: Int {
+        items.filter { $0.kind == .damaged }.count
+    }
+}
+
+/// Read-only inventory of App-managed temp and Temp-Recovery directories.
+///
+/// Never deletes or modifies files. Only inspects:
+/// - `{tmpdir}/record-to-text/<UUID>/`
+/// - `{Application Support}/record-to-text/Temp-Recovery/<UUID>/`
+public enum RecoveryScanner {
+    public static let recoveryJSONFileName = "recovery.json"
+    public static let normalizedWAVFileName = "normalized.wav"
+    public static let segmentManifestFileName = "segment-manifest.json"
+    public static let segmentsDirectoryName = "segments"
+
+    /// Files the pipeline may leave in a system-temp job directory.
+    public static let knownTempJobFileNames: Set<String> = [
+        "normalized.wav",
+        "raw.txt",
+        "traditional.txt",
+        "request.json",
+        "segment-manifest.json"
+    ]
+
+    public static let knownRecoveryFileNames: Set<String> = [
+        recoveryJSONFileName,
+        normalizedWAVFileName,
+        segmentManifestFileName
+    ]
+
+    public struct RecoveryMetadata: Codable, Equatable, Sendable {
+        public let schemaVersion: Int
+        public let jobID: UUID
+        public let sourcePath: String
+        public let failureStage: String
+        public let createdAt: Date
+        public let technicalError: String
+
+        public init(
+            schemaVersion: Int,
+            jobID: UUID,
+            sourcePath: String,
+            failureStage: String,
+            createdAt: Date,
+            technicalError: String
+        ) {
+            self.schemaVersion = schemaVersion
+            self.jobID = jobID
+            self.sourcePath = sourcePath
+            self.failureStage = failureStage
+            self.createdAt = createdAt
+            self.technicalError = technicalError
+        }
+    }
+
+    public static func systemTempJobsRoot(
+        fileManager: FileManager = .default
+    ) -> URL {
+        fileManager.temporaryDirectory
+            .appendingPathComponent("record-to-text", isDirectory: true)
+    }
+
+    public static func scan(
+        paths: ApplicationPaths,
+        fileManager: FileManager = .default,
+        systemTempRoot: URL? = nil
+    ) -> RecoveryScanReport {
+        let tempRoot = (systemTempRoot ?? systemTempJobsRoot(fileManager: fileManager))
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+        let recoveryRoot = paths.tempRecovery
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+
+        var items: [RecoveryScanItem] = []
+        var ignored = 0
+
+        let tempScan = scanRoot(
+            root: tempRoot,
+            location: .systemTemp,
+            fileManager: fileManager
+        )
+        items.append(contentsOf: tempScan.items)
+        ignored += tempScan.ignoredNonUUID
+
+        let recoveryScan = scanRoot(
+            root: recoveryRoot,
+            location: .tempRecovery,
+            fileManager: fileManager
+        )
+        items.append(contentsOf: recoveryScan.items)
+        ignored += recoveryScan.ignoredNonUUID
+
+        items.sort { lhs, rhs in
+            if lhs.kind != rhs.kind {
+                return kindSortRank(lhs.kind) < kindSortRank(rhs.kind)
+            }
+            return lhs.directoryPath < rhs.directoryPath
+        }
+
+        return RecoveryScanReport(
+            systemTempRoot: tempRoot.path,
+            tempRecoveryRoot: recoveryRoot.path,
+            items: items,
+            ignoredNonUUIDDirectoryCount: ignored
+        )
+    }
+
+    public static func parseJobDirectoryName(_ name: String) -> UUID? {
+        UUID(uuidString: name)
+    }
+
+    public static func isPathInsideManagedRoot(
+        _ path: URL,
+        roots: [URL]
+    ) -> Bool {
+        let standardized = path.standardizedFileURL.resolvingSymlinksInPath()
+        return roots.contains { root in
+            let rootPath = root.standardizedFileURL.resolvingSymlinksInPath().path
+            let candidate = standardized.path
+            return candidate == rootPath
+                || candidate.hasPrefix(rootPath.hasSuffix("/") ? rootPath : rootPath + "/")
+        }
+    }
+
+    // MARK: - Private
+
+    private static func kindSortRank(_ kind: RecoveryItemKind) -> Int {
+        switch kind {
+        case .recoverable: return 0
+        case .orphaned: return 1
+        case .damaged: return 2
+        }
+    }
+
+    private static func scanRoot(
+        root: URL,
+        location: RecoveryItemLocation,
+        fileManager: FileManager
+    ) -> (items: [RecoveryScanItem], ignoredNonUUID: Int) {
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: root.path, isDirectory: &isDirectory),
+              isDirectory.boolValue
+        else {
+            return ([], 0)
+        }
+
+        let children: [URL]
+        do {
+            children = try fileManager.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            )
+        } catch {
+            return ([], 0)
+        }
+
+        var items: [RecoveryScanItem] = []
+        var ignored = 0
+
+        for child in children {
+            var childIsDirectory: ObjCBool = false
+            guard fileManager.fileExists(
+                atPath: child.path,
+                isDirectory: &childIsDirectory
+            ), childIsDirectory.boolValue else {
+                continue
+            }
+
+            let name = child.lastPathComponent
+            guard let jobID = parseJobDirectoryName(name) else {
+                ignored += 1
+                continue
+            }
+
+            items.append(
+                classifyDirectory(
+                    at: child,
+                    expectedJobID: jobID,
+                    location: location,
+                    fileManager: fileManager
+                )
+            )
+        }
+
+        return (items, ignored)
+    }
+
+    private static func classifyDirectory(
+        at directory: URL,
+        expectedJobID: UUID,
+        location: RecoveryItemLocation,
+        fileManager: FileManager
+    ) -> RecoveryScanItem {
+        let listing = listEntries(at: directory, fileManager: fileManager)
+        let known: Set<String>
+        switch location {
+        case .systemTemp:
+            known = knownTempJobFileNames.union([segmentsDirectoryName])
+        case .tempRecovery:
+            known = knownRecoveryFileNames
+        }
+
+        let recognized = listing.names.filter { known.contains($0) }.sorted()
+        let unknown = listing.names.filter { !known.contains($0) }.sorted()
+
+        let hasWAV = listing.names.contains(normalizedWAVFileName)
+        let hasRecoveryJSON = listing.names.contains(recoveryJSONFileName)
+        let hasManifest = listing.names.contains(segmentManifestFileName)
+
+        switch location {
+        case .tempRecovery:
+            return classifyTempRecovery(
+                directory: directory,
+                expectedJobID: expectedJobID,
+                hasWAV: hasWAV,
+                hasRecoveryJSON: hasRecoveryJSON,
+                hasManifest: hasManifest,
+                recognized: recognized,
+                unknown: unknown,
+                fileManager: fileManager
+            )
+        case .systemTemp:
+            return classifySystemTemp(
+                directory: directory,
+                expectedJobID: expectedJobID,
+                hasWAV: hasWAV,
+                hasManifest: hasManifest,
+                hasRecoveryJSON: hasRecoveryJSON,
+                listing: listing,
+                recognized: recognized,
+                unknown: unknown,
+                fileManager: fileManager
+            )
+        }
+    }
+
+    private static func classifyTempRecovery(
+        directory: URL,
+        expectedJobID: UUID,
+        hasWAV: Bool,
+        hasRecoveryJSON: Bool,
+        hasManifest: Bool,
+        recognized: [String],
+        unknown: [String],
+        fileManager: FileManager
+    ) -> RecoveryScanItem {
+        if hasRecoveryJSON {
+            let jsonURL = directory.appendingPathComponent(recoveryJSONFileName)
+            do {
+                let data = try Data(contentsOf: jsonURL)
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                let metadata = try decoder.decode(RecoveryMetadata.self, from: data)
+                if metadata.schemaVersion < 1 {
+                    return makeItem(
+                        jobID: expectedJobID,
+                        location: .tempRecovery,
+                        kind: .damaged,
+                        directory: directory,
+                        summary: "復原 metadata 版本不支援",
+                        detail: "schemaVersion=\(metadata.schemaVersion)",
+                        sourcePath: metadata.sourcePath,
+                        failureStage: metadata.failureStage,
+                        hasWAV: hasWAV,
+                        hasRecoveryJSON: true,
+                        hasManifest: hasManifest,
+                        recognized: recognized,
+                        unknown: unknown
+                    )
+                }
+                if metadata.jobID != expectedJobID {
+                    return makeItem(
+                        jobID: expectedJobID,
+                        location: .tempRecovery,
+                        kind: .damaged,
+                        directory: directory,
+                        summary: "recovery.json 的 jobID 與資料夾名稱不符",
+                        detail: "資料夾 \(expectedJobID.uuidString)，metadata \(metadata.jobID.uuidString)",
+                        sourcePath: metadata.sourcePath,
+                        failureStage: metadata.failureStage,
+                        hasWAV: hasWAV,
+                        hasRecoveryJSON: true,
+                        hasManifest: hasManifest,
+                        recognized: recognized,
+                        unknown: unknown
+                    )
+                }
+                if hasWAV {
+                    return makeItem(
+                        jobID: expectedJobID,
+                        location: .tempRecovery,
+                        kind: .recoverable,
+                        directory: directory,
+                        summary: "可復原的失敗工作資料",
+                        detail: metadata.technicalError,
+                        sourcePath: metadata.sourcePath,
+                        failureStage: metadata.failureStage,
+                        hasWAV: true,
+                        hasRecoveryJSON: true,
+                        hasManifest: hasManifest,
+                        recognized: recognized,
+                        unknown: unknown
+                    )
+                }
+                return makeItem(
+                    jobID: expectedJobID,
+                    location: .tempRecovery,
+                    kind: .damaged,
+                    directory: directory,
+                    summary: "有 recovery.json 但缺少 normalized.wav",
+                    detail: metadata.technicalError,
+                    sourcePath: metadata.sourcePath,
+                    failureStage: metadata.failureStage,
+                    hasWAV: false,
+                    hasRecoveryJSON: true,
+                    hasManifest: hasManifest,
+                    recognized: recognized,
+                    unknown: unknown
+                )
+            } catch {
+                return makeItem(
+                    jobID: expectedJobID,
+                    location: .tempRecovery,
+                    kind: .damaged,
+                    directory: directory,
+                    summary: "recovery.json 無法解析",
+                    detail: error.localizedDescription,
+                    hasWAV: hasWAV,
+                    hasRecoveryJSON: true,
+                    hasManifest: hasManifest,
+                    recognized: recognized,
+                    unknown: unknown
+                )
+            }
+        }
+
+        if hasWAV || hasManifest || !recognized.isEmpty {
+            return makeItem(
+                jobID: expectedJobID,
+                location: .tempRecovery,
+                kind: .orphaned,
+                directory: directory,
+                summary: "Temp-Recovery 殘留資料（無完整 recovery.json）",
+                detail: "辨識到的檔案：\(recognized.joined(separator: ", ").ifEmpty("（無）"))",
+                hasWAV: hasWAV,
+                hasRecoveryJSON: false,
+                hasManifest: hasManifest,
+                recognized: recognized,
+                unknown: unknown
+            )
+        }
+
+        if !unknown.isEmpty {
+            return makeItem(
+                jobID: expectedJobID,
+                location: .tempRecovery,
+                kind: .damaged,
+                directory: directory,
+                summary: "Temp-Recovery 目錄內容不符合 schema",
+                detail: "未知項目：\(unknown.joined(separator: ", "))",
+                hasWAV: false,
+                hasRecoveryJSON: false,
+                hasManifest: false,
+                recognized: recognized,
+                unknown: unknown
+            )
+        }
+
+        return makeItem(
+            jobID: expectedJobID,
+            location: .tempRecovery,
+            kind: .orphaned,
+            directory: directory,
+            summary: "空的 Temp-Recovery 工作目錄",
+            detail: "沒有 recovery.json 或 normalized.wav",
+            hasWAV: false,
+            hasRecoveryJSON: false,
+            hasManifest: false,
+            recognized: recognized,
+            unknown: unknown
+        )
+    }
+
+    private static func classifySystemTemp(
+        directory: URL,
+        expectedJobID: UUID,
+        hasWAV: Bool,
+        hasManifest: Bool,
+        hasRecoveryJSON: Bool,
+        listing: (names: [String], fileCount: Int),
+        recognized: [String],
+        unknown: [String],
+        fileManager: FileManager
+    ) -> RecoveryScanItem {
+        // recovery.json is not expected in system temp; treat as schema noise.
+        if hasRecoveryJSON {
+            return makeItem(
+                jobID: expectedJobID,
+                location: .systemTemp,
+                kind: .damaged,
+                directory: directory,
+                summary: "系統暫存出現非預期的 recovery.json",
+                detail: "正式復原資料應只在 Temp-Recovery。",
+                hasWAV: hasWAV,
+                hasRecoveryJSON: true,
+                hasManifest: hasManifest,
+                recognized: recognized,
+                unknown: unknown
+            )
+        }
+
+        if !unknown.isEmpty && recognized.isEmpty {
+            return makeItem(
+                jobID: expectedJobID,
+                location: .systemTemp,
+                kind: .damaged,
+                directory: directory,
+                summary: "系統暫存目錄內容不符合 schema",
+                detail: "未知項目：\(unknown.joined(separator: ", "))",
+                hasWAV: false,
+                hasRecoveryJSON: false,
+                hasManifest: false,
+                recognized: recognized,
+                unknown: unknown
+            )
+        }
+
+        if hasWAV || hasManifest || listing.names.contains(segmentsDirectoryName)
+            || !recognized.isEmpty
+        {
+            var detailParts: [String] = []
+            if hasWAV { detailParts.append("normalized.wav") }
+            if hasManifest { detailParts.append("segment-manifest.json") }
+            if listing.names.contains(segmentsDirectoryName) {
+                detailParts.append("segments/")
+            }
+            return makeItem(
+                jobID: expectedJobID,
+                location: .systemTemp,
+                kind: .orphaned,
+                directory: directory,
+                summary: "未完成工作留下的系統暫存",
+                detail: "殘留：\(detailParts.joined(separator: ", ").ifEmpty(recognized.joined(separator: ", ")))",
+                hasWAV: hasWAV,
+                hasRecoveryJSON: false,
+                hasManifest: hasManifest,
+                recognized: recognized,
+                unknown: unknown
+            )
+        }
+
+        return makeItem(
+            jobID: expectedJobID,
+            location: .systemTemp,
+            kind: .orphaned,
+            directory: directory,
+            summary: "空的系統暫存工作目錄",
+            detail: "沒有可辨識的管線產物",
+            hasWAV: false,
+            hasRecoveryJSON: false,
+            hasManifest: false,
+            recognized: recognized,
+            unknown: unknown
+        )
+    }
+
+    private static func listEntries(
+        at directory: URL,
+        fileManager: FileManager
+    ) -> (names: [String], fileCount: Int) {
+        let urls: [URL]
+        do {
+            urls = try fileManager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            )
+        } catch {
+            return ([], 0)
+        }
+        let names = urls.map(\.lastPathComponent).sorted()
+        return (names, names.count)
+    }
+
+    private static func makeItem(
+        jobID: UUID?,
+        location: RecoveryItemLocation,
+        kind: RecoveryItemKind,
+        directory: URL,
+        summary: String,
+        detail: String,
+        sourcePath: String? = nil,
+        failureStage: String? = nil,
+        hasWAV: Bool,
+        hasRecoveryJSON: Bool,
+        hasManifest: Bool,
+        recognized: [String],
+        unknown: [String]
+    ) -> RecoveryScanItem {
+        RecoveryScanItem(
+            jobID: jobID,
+            location: location,
+            kind: kind,
+            directoryPath: directory.path,
+            summary: summary,
+            detail: detail,
+            sourcePath: sourcePath,
+            failureStage: failureStage,
+            hasNormalizedWAV: hasWAV,
+            hasRecoveryJSON: hasRecoveryJSON,
+            hasSegmentManifest: hasManifest,
+            recognizedFileNames: recognized,
+            unknownEntryNames: unknown
+        )
+    }
+}
+
+private extension String {
+    func ifEmpty(_ fallback: String) -> String {
+        isEmpty ? fallback : self
+    }
+}

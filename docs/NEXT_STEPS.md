@@ -23,15 +23,17 @@ PD-013 的 coordinator-level 實作已完成：
 - completed 不進 ledger；failed／cancelled 只保留最新 terminal history。
 - 已加入 JSON round-trip、restart retention、terminal 裁切與 log cap 測試。
 
-## 第一優先：啟動復原掃描
+## 已完成：啟動復原掃描（唯讀）
 
-- 建立唯讀 scanner，盤點 system temp `record-to-text/<jobID>` 與 `Temp-Recovery`。
-- 只接受 UUID job 目錄與本 App 定義的檔名／metadata schema。
-- 顯示可復原、孤立、損壞三種狀態；第一步不自動刪除。
-- 不追蹤或刪除 App 管理根目錄以外的任何路徑。
+- `RecoveryScanner` 盤點 system temp `record-to-text/<UUID>` 與 App `Temp-Recovery/<UUID>`。
+- 只接受 UUID 目錄；非 UUID 計入 ignored，不掃管線外路徑。
+- 分類：可復原（有效 recovery.json + WAV）、孤立暫存、損壞／schema 不符。
+- 啟動有發現時顯示 sheet；工具列「復原掃描」可重跑；**不自動刪除**。
+- Finder 開啟前再次驗證路徑落在管理根目錄內。
 
-## 其次處理
+## 第一優先（下一輪）
 
+- 在唯讀掃描之上提供清理／復原操作 UI（仍須二次確認，且只動 App 管理範圍）。
 - 修正 ProcessRunner 在 launch 前取消的 race，並評估 helper 子程序樹終止。
 - 為 ffprobe、ffmpeg、OpenCC 加入合理 timeout／inactivity watchdog。
 - 同時檢查暫存磁碟與實際輸出 volume 的可用空間。

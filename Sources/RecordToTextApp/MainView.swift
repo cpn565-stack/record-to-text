@@ -36,6 +36,13 @@ struct MainView: View {
                 }
                 .help("檢查 Runtime 與轉錄工具")
 
+                Button {
+                    viewModel.refreshRecoveryScan()
+                } label: {
+                    Label("復原掃描", systemImage: "externaldrive.badge.timemachine")
+                }
+                .help("唯讀掃描系統暫存與 Temp-Recovery")
+
                 SettingsLink {
                     Label("設定", systemImage: "gearshape")
                 }
@@ -53,6 +60,9 @@ struct MainView: View {
         }
         .sheet(isPresented: $viewModel.isEnvironmentPresented) {
             EnvironmentCheckView(viewModel: viewModel)
+        }
+        .sheet(isPresented: $viewModel.isRecoveryScanPresented) {
+            RecoveryScanView(viewModel: viewModel)
         }
         .sheet(isPresented: $viewModel.isOnboardingPresented) {
             OnboardingView(viewModel: viewModel)

@@ -40,6 +40,7 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var isSelectedModelInDefaultHFCache = false
     @Published private(set) var modelDownloadPhase: ModelDownloadPhase = .idle
     @Published private(set) var modelDownloadProgressLine: String = ""
+    @Published private(set) var recoveryScanReport: RecoveryScanReport?
 
     @Published var alert: UserFacingAlert?
     @Published var isPromptPreviewPresented = false
@@ -48,6 +49,7 @@ final class AppViewModel: ObservableObject {
     @Published var isOnboardingPresented: Bool
     @Published var isDuplicateConfirmationPresented = false
     @Published var isPromptConsentPresented = false
+    @Published var isRecoveryScanPresented = false
 
     private let paths: ApplicationPaths
     private let settingsRepository: JSONRepository<AppSettings>
@@ -152,6 +154,8 @@ final class AppViewModel: ObservableObject {
         }
 
         refreshSelectedModelCacheStatus()
+        // Read-only inventory only — never deletes on startup.
+        runRecoveryScan(presentIfNonEmpty: true)
     }
 
     deinit {
@@ -720,11 +724,62 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    func refreshRecoveryScan() {
+        runRecoveryScan(presentIfNonEmpty: false)
+        if recoveryScanReport?.isEmpty == false {
+            isRecoveryScanPresented = true
+        }
+    }
+
+    func dismissRecoveryScan() {
+        isRecoveryScanPresented = false
+    }
+
+    func revealRecoveryScanItem(_ item: RecoveryScanItem) {
+        let tempRoot = RecoveryScanner.systemTempJobsRoot(fileManager: fileManager)
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+        let recoveryRoot = paths.tempRecovery
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+        let target = URL(fileURLWithPath: item.directoryPath, isDirectory: true)
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+
+        guard RecoveryScanner.isPathInsideManagedRoot(
+            target,
+            roots: [tempRoot, recoveryRoot]
+        ) else {
+            alert = UserFacingAlert(
+                title: "拒絕開啟",
+                message: "路徑不在 record-to-text 管理的暫存／復原範圍內。"
+            )
+            return
+        }
+
+        NSWorkspace.shared.activateFileViewerSelecting([target])
+    }
+
+    private func runRecoveryScan(presentIfNonEmpty: Bool) {
+        let report = RecoveryScanner.scan(
+            paths: paths,
+            fileManager: fileManager
+        )
+        recoveryScanReport = report
+        // Don't compete with first-run onboarding sheet.
+        if presentIfNonEmpty, !report.isEmpty, !isOnboardingPresented {
+            isRecoveryScanPresented = true
+        }
+    }
+
     func completeOnboarding() {
         setSetting(\.hasCompletedOnboarding, to: true)
         isOnboardingPresented = false
         if settings.showNotificationWhenCompleted {
             requestNotificationAuthorization()
+        }
+        if let report = recoveryScanReport, !report.isEmpty {
+            isRecoveryScanPresented = true
         }
     }
 

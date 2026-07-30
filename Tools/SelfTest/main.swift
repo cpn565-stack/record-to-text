@@ -166,6 +166,74 @@ tests.check(
 
 tests.check(
     {
+        let id = UUID()
+        return RecoveryScanner.parseJobDirectoryName(id.uuidString) == id
+            && RecoveryScanner.parseJobDirectoryName("not-uuid") == nil
+    }(),
+    "RecoveryScanner accepts only UUID job directory names"
+)
+
+tests.check(
+    {
+        do {
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("record-to-text-selftest-recovery-\(UUID().uuidString)")
+            defer { try? FileManager.default.removeItem(at: root) }
+            let paths = ApplicationPaths(root: root)
+            try paths.createDirectories()
+            let tempJobs = root.appendingPathComponent("tmp-jobs", isDirectory: true)
+            try FileManager.default.createDirectory(at: tempJobs, withIntermediateDirectories: true)
+
+            let recoverableID = UUID()
+            let recoverableDir = paths.tempRecovery
+                .appendingPathComponent(recoverableID.uuidString)
+            try FileManager.default.createDirectory(
+                at: recoverableDir,
+                withIntermediateDirectories: true
+            )
+            try Data("wav".utf8).write(
+                to: recoverableDir.appendingPathComponent("normalized.wav")
+            )
+            let metadata = RecoveryScanner.RecoveryMetadata(
+                schemaVersion: 1,
+                jobID: recoverableID,
+                sourcePath: "/tmp/a.m4a",
+                failureStage: "transcribing",
+                createdAt: Date(),
+                technicalError: "boom"
+            )
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            try encoder.encode(metadata).write(
+                to: recoverableDir.appendingPathComponent("recovery.json")
+            )
+
+            let orphanID = UUID()
+            let orphanDir = tempJobs.appendingPathComponent(orphanID.uuidString)
+            try FileManager.default.createDirectory(at: orphanDir, withIntermediateDirectories: true)
+            try Data("wav".utf8).write(
+                to: orphanDir.appendingPathComponent("normalized.wav")
+            )
+
+            try FileManager.default.createDirectory(
+                at: tempJobs.appendingPathComponent("ignore-me"),
+                withIntermediateDirectories: true
+            )
+
+            let report = RecoveryScanner.scan(paths: paths, systemTempRoot: tempJobs)
+            return report.recoverableCount == 1
+                && report.orphanedCount == 1
+                && report.ignoredNonUUIDDirectoryCount == 1
+                && report.damagedCount == 0
+        } catch {
+            return false
+        }
+    }(),
+    "RecoveryScanner classifies recoverable and orphaned leftovers without deleting"
+)
+
+tests.check(
+    {
         do {
             let modelID = "mlx-community/Qwen3-ASR-1.7B-bf16"
             let revision = "e1f6c266914abc5a46e8756e02580f834a6cf8a7"
