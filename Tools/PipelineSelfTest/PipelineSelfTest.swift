@@ -144,7 +144,7 @@ private struct PipelineSelfTest {
             .appendingPathComponent("record-to-text", isDirectory: true)
             .appendingPathComponent(job.id.uuidString, isDirectory: true)
         var observedStages: [TranscriptionStage] = []
-        var observedSegmentProgress: [(current: Double, total: Double)] = []
+        var observedOverallProgress: [(current: Double, total: Double, unit: String)] = []
         let expectsFailure = scenario == "failure"
             || scenario?.hasPrefix("segmented-") == true
         let expectsCancellation = scenario == "slow"
@@ -187,11 +187,8 @@ private struct PipelineSelfTest {
             result = try await engine.run(job: job) { update in
                 if case let .stage(stage) = update {
                     observedStages.append(stage)
-                } else if
-                    case let .progress(current, total, unit) = update,
-                    unit == "segments"
-                {
-                    observedSegmentProgress.append((current, total))
+                } else if case let .progress(current, total, unit) = update {
+                    observedOverallProgress.append((current, total, unit))
                 }
             }
         } catch let error as PipelineExecutionError where expectsFailure {
@@ -283,6 +280,15 @@ private struct PipelineSelfTest {
             let tailPhraseCount = output.components(
                 separatedBy: "尾段唯一驗證句"
             ).count - 1
+            let sawSegmentedProgressUnits = observedOverallProgress.contains {
+                $0.unit.hasPrefix("percent|") && $0.total == 100
+            }
+            let sawContinuousGrowth = observedOverallProgress.contains {
+                $0.current > 5 && $0.current < 100 && $0.total == 100
+            }
+            let sawNearComplete = observedOverallProgress.contains {
+                $0.current >= 95 && $0.total == 100
+            }
             guard
                 let first,
                 let second,
@@ -291,9 +297,9 @@ private struct PipelineSelfTest {
                 second.lowerBound < third.lowerBound,
                 lines.count == 3,
                 tailPhraseCount == 1,
-                observedSegmentProgress.contains(where: {
-                    $0.current == 3 && $0.total == 3
-                })
+                sawSegmentedProgressUnits,
+                sawContinuousGrowth,
+                sawNearComplete
             else {
                 throw SelfTestError.unexpectedSegmentedOutput(output)
             }

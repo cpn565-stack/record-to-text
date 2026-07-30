@@ -11,6 +11,23 @@ struct UserFacingAlert: Identifiable {
     let message: String
 }
 
+enum ModelDownloadPhase: Equatable {
+    case idle
+    case importingLocal
+    case downloading
+    case succeeded(String)
+    case failed(String)
+
+    var isBusy: Bool {
+        switch self {
+        case .importingLocal, .downloading:
+            return true
+        case .idle, .succeeded, .failed:
+            return false
+        }
+    }
+}
+
 @MainActor
 final class AppViewModel: ObservableObject {
     @Published private(set) var settings: AppSettings
@@ -19,6 +36,10 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var recentJobs: [RecentJobSummary]
     @Published private(set) var activeJobID: UUID?
     @Published private(set) var environmentReport: EnvironmentReport?
+    @Published private(set) var isSelectedModelCached = false
+    @Published private(set) var isSelectedModelInDefaultHFCache = false
+    @Published private(set) var modelDownloadPhase: ModelDownloadPhase = .idle
+    @Published private(set) var modelDownloadProgressLine: String = ""
 
     @Published var alert: UserFacingAlert?
     @Published var isPromptPreviewPresented = false
@@ -34,10 +55,12 @@ final class AppViewModel: ObservableObject {
     private let recentJobsRepository: JSONRepository<RecentJobCollection>
     private let jobLedgerRepository: JSONRepository<JobLedgerCollection>
     private let fileManager: FileManager
+    private let modelDownloadRunner = ProcessRunner()
 
     private var queueTask: Task<Void, Never>?
     private var activeExecutionTask: Task<PipelineResult, Error>?
     private var activeEngine: TranscriptionEngine?
+    private var modelDownloadTask: Task<Void, Never>?
     private var manualDrainRequested = false
     private var pendingDuplicateURLs: [URL] = []
     private var promptConsentJobID: UUID?
@@ -127,12 +150,16 @@ final class AppViewModel: ObservableObject {
         if didInterruptJobs {
             persistJobs()
         }
+
+        refreshSelectedModelCacheStatus()
     }
 
     deinit {
         queueTask?.cancel()
         activeExecutionTask?.cancel()
         activeEngine?.cancelCurrentJob()
+        modelDownloadTask?.cancel()
+        modelDownloadRunner.cancelCurrent()
     }
 
     // MARK: - Read-only presentation state
@@ -145,13 +172,33 @@ final class AppViewModel: ObservableObject {
     }
 
     var selectedModelName: String {
-        if settings.selectedModelID == ASRModelDescriptor.appleSiliconDefault.id {
-            return ASRModelDescriptor.appleSiliconDefault.displayName
+        ASRModelDescriptor.descriptor(id: settings.selectedModelID)?.displayName
+            ?? settings.selectedModelID
+    }
+
+    var selectedModelDetail: String? {
+        ASRModelDescriptor.descriptor(id: settings.selectedModelID)?.detail
+    }
+
+    var availableModels: [ASRModelDescriptor] {
+        ASRModelDescriptor.currentAvailable
+    }
+
+    var modelDownloadButtonTitle: String {
+        if modelDownloadPhase.isBusy {
+            return modelDownloadPhase == .importingLocal ? "匯入中…" : "下載中…"
         }
-        if settings.selectedModelID == ASRModelDescriptor.intelDefault.id {
-            return ASRModelDescriptor.intelDefault.displayName
+        if isSelectedModelCached {
+            return "已下載"
         }
-        return settings.selectedModelID
+        if isSelectedModelInDefaultHFCache {
+            return "匯入本機模型"
+        }
+        return "下載模型"
+    }
+
+    var canDownloadSelectedModel: Bool {
+        !modelDownloadPhase.isBusy && !isSelectedModelCached
     }
 
     var promptPreview: String {
@@ -240,6 +287,62 @@ final class AppViewModel: ObservableObject {
         var selectedModels = settings.selectedModels
         selectedModels[CPUArchitecture.current.rawValue] = modelID
         setSetting(\.selectedModels, to: selectedModels)
+        refreshSelectedModelCacheStatus()
+        if case .succeeded = modelDownloadPhase {
+            modelDownloadPhase = .idle
+            modelDownloadProgressLine = ""
+        }
+        if case .failed = modelDownloadPhase {
+            modelDownloadPhase = .idle
+            modelDownloadProgressLine = ""
+        }
+    }
+
+    func refreshSelectedModelCacheStatus() {
+        let modelID = settings.selectedModelID
+        let revision = selectedModelRevision
+        isSelectedModelCached = ModelCache.isDownloaded(
+            modelID: modelID,
+            revision: revision,
+            modelsDirectory: paths.models,
+            fileManager: fileManager
+        )
+        isSelectedModelInDefaultHFCache = ModelCache.isDownloadedInDefaultCache(
+            modelID: modelID,
+            revision: revision,
+            fileManager: fileManager
+        )
+    }
+
+    func downloadSelectedModel() {
+        guard canDownloadSelectedModel else {
+            return
+        }
+        guard !modelDownloadRunner.isRunning else {
+            alert = UserFacingAlert(
+                title: "模型下載忙碌中",
+                message: "已有模型下載程序在執行。"
+            )
+            return
+        }
+
+        let modelID = settings.selectedModelID
+        let revision = selectedModelRevision
+        modelDownloadTask?.cancel()
+        modelDownloadTask = Task { [weak self] in
+            guard let self else {
+                return
+            }
+            await self.performModelDownload(modelID: modelID, revision: revision)
+        }
+    }
+
+    func cancelModelDownload() {
+        modelDownloadRunner.cancelCurrent()
+        modelDownloadTask?.cancel()
+        modelDownloadPhase = .idle
+        modelDownloadProgressLine = "已取消下載。"
+        refreshSelectedModelCacheStatus()
     }
 
     func chooseDefaultOutputDirectory() {
@@ -667,7 +770,9 @@ final class AppViewModel: ObservableObject {
                 prompt: promptResult.prompt,
                 outputLocationMode: settings.outputLocationMode,
                 outputDirectory: outputDirectory,
-                keepRawTranscript: settings.keepRawTranscript
+                keepRawTranscript: settings.keepRawTranscript,
+                outputFilenameSuffix: settings.resolvedOutputFilenameSuffix,
+                rawFilenameSuffix: settings.resolvedRawFilenameSuffix
             )
             jobs.append(
                 TranscriptionJob(
@@ -820,9 +925,8 @@ final class AppViewModel: ObservableObject {
         switch update {
         case let .stage(stage):
             jobs[index].stage = stage
-            jobs[index].progressCurrent = nil
-            jobs[index].progressTotal = nil
-            jobs[index].progressUnit = nil
+            // Keep progress bar values across stage transitions so the bar
+            // does not reset to indeterminate while a long segment runs.
             persistJobs()
         case let .progress(current, total, unit):
             jobs[index].progressCurrent = current
@@ -845,6 +949,7 @@ final class AppViewModel: ObservableObject {
         jobs[index].stage = .cancelled
         jobs[index].progressCurrent = nil
         jobs[index].progressTotal = nil
+        jobs[index].progressUnit = nil
         jobs[index].completedAt = Date()
         jobs[index].failure = nil
         jobs[index].logLines.append("工作已取消。")
@@ -862,6 +967,7 @@ final class AppViewModel: ObservableObject {
         jobs[index].stage = .failed
         jobs[index].progressCurrent = nil
         jobs[index].progressTotal = nil
+        jobs[index].progressUnit = nil
         jobs[index].completedAt = Date()
         jobs[index].failure = JobFailure(
             stage: stage,
@@ -905,12 +1011,187 @@ final class AppViewModel: ObservableObject {
     }
 
     private var selectedModelRevision: String? {
-        let descriptor = CPUArchitecture.current == .x86_64
-            ? ASRModelDescriptor.intelDefault
-            : ASRModelDescriptor.appleSiliconDefault
-        return settings.selectedModelID == descriptor.id
-            ? descriptor.revision
-            : nil
+        ASRModelDescriptor.revision(forModelID: settings.selectedModelID)
+    }
+
+    private func performModelDownload(modelID: String, revision: String?) async {
+        modelDownloadProgressLine = ""
+        do {
+            try paths.createDirectories(fileManager: fileManager)
+        } catch {
+            modelDownloadPhase = .failed("無法建立模型資料夾：\(error.localizedDescription)")
+            return
+        }
+
+        if ModelCache.isDownloaded(
+            modelID: modelID,
+            revision: revision,
+            modelsDirectory: paths.models,
+            fileManager: fileManager
+        ) {
+            isSelectedModelCached = true
+            modelDownloadPhase = .succeeded("App 模型目錄已有此模型。")
+            modelDownloadProgressLine = ""
+            return
+        }
+
+        if ModelCache.isDownloadedInDefaultCache(
+            modelID: modelID,
+            revision: revision,
+            fileManager: fileManager
+        ) {
+            modelDownloadPhase = .importingLocal
+            modelDownloadProgressLine = "正在從 ~/.cache/huggingface 匯入…"
+            do {
+                try importModelFromDefaultHFCache(modelID: modelID)
+                refreshSelectedModelCacheStatus()
+                if isSelectedModelCached {
+                    modelDownloadPhase = .succeeded("已從本機 Hugging Face cache 匯入。")
+                    modelDownloadProgressLine = ""
+                    return
+                }
+            } catch {
+                modelDownloadProgressLine =
+                    "本機匯入失敗，改從網路下載：\(error.localizedDescription)"
+            }
+        }
+
+        modelDownloadPhase = .downloading
+        if modelDownloadProgressLine.isEmpty {
+            modelDownloadProgressLine = "正在下載 \(modelID)…"
+        }
+
+        let runtime = runtimeCandidate()
+        guard fileManager.isExecutableFile(atPath: runtime.python.path) else {
+            modelDownloadPhase = .failed(
+                "找不到 Python（\(runtime.python.path)）。請開啟 Developer Mode 並準備 mlx-audio-env。"
+            )
+            return
+        }
+
+        let script = """
+        import sys
+        from huggingface_hub import snapshot_download
+
+        repo_id = sys.argv[1]
+        revision = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None
+        kwargs = {"repo_id": repo_id}
+        if revision:
+            kwargs["revision"] = revision
+        path = snapshot_download(**kwargs)
+        print(path)
+        """
+
+        let environment = modelDownloadEnvironment(modelsDirectory: paths.models)
+        var arguments = ["-u", "-c", script, modelID]
+        if let revision, !revision.isEmpty {
+            arguments.append(revision)
+        } else {
+            arguments.append("")
+        }
+
+        do {
+            _ = try await modelDownloadRunner.run(
+                executableURL: runtime.python,
+                arguments: arguments,
+                environment: environment,
+                requireSuccess: true,
+                stdoutLineHandler: { [weak self] line in
+                    Task { @MainActor in
+                        self?.modelDownloadProgressLine = line
+                    }
+                },
+                stderrLineHandler: { [weak self] line in
+                    Task { @MainActor in
+                        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !trimmed.isEmpty else {
+                            return
+                        }
+                        self?.modelDownloadProgressLine = trimmed
+                    }
+                }
+            )
+            refreshSelectedModelCacheStatus()
+            if isSelectedModelCached {
+                modelDownloadPhase = .succeeded("模型已下載到 App 模型目錄。")
+            } else {
+                modelDownloadPhase = .failed(
+                    "下載程序結束，但 App 模型目錄仍找不到完整 snapshot。請再試一次。"
+                )
+            }
+        } catch is CancellationError {
+            modelDownloadPhase = .idle
+            modelDownloadProgressLine = "已取消下載。"
+        } catch {
+            if Task.isCancelled {
+                modelDownloadPhase = .idle
+                modelDownloadProgressLine = "已取消下載。"
+            } else {
+                modelDownloadPhase = .failed(error.localizedDescription)
+            }
+        }
+        refreshSelectedModelCacheStatus()
+    }
+
+    private func importModelFromDefaultHFCache(modelID: String) throws {
+        let source = ModelCache.repositoryDirectory(
+            modelID: modelID,
+            hubRoot: ModelCache.defaultHuggingFaceHub(fileManager: fileManager)
+        )
+        let destinationRoot = ModelCache.hubRoot(modelsDirectory: paths.models)
+        let destination = ModelCache.repositoryDirectory(
+            modelID: modelID,
+            hubRoot: destinationRoot
+        )
+
+        guard fileManager.fileExists(atPath: source.path) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+
+        try fileManager.createDirectory(
+            at: destinationRoot,
+            withIntermediateDirectories: true
+        )
+        if fileManager.fileExists(atPath: destination.path) {
+            try fileManager.removeItem(at: destination)
+        }
+        try fileManager.copyItem(at: source, to: destination)
+    }
+
+    private func modelDownloadEnvironment(modelsDirectory: URL) -> [String: String] {
+        let inherited = ProcessInfo.processInfo.environment
+        var environment: [String: String] = [:]
+        for key in [
+            "HOME",
+            "TMPDIR",
+            "LANG",
+            "LC_ALL",
+            "TZ",
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "HF_TOKEN",
+            "HUGGING_FACE_HUB_TOKEN"
+        ] {
+            if let value = inherited[key], !value.isEmpty {
+                environment[key] = value
+            }
+        }
+        let pathParts = [
+            runtimeCandidate().python.deletingLastPathComponent().path,
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin"
+        ]
+        environment["PATH"] = pathParts.joined(separator: ":")
+        environment["HF_HOME"] = modelsDirectory.path
+        environment["HF_HUB_CACHE"] = ModelCache.hubRoot(modelsDirectory: modelsDirectory).path
+        environment["PYTHONUNBUFFERED"] = "1"
+        environment["PYTHONNOUSERSITE"] = "1"
+        environment["PYTHONUTF8"] = "1"
+        environment["HF_HUB_DISABLE_TELEMETRY"] = "1"
+        environment["HF_HUB_DISABLE_PROGRESS_BARS"] = "0"
+        return environment
     }
 
     private func chooseDirectory(title: String, initialPath: String?) -> URL? {

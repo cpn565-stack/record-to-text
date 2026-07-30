@@ -200,7 +200,15 @@ public final class TranscriptionEngine {
                 destinationURL: normalizedAudioURL,
                 duration: metadata.duration
             ) { current, total in
-                update(.progress(current: current, total: total, unit: "seconds"))
+                // Audio conversion is a small prefix of overall work.
+                let fraction = total > 0 ? min(max(current / total, 0), 1) : 0
+                update(
+                    .progress(
+                        current: fraction * 5,
+                        total: 100,
+                        unit: "percent"
+                    )
+                )
             }
 
             if segmentPlan.requiresSplitting {
@@ -256,10 +264,11 @@ public final class TranscriptionEngine {
                     let record = segmentManifest.segments[segment.index - 1]
                     do {
                         update(
-                            .progress(
-                                current: Double(segment.index),
-                                total: Double(segmentPlan.expectedSegmentCount),
-                                unit: "segments"
+                            overallProgress(
+                                segmentIndex: segment.index,
+                                segmentCount: segmentPlan.expectedSegmentCount,
+                                withinSegment: 0,
+                                requiresSplitting: true
                             )
                         )
                         update(
@@ -320,6 +329,7 @@ public final class TranscriptionEngine {
                         segment.requestFileName
                     )
                     : requestURL
+                let withinSegmentProgress = SegmentProgressBox()
 
                 if segment.index == 1 {
                     currentStage.set(.loadingModel)
@@ -332,14 +342,16 @@ public final class TranscriptionEngine {
                             message: "正在轉錄第 \(segment.index)／\(segmentPlan.expectedSegmentCount) 段。"
                         )
                     )
-                    update(
-                        .progress(
-                            current: Double(segment.index),
-                            total: Double(segmentPlan.expectedSegmentCount),
-                            unit: "segments"
-                        )
-                    )
                 }
+                // Start of segment N = completed N-1 segments (not N/N full bar).
+                update(
+                    overallProgress(
+                        segmentIndex: segment.index,
+                        segmentCount: segmentPlan.expectedSegmentCount,
+                        withinSegment: 0,
+                        requiresSplitting: segmentPlan.requiresSplitting
+                    )
+                )
                 try segmentManifest.mark(
                     segmentIndex: segment.index,
                     status: .transcribing
@@ -412,27 +424,44 @@ public final class TranscriptionEngine {
                                 currentStage.set(stage)
                             }
                         }
+                        if event.type == "progress",
+                           let current = event.current,
+                           let total = event.total,
+                           total > 0
+                        {
+                            withinSegmentProgress.value = min(
+                                max(current / total, 0),
+                                1
+                            )
+                            update(
+                                self.overallProgress(
+                                    segmentIndex: segment.index,
+                                    segmentCount: segmentPlan.expectedSegmentCount,
+                                    withinSegment: withinSegmentProgress.value,
+                                    requiresSplitting: segmentPlan.requiresSplitting
+                                )
+                            )
+                            shouldForward = false
+                        } else if
+                            segmentPlan.requiresSplitting,
+                            event.type == "stage" || event.type == "heartbeat"
+                        {
+                            // Keep the bar at the current segment floor while
+                            // waiting for finer helper progress events.
+                            update(
+                                self.overallProgress(
+                                    segmentIndex: segment.index,
+                                    segmentCount: segmentPlan.expectedSegmentCount,
+                                    withinSegment: withinSegmentProgress.value,
+                                    requiresSplitting: true
+                                )
+                            )
+                        }
                         if shouldForward {
                             self.forward(
                                 event: event,
-                                suppressProgress: segmentPlan.requiresSplitting,
+                                suppressProgress: true,
                                 update: update
-                            )
-                        }
-                        if
-                            segmentPlan.requiresSplitting,
-                            event.type == "stage"
-                                || event.type == "progress"
-                                || event.type == "heartbeat"
-                        {
-                            update(
-                                .progress(
-                                    current: Double(segment.index),
-                                    total: Double(
-                                        segmentPlan.expectedSegmentCount
-                                    ),
-                                    unit: "segments"
-                                )
                             )
                         }
                     }
@@ -451,15 +480,14 @@ public final class TranscriptionEngine {
                         segmentManifest,
                         to: segmentManifestURL
                     )
-                    if segmentPlan.requiresSplitting {
-                        update(
-                            .progress(
-                                current: Double(segment.index),
-                                total: Double(segmentPlan.expectedSegmentCount),
-                                unit: "segments"
-                            )
+                    update(
+                        overallProgress(
+                            segmentIndex: segment.index,
+                            segmentCount: segmentPlan.expectedSegmentCount,
+                            withinSegment: 1,
+                            requiresSplitting: segmentPlan.requiresSplitting
                         )
-                    }
+                    )
                 } catch {
                     livenessTask.cancel()
                     try? segmentManifest.mark(
@@ -496,6 +524,7 @@ public final class TranscriptionEngine {
                 return text
             }.joined(separator: "\n")
             try AtomicFileWriter.writeText(mergedRawText, to: rawTranscriptURL)
+            update(.progress(current: 95, total: 100, unit: "percent"))
 
             try Task.checkCancellation()
             currentStage.set(.convertingTraditionalChinese)
@@ -504,6 +533,7 @@ public final class TranscriptionEngine {
                 sourceURL: rawTranscriptURL,
                 destinationURL: convertedTranscriptURL
             )
+            update(.progress(current: 98, total: 100, unit: "percent"))
 
             try Task.checkCancellation()
             currentStage.set(.writingOutput)
@@ -515,8 +545,9 @@ public final class TranscriptionEngine {
                 convertedText,
                 sourceURL: sourceURL,
                 directory: outputDirectory,
-                suffix: "_繁體"
+                suffix: job.snapshot.outputFilenameSuffix
             )
+            update(.progress(current: 100, total: 100, unit: "percent"))
 
             var preservedRawURL: URL?
             if job.snapshot.keepRawTranscript {
@@ -528,7 +559,7 @@ public final class TranscriptionEngine {
                         rawText,
                         sourceURL: sourceURL,
                         directory: outputDirectory,
-                        suffix: "_Qwen原始"
+                        suffix: job.snapshot.rawFilenameSuffix
                     )
                 } catch {
                     update(
@@ -680,6 +711,51 @@ public final class TranscriptionEngine {
         }
     }
 
+    /// Maps segment-local progress into a continuous 0…100% job bar.
+    ///
+    /// Budget: 0–5% conversion, 5–95% ASR (split evenly across segments),
+    /// 95–100% traditional conversion and write. Starting segment N uses
+    /// completed (N-1) segments so the bar is never full at the start of
+    /// the final segment.
+    private func overallProgress(
+        segmentIndex: Int,
+        segmentCount: Int,
+        withinSegment: Double,
+        requiresSplitting: Bool
+    ) -> PipelineUpdate {
+        let count = max(segmentCount, 1)
+        let within = min(max(withinSegment, 0), 1)
+        let asrStart = 5.0
+        let asrSpan = 90.0
+        let segmentSpan = asrSpan / Double(count)
+        let completedSegments = Double(max(segmentIndex - 1, 0))
+        let current = asrStart + (completedSegments + within) * segmentSpan
+        let unit: String
+        if requiresSplitting {
+            unit = "percent|\(segmentIndex)|\(count)"
+        } else {
+            unit = "percent"
+        }
+        return .progress(
+            current: min(max(current, 0), 95),
+            total: 100,
+            unit: unit
+        )
+    }
+}
+
+/// Thread-safe holder for in-segment progress while helper events arrive.
+private final class SegmentProgressBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = 0.0
+
+    var value: Double {
+        get { lock.withLock { storage } }
+        set { lock.withLock { storage = newValue } }
+    }
+}
+
+extension TranscriptionEngine {
     private func writeSegmentManifest(
         _ manifest: AudioSegmentManifest,
         to destinationURL: URL

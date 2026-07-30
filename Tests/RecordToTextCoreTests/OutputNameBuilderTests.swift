@@ -64,4 +64,48 @@ final class OutputNameBuilderTests: XCTestCase {
 
         XCTAssertEqual(output.lastPathComponent, "訪談_Qwen原始_2.txt")
     }
+
+    func testCustomSuffixAndPreview() {
+        let source = URL(fileURLWithPath: "/tmp/訪談.m4a")
+        let output = OutputNameBuilder.availableOutputURL(
+            sourceURL: source,
+            directory: URL(fileURLWithPath: "/tmp/output", isDirectory: true),
+            suffix: "_逐字稿",
+            fileExists: { _ in false }
+        )
+
+        XCTAssertEqual(output.lastPathComponent, "訪談_逐字稿.txt")
+        XCTAssertEqual(
+            OutputNameBuilder.previewFileName(suffix: "_會議紀錄"),
+            "原檔名_會議紀錄.txt"
+        )
+        XCTAssertEqual(
+            OutputNameBuilder.sanitizedSuffix("  a/b:c  ", fallback: "_繁體"),
+            "abc"
+        )
+        XCTAssertEqual(
+            OutputNameBuilder.sanitizedSuffix("   ", fallback: "_繁體"),
+            "_繁體"
+        )
+    }
+
+    func testJobSnapshotDecodesMissingFilenameSuffixWithDefaults() throws {
+        let json = """
+        {
+          "modelID": "mock/model",
+          "language": "Chinese",
+          "glossaryID": null,
+          "glossaryName": null,
+          "terms": [],
+          "prompt": "忠實轉錄",
+          "outputLocationMode": "fixedDirectory",
+          "outputDirectory": "/tmp/output",
+          "keepRawTranscript": false
+        }
+        """.data(using: .utf8)!
+
+        let snapshot = try JSONDecoder().decode(JobSnapshot.self, from: json)
+        XCTAssertEqual(snapshot.outputFilenameSuffix, "_繁體")
+        XCTAssertEqual(snapshot.rawFilenameSuffix, "_Qwen原始")
+    }
 }

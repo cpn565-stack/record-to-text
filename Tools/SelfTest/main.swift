@@ -154,6 +154,50 @@ tests.check(
 )
 
 tests.check(
+    {
+        let bf16 = ASRModelDescriptor.appleSiliconBF16
+        let catalog = ASRModelDescriptor.available(for: .arm64)
+        return catalog.contains(where: { $0.id == bf16.id })
+            && ASRModelDescriptor.revision(forModelID: bf16.id) == bf16.revision
+            && (bf16.revision?.count == 40)
+    }(),
+    "Apple Silicon catalog includes Qwen3-ASR 1.7B BF16 with pinned revision"
+)
+
+tests.check(
+    {
+        do {
+            let modelID = "mlx-community/Qwen3-ASR-1.7B-bf16"
+            let revision = "e1f6c266914abc5a46e8756e02580f834a6cf8a7"
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("record-to-text-selftest-model-\(UUID().uuidString)")
+            defer { try? FileManager.default.removeItem(at: root) }
+            let models = root.appendingPathComponent("Models", isDirectory: true)
+            let snapshot = ModelCache.hubRoot(modelsDirectory: models)
+                .appendingPathComponent(ModelCache.repositoryFolderName(modelID: modelID))
+                .appendingPathComponent("snapshots")
+                .appendingPathComponent(revision)
+            try FileManager.default.createDirectory(
+                at: snapshot,
+                withIntermediateDirectories: true
+            )
+            try Data("{}".utf8).write(to: snapshot.appendingPathComponent("config.json"))
+            try Data("w".utf8).write(to: snapshot.appendingPathComponent("model.safetensors"))
+            return ModelCache.isDownloaded(
+                modelID: modelID,
+                revision: revision,
+                modelsDirectory: models
+            )
+                && ModelCache.repositoryFolderName(modelID: modelID)
+                == "models--mlx-community--Qwen3-ASR-1.7B-bf16"
+        } catch {
+            return false
+        }
+    }(),
+    "ModelCache detects App-managed hub snapshots"
+)
+
+tests.check(
     try {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("record-to-text-text-validator-\(UUID().uuidString)")

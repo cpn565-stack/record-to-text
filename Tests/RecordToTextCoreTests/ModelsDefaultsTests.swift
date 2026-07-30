@@ -10,6 +10,43 @@ final class ModelsDefaultsTests: XCTestCase {
         XCTAssertEqual(model.displayName, "Qwen3-ASR 1.7B 8-bit")
         XCTAssertEqual(model.architecture, .arm64)
         XCTAssertFalse(model.isExperimental)
+        XCTAssertEqual(model.revision?.count, 40)
+    }
+
+    func testAppleSiliconBF16ModelIsSelectableWithPinnedRevision() {
+        let model = ASRModelDescriptor.appleSiliconBF16
+
+        XCTAssertEqual(model.id, "mlx-community/Qwen3-ASR-1.7B-bf16")
+        XCTAssertEqual(model.displayName, "Qwen3-ASR 1.7B BF16")
+        XCTAssertEqual(model.architecture, .arm64)
+        XCTAssertFalse(model.isExperimental)
+        XCTAssertEqual(
+            model.revision,
+            "e1f6c266914abc5a46e8756e02580f834a6cf8a7"
+        )
+        XCTAssertEqual(
+            ASRModelDescriptor.revision(forModelID: model.id),
+            model.revision
+        )
+    }
+
+    func testAppleSiliconCatalogIncludesDefaultAndBF16() {
+        let ids = ASRModelDescriptor.available(for: .arm64).map(\.id)
+
+        XCTAssertEqual(
+            ids,
+            [
+                ASRModelDescriptor.appleSiliconDefault.id,
+                ASRModelDescriptor.appleSiliconBF16.id,
+                ASRModelDescriptor.appleSilicon0_6B8bit.id
+            ]
+        )
+        XCTAssertEqual(
+            ASRModelDescriptor.descriptor(
+                id: ASRModelDescriptor.appleSiliconBF16.id
+            )?.displayName,
+            "Qwen3-ASR 1.7B BF16"
+        )
     }
 
     func testIntelModelDefaultIsExperimentalCPUModel() {

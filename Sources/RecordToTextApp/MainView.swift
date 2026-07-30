@@ -385,12 +385,10 @@ private struct JobRowView: View {
                             .font(.caption)
                             .foregroundStyle(statusColor)
 
+                        // Only show a live timer while the job is running.
+                        // Completed jobs stay as plain「完成」with no counting clock.
                         if job.id == viewModel.activeJobID {
                             JobElapsedView(startedAt: job.startedAt)
-                        } else if let completedAt = job.completedAt {
-                            Text(completedAt, style: .relative)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
                         }
                     }
                 }
@@ -403,18 +401,11 @@ private struct JobRowView: View {
                let total = job.progressTotal,
                total > 0 {
                 ProgressView(value: min(current, total), total: total) {
-                    if let unit = job.progressUnit {
-                        if unit == "segments" {
-                            Text("第 \(current.formatted(.number.precision(.fractionLength(0))))／\(total.formatted(.number.precision(.fractionLength(0)))) 段")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        } else {
-                            Text("\(current.formatted(.number.precision(.fractionLength(0)))) / \(total.formatted(.number.precision(.fractionLength(0)))) \(unit)")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
+                    Text(progressLabel(current: current, total: total, unit: job.progressUnit))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
+                .animation(.easeInOut(duration: 0.2), value: current)
             } else if job.id == viewModel.activeJobID {
                 ProgressView()
                     .controlSize(.small)
@@ -546,6 +537,25 @@ private struct JobRowView: View {
         }
     }
 
+    private func progressLabel(current: Double, total: Double, unit: String?) -> String {
+        let rawUnit = unit ?? ""
+        if rawUnit == "percent" || rawUnit.hasPrefix("percent|") {
+            let percent = Int(min(max(current, 0), total).rounded())
+            let parts = rawUnit.split(separator: "|", omittingEmptySubsequences: false)
+            if parts.count == 3, let segment = Int(parts[1]), let count = Int(parts[2]) {
+                return "整體 \(percent)% · 第 \(segment)／\(count) 段"
+            }
+            return "整體 \(percent)%"
+        }
+        if rawUnit == "segments" {
+            return "第 \(Int(current.rounded()))／\(Int(total.rounded())) 段"
+        }
+        if rawUnit.isEmpty {
+            return "\(Int(current.rounded())) / \(Int(total.rounded()))"
+        }
+        return "\(Int(current.rounded())) / \(Int(total.rounded())) \(rawUnit)"
+    }
+
     private var statusSymbol: String {
         switch job.stage {
         case .completed:
@@ -619,11 +629,6 @@ private struct RecentJobRow: View {
                     Text(summary.stage.displayName)
                         .font(.caption)
                         .foregroundStyle(statusColor)
-                    if let completedAt = summary.completedAt {
-                        Text(completedAt, style: .relative)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
                     if let glossaryName = summary.glossaryName {
                         Text("・\(glossaryName)")
                             .font(.caption)

@@ -22,27 +22,52 @@ public struct ASRModelDescriptor: Codable, Equatable, Identifiable, Sendable {
     public let displayName: String
     public let architecture: CPUArchitecture
     public let isExperimental: Bool
+    public let detail: String?
 
     public init(
         id: String,
         revision: String? = nil,
         displayName: String,
         architecture: CPUArchitecture,
-        isExperimental: Bool
+        isExperimental: Bool,
+        detail: String? = nil
     ) {
         self.id = id
         self.revision = revision
         self.displayName = displayName
         self.architecture = architecture
         self.isExperimental = isExperimental
+        self.detail = detail
     }
 
+    /// Default Apple Silicon model: smaller download, good quality.
     public static let appleSiliconDefault = ASRModelDescriptor(
         id: "mlx-community/Qwen3-ASR-1.7B-8bit",
         revision: "a8379a2e2f9e313c9292cdf1af4055ab56d50d55",
         displayName: "Qwen3-ASR 1.7B 8-bit",
         architecture: .arm64,
-        isExperimental: false
+        isExperimental: false,
+        detail: "預設。體積較小，適合日常會議轉錄。"
+    )
+
+    /// Full-precision MLX build of the 1.7B model.
+    public static let appleSiliconBF16 = ASRModelDescriptor(
+        id: "mlx-community/Qwen3-ASR-1.7B-bf16",
+        revision: "e1f6c266914abc5a46e8756e02580f834a6cf8a7",
+        displayName: "Qwen3-ASR 1.7B BF16",
+        architecture: .arm64,
+        isExperimental: false,
+        detail: "完整精度。下載與記憶體需求較大。"
+    )
+
+    /// Smaller Apple Silicon option for constrained machines.
+    public static let appleSilicon0_6B8bit = ASRModelDescriptor(
+        id: "mlx-community/Qwen3-ASR-0.6B-8bit",
+        revision: "89e96d92ba34aca20b3e29fb10cc284097d1219f",
+        displayName: "Qwen3-ASR 0.6B 8-bit",
+        architecture: .arm64,
+        isExperimental: false,
+        detail: "較小較快，長會議品質通常不如 1.7B。"
     )
 
     public static let intelDefault = ASRModelDescriptor(
@@ -50,11 +75,39 @@ public struct ASRModelDescriptor: Codable, Equatable, Identifiable, Sendable {
         revision: "5eb144179a02acc5e5ba31e748d22b0cf3e303b0",
         displayName: "Qwen3-ASR 0.6B CPU",
         architecture: .x86_64,
-        isExperimental: true
+        isExperimental: true,
+        detail: "Experimental。尚未通過 Intel 真機驗證。"
     )
 
     public static var currentDefault: ASRModelDescriptor {
         CPUArchitecture.current == .x86_64 ? .intelDefault : .appleSiliconDefault
+    }
+
+    /// Built-in selectable models for the given architecture.
+    public static func available(for architecture: CPUArchitecture) -> [ASRModelDescriptor] {
+        switch architecture {
+        case .arm64, .unknown:
+            return [
+                .appleSiliconDefault,
+                .appleSiliconBF16,
+                .appleSilicon0_6B8bit
+            ]
+        case .x86_64:
+            return [.intelDefault]
+        }
+    }
+
+    public static var currentAvailable: [ASRModelDescriptor] {
+        available(for: .current)
+    }
+
+    public static func descriptor(id: String) -> ASRModelDescriptor? {
+        let all = available(for: .arm64) + available(for: .x86_64)
+        return all.first { $0.id == id }
+    }
+
+    public static func revision(forModelID modelID: String) -> String? {
+        descriptor(id: modelID)?.revision
     }
 }
 
@@ -89,6 +142,10 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var openTextWhenCompleted: Bool
     public var showNotificationWhenCompleted: Bool
     public var keepRawTranscript: Bool
+    /// Optional so older settings.json without this key still decodes.
+    public var outputFilenameSuffix: String?
+    /// Optional so older settings.json without this key still decodes.
+    public var rawFilenameSuffix: String?
     public var recentJobLimit: Int
     public var developerMode: Bool
     public var customPythonPath: String?
@@ -112,6 +169,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         openTextWhenCompleted: Bool = false,
         showNotificationWhenCompleted: Bool = true,
         keepRawTranscript: Bool = false,
+        outputFilenameSuffix: String? = OutputNameBuilder.defaultFinalSuffix,
+        rawFilenameSuffix: String? = OutputNameBuilder.defaultRawSuffix,
         recentJobLimit: Int = 10,
         developerMode: Bool = false,
         customPythonPath: String? = nil,
@@ -131,11 +190,27 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.openTextWhenCompleted = openTextWhenCompleted
         self.showNotificationWhenCompleted = showNotificationWhenCompleted
         self.keepRawTranscript = keepRawTranscript
+        self.outputFilenameSuffix = outputFilenameSuffix
+        self.rawFilenameSuffix = rawFilenameSuffix
         self.recentJobLimit = recentJobLimit
         self.developerMode = developerMode
         self.customPythonPath = customPythonPath
         self.customHelperPath = customHelperPath
         self.hasCompletedOnboarding = hasCompletedOnboarding
+    }
+
+    public var resolvedOutputFilenameSuffix: String {
+        OutputNameBuilder.sanitizedSuffix(
+            outputFilenameSuffix,
+            fallback: OutputNameBuilder.defaultFinalSuffix
+        )
+    }
+
+    public var resolvedRawFilenameSuffix: String {
+        OutputNameBuilder.sanitizedSuffix(
+            rawFilenameSuffix,
+            fallback: OutputNameBuilder.defaultRawSuffix
+        )
     }
 
     public static func defaultValue(
@@ -265,6 +340,8 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
     public let outputLocationMode: OutputLocationMode
     public let outputDirectory: String
     public let keepRawTranscript: Bool
+    public let outputFilenameSuffix: String
+    public let rawFilenameSuffix: String
 
     public init(
         modelID: String,
@@ -276,7 +353,9 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
         prompt: String,
         outputLocationMode: OutputLocationMode,
         outputDirectory: String,
-        keepRawTranscript: Bool
+        keepRawTranscript: Bool,
+        outputFilenameSuffix: String = OutputNameBuilder.defaultFinalSuffix,
+        rawFilenameSuffix: String = OutputNameBuilder.defaultRawSuffix
     ) {
         self.modelID = modelID
         self.modelRevision = modelRevision
@@ -288,6 +367,39 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
         self.outputLocationMode = outputLocationMode
         self.outputDirectory = outputDirectory
         self.keepRawTranscript = keepRawTranscript
+        self.outputFilenameSuffix = OutputNameBuilder.sanitizedSuffix(
+            outputFilenameSuffix,
+            fallback: OutputNameBuilder.defaultFinalSuffix
+        )
+        self.rawFilenameSuffix = OutputNameBuilder.sanitizedSuffix(
+            rawFilenameSuffix,
+            fallback: OutputNameBuilder.defaultRawSuffix
+        )
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        modelID = try container.decode(String.self, forKey: .modelID)
+        modelRevision = try container.decodeIfPresent(String.self, forKey: .modelRevision)
+        language = try container.decodeIfPresent(String.self, forKey: .language) ?? "Chinese"
+        glossaryID = try container.decodeIfPresent(String.self, forKey: .glossaryID)
+        glossaryName = try container.decodeIfPresent(String.self, forKey: .glossaryName)
+        terms = try container.decode([String].self, forKey: .terms)
+        prompt = try container.decode(String.self, forKey: .prompt)
+        outputLocationMode = try container.decode(
+            OutputLocationMode.self,
+            forKey: .outputLocationMode
+        )
+        outputDirectory = try container.decode(String.self, forKey: .outputDirectory)
+        keepRawTranscript = try container.decode(Bool.self, forKey: .keepRawTranscript)
+        outputFilenameSuffix = OutputNameBuilder.sanitizedSuffix(
+            try container.decodeIfPresent(String.self, forKey: .outputFilenameSuffix),
+            fallback: OutputNameBuilder.defaultFinalSuffix
+        )
+        rawFilenameSuffix = OutputNameBuilder.sanitizedSuffix(
+            try container.decodeIfPresent(String.self, forKey: .rawFilenameSuffix),
+            fallback: OutputNameBuilder.defaultRawSuffix
+        )
     }
 }
 

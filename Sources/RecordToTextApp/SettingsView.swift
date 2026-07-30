@@ -28,7 +28,7 @@ struct SettingsView: View {
                 }
         }
         .padding(20)
-        .frame(width: 620, height: 470)
+        .frame(width: 640, height: 520)
         .confirmationDialog(
             "重設 record-to-text？",
             isPresented: Binding(
@@ -121,14 +121,74 @@ struct SettingsView: View {
             }
 
             Section("檔案") {
-                LabeledContent("最終文字檔") {
-                    Text("原檔名_繁體.txt")
-                        .foregroundStyle(.secondary)
+                TextField(
+                    "檔名後綴",
+                    text: Binding(
+                        get: {
+                            viewModel.settings.outputFilenameSuffix
+                                ?? OutputNameBuilder.defaultFinalSuffix
+                        },
+                        set: { newValue in
+                            viewModel.setSetting(
+                                \.outputFilenameSuffix,
+                                to: OutputNameBuilder.sanitizedSuffix(
+                                    newValue,
+                                    fallback: OutputNameBuilder.defaultFinalSuffix
+                                )
+                            )
+                        }
+                    )
+                )
+                .textFieldStyle(.roundedBorder)
+
+                LabeledContent("預覽") {
+                    Text(
+                        OutputNameBuilder.previewFileName(
+                            suffix: viewModel.settings.resolvedOutputFilenameSuffix
+                        )
+                    )
+                    .font(.body.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
                 }
-                LabeledContent("同名檔案") {
-                    Text("自動加上 _2、_3…")
+
+                if viewModel.settings.keepRawTranscript {
+                    TextField(
+                        "原始稿後綴",
+                        text: Binding(
+                            get: {
+                                viewModel.settings.rawFilenameSuffix
+                                    ?? OutputNameBuilder.defaultRawSuffix
+                            },
+                            set: { newValue in
+                                viewModel.setSetting(
+                                    \.rawFilenameSuffix,
+                                    to: OutputNameBuilder.sanitizedSuffix(
+                                        newValue,
+                                        fallback: OutputNameBuilder.defaultRawSuffix
+                                    )
+                                )
+                            }
+                        )
+                    )
+                    .textFieldStyle(.roundedBorder)
+
+                    LabeledContent("原始稿預覽") {
+                        Text(
+                            OutputNameBuilder.previewFileName(
+                                suffix: viewModel.settings.resolvedRawFilenameSuffix
+                            )
+                        )
+                        .font(.caption.monospaced())
                         .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                    }
                 }
+
+                Text("規則：原檔名 + 後綴 + .txt。若檔名已存在，自動加上 _2、_3…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
                 LabeledContent("格式") {
                     Text("UTF-8・LF・無 BOM")
                         .foregroundStyle(.secondary)
@@ -144,19 +204,88 @@ struct SettingsView: View {
                 LabeledContent("電腦") {
                     Text(CPUArchitecture.current == .x86_64 ? "Intel" : "Apple Silicon")
                 }
-                LabeledContent("模型") {
-                    Text(viewModel.selectedModelName)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.trailing)
-                }
-                TextField(
-                    "模型 ID",
-                    text: Binding(
+
+                Picker(
+                    "模型",
+                    selection: Binding(
                         get: { viewModel.settings.selectedModelID },
                         set: { viewModel.setSelectedModelID($0) }
                     )
-                )
-                .textFieldStyle(.roundedBorder)
+                ) {
+                    ForEach(viewModel.availableModels) { model in
+                        Text(model.displayName).tag(model.id)
+                    }
+                    if !viewModel.availableModels.contains(where: {
+                        $0.id == viewModel.settings.selectedModelID
+                    }) {
+                        Text(viewModel.settings.selectedModelID)
+                            .tag(viewModel.settings.selectedModelID)
+                    }
+                }
+                .disabled(viewModel.modelDownloadPhase.isBusy)
+
+                HStack(spacing: 10) {
+                    Button(viewModel.modelDownloadButtonTitle) {
+                        viewModel.downloadSelectedModel()
+                    }
+                    .disabled(!viewModel.canDownloadSelectedModel)
+
+                    if viewModel.modelDownloadPhase.isBusy {
+                        ProgressView()
+                            .controlSize(.small)
+                        Button("取消") {
+                            viewModel.cancelModelDownload()
+                        }
+                    } else if viewModel.isSelectedModelCached {
+                        Label("App 模型目錄已就緒", systemImage: "checkmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    } else if viewModel.isSelectedModelInDefaultHFCache {
+                        Label("本機 Hugging Face cache 可匯入", systemImage: "externaldrive.fill.badge.checkmark")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                LabeledContent("模型 ID") {
+                    Text(viewModel.settings.selectedModelID)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .multilineTextAlignment(.trailing)
+                }
+
+                if let detail = viewModel.selectedModelDetail {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if !viewModel.modelDownloadProgressLine.isEmpty {
+                    Text(viewModel.modelDownloadProgressLine)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .lineLimit(4)
+                }
+
+                switch viewModel.modelDownloadPhase {
+                case let .succeeded(message):
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                case let .failed(message):
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .textSelection(.enabled)
+                case .idle, .importingLocal, .downloading:
+                    EmptyView()
+                }
+
+                Text("下載位置：App 的 Models 目錄。若 ~/.cache/huggingface 已有同模型，會優先本機匯入，避免重複下載。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
                 if CPUArchitecture.current == .x86_64 {
                     Label(
@@ -165,7 +294,16 @@ struct SettingsView: View {
                     )
                     .font(.caption)
                     .foregroundStyle(.orange)
+                } else if viewModel.settings.selectedModelID
+                    == ASRModelDescriptor.appleSiliconBF16.id
+                {
+                    Text("BF16 體積較大，並需要更多統一記憶體。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
+            }
+            .onAppear {
+                viewModel.refreshSelectedModelCacheStatus()
             }
 
             Section("Developer Mode") {
