@@ -1,24 +1,32 @@
 # record-to-text
 
-`record-to-text` 是一個原生 macOS 本機會議轉錄工具。使用者先準備專有名詞，再拖入 M4A、MP3、WAV、AAC 或 FLAC；App 依序執行 ffmpeg、Qwen3-ASR、OpenCC，最後輸出 UTF-8 台灣繁體 TXT。
+本機會議錄音 → 台灣繁體逐字稿。
 
-目前狀態：**Phase 0 / Apple Silicon Developer Mode MVP，尚不是 v1.0 Stable。**
+`record-to-text` 是原生 macOS App：把 M4A / MP3 / WAV / AAC / FLAC 拖進去，先整理專有名詞，再在本機完成轉錄。管線依序是 **ffmpeg → Qwen3-ASR → OpenCC**，輸出 UTF-8 繁體 TXT；音檔與文字都留在你的電腦上，不經過雲端。
+
+| | |
+| --- | --- |
+| **現況** | Phase 0 / Apple Silicon Developer Mode MVP |
+| **目標平台** | Apple Silicon（macOS 14+） |
+| **Intel** | 不做正式支援（僅保留 Experimental 骨架，未驗證） |
+| **不是** | v1.0 Stable、已公證 DMG、或已驗證的真實長會議產品 |
+
+適合：開發者本機試用、管線驗證、後續加 Runtime／簽署前的工程基底。  
+不適合：直接發給一般使用者當正式軟體。
 
 ## 現在已經有什麼
 
-- 原生 SwiftUI macOS App 原始碼。
+- 原生 SwiftUI macOS App。
 - 專有名詞解析、去重、Prompt 預覽與工作 Snapshot。
-- 拖放、NSOpenPanel 多選、單工佇列、取消、錯誤與最近工作。
-- `ffprobe -> ffmpeg -> ASR helper -> OpenCC -> 原子 TXT` 管線。
-- 超過 30 分鐘時由 coordinator 產生編號 WAV、逐段獨立 ASR，全部片段通過 manifest gate 後才依序合併。
-- MLX-Audio Apple Silicon helper；Prompt 走 Qwen3-ASR 的 `system_prompt`，不支援時 fail closed。
-- Intel Experimental helper 與獨立版本鎖；尚未通過 Intel 實機。
-- 設定與詞庫 JSON 持久化、失敗 WAV `Temp-Recovery`、來源檔不經修改。
-- Job ledger 將 queued／active／interrupted 工作視為 durable，不受最近工作顯示上限裁切。
-- 63 個 XCTest（需完整 Xcode）與 20 項不依賴 XCTest 的本機 self-test。
-- Mock helper 真實串接 ffmpeg／OpenCC 的成功、失敗復原與慢速取消測試。
-- 30 秒 helper 無活動警告、非覆寫原子輸出、空白／非 UTF-8 結果拒收。
-- 簽署、公證、DMG 與 Release scripts；缺憑證時不會冒充正式發佈。
+- 拖放、多選、單工佇列、取消、錯誤與最近工作。
+- `ffprobe → ffmpeg → ASR helper → OpenCC → 原子寫入 TXT`。
+- 超過 30 分鐘：coordinator 切成編號 WAV、逐段獨立 ASR；全部通過 manifest gate 後才合併，中段／尾段失敗不交部分結果。
+- Apple Silicon：MLX-Audio helper；Prompt 走 `system_prompt`，不支援則 fail closed。
+- 設定／詞庫 JSON、失敗 WAV `Temp-Recovery`、來源檔不修改。
+- Job ledger：queued／active／interrupted 為 durable，不受「最近工作」上限裁切。
+- App 圖示（`Config/AppIcon.icns`）與 `scripts/build-app.sh` 開發用 `.app` 封裝。
+- XCTest（需完整 Xcode）、executable self-test、mock 管線（成功／失敗復原／取消／長音檔 fail-closed）。
+- 簽署、公證、DMG scripts；缺憑證時會停，不假裝正式發佈。
 
 ## 重要修正
 

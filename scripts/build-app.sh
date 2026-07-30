@@ -48,6 +48,11 @@ ditto "${PROJECT_DIR}/Config/Info.plist" "${APP_PATH}/Contents/Info.plist"
   -c "Set :CFBundleVersion ${BUILD_NUMBER}" \
   "${APP_PATH}/Contents/Info.plist"
 
+if [[ -f "${PROJECT_DIR}/Config/AppIcon.icns" ]]; then
+  ditto "${PROJECT_DIR}/Config/AppIcon.icns" \
+    "${APP_PATH}/Contents/Resources/AppIcon.icns"
+fi
+
 for resource_bundle in "${BIN_DIR}"/*RecordToTextApp*.bundle(N); do
   ditto "${resource_bundle}" \
     "${APP_PATH}/Contents/Resources/${resource_bundle:t}"
