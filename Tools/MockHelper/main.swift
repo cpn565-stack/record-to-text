@@ -8,6 +8,12 @@ private enum MockScenario: String {
     case failure
     case noCompleted
     case slow
+    case segmented
+    case segmentedFailure
+    case segmentedMiddleFailure
+    case segmentedBlank
+    case segmentedTokenLimit
+    case segmentedNoCompleted
 }
 
 private func emit(_ event: HelperEvent) throws {
@@ -65,11 +71,17 @@ if scenario == .unsupportedPrompt, !request.terms.isEmpty, !request.allowMissing
 try emit(HelperEvent(type: "stage", value: "loading_model"))
 try emit(HelperEvent(type: "stage", value: "transcribing"))
 
-if scenario == .failure {
+let isLastSegment = request.segmentIndex == request.segmentCount
+
+if
+    scenario == .failure
+        || (scenario == .segmentedFailure && isLastSegment)
+        || (scenario == .segmentedMiddleFailure && request.segmentIndex == 2)
+{
     try emit(
         HelperEvent(
             type: "error",
-            message: "Mock ASR failure",
+            message: "Mock ASR failure at segment \(request.segmentIndex)",
             code: "mock_failure",
             recoverable: true
         )
@@ -84,12 +96,44 @@ if scenario == .slow {
     }
 }
 
+if scenario == .segmentedTokenLimit && isLastSegment {
+    try emit(
+        HelperEvent(
+            type: "error",
+            message: "Mock segment reached the token limit",
+            code: "chunk_token_limit_reached",
+            recoverable: true
+        )
+    )
+    Darwin.exit(1)
+}
+
+let transcript: String
+if scenario == .segmentedBlank && isLastSegment {
+    transcript = " \n\t"
+} else if [
+    MockScenario.segmented,
+    .segmentedFailure,
+    .segmentedMiddleFailure,
+    .segmentedBlank,
+    .segmentedTokenLimit,
+    .segmentedNoCompleted
+].contains(scenario) {
+    let tail = isLastSegment ? "尾段唯一验证句。" : ""
+    transcript = "这是第 \(request.segmentIndex) 段。\(tail)"
+} else {
+    transcript = "这是 mock 逐字稿，包含 OGSTM。"
+}
+
 try AtomicFileWriter.writeText(
-    "这是 mock 逐字稿，包含 OGSTM。",
+    transcript,
     to: URL(fileURLWithPath: request.outputPath)
 )
 
-if scenario != .noCompleted {
+if
+    scenario != .noCompleted,
+    !(scenario == .segmentedNoCompleted && isLastSegment)
+{
     try emit(
         HelperEvent(
             type: "completed",

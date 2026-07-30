@@ -30,7 +30,7 @@
 | 設定／詞庫／最近工作 | Implemented | JSON repository 與 App wiring；互動仍待驗收 |
 | Runtime／模型下載管理 | Partial | schema 與安全決策已完成；正式 artifact、下載 UI、簽章未完成 |
 | Apple Silicon 真實工作 | Pending | 需可用 Metal 的 App 執行環境與測試音檔 |
-| 超過 30 分鐘長錄音 | Pending | 已觀察到直接指令可能只輸出前段；須完成 coordinator-level 30 分鐘預切、逐段 ASR 與完整性 gate |
+| 超過 30 分鐘長錄音 | Implemented, real soak pending | Coordinator-level 30 分鐘預切、逐段獨立 ASR、manifest gate、LF 順序合併與 fail-closed mock E2E 已完成；真實 Metal 31／65／120 分鐘仍待驗證 |
 | Intel | Blocked / Experimental | 無 Intel 真機，且現行 PyTorch x86_64 發佈鏈中斷 |
 | Universal 2 | Pending | 需完整 Xcode 與兩種實機 |
 | 簽署／公證／DMG | Scripts ready, credentials pending | 需 Developer ID 與 notarytool profile |

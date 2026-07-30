@@ -404,9 +404,15 @@ private struct JobRowView: View {
                total > 0 {
                 ProgressView(value: min(current, total), total: total) {
                     if let unit = job.progressUnit {
-                        Text("\(current.formatted(.number.precision(.fractionLength(0)))) / \(total.formatted(.number.precision(.fractionLength(0)))) \(unit)")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                        if unit == "segments" {
+                            Text("第 \(current.formatted(.number.precision(.fractionLength(0))))／\(total.formatted(.number.precision(.fractionLength(0)))) 段")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("\(current.formatted(.number.precision(.fractionLength(0)))) / \(total.formatted(.number.precision(.fractionLength(0)))) \(unit)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
             } else if job.id == viewModel.activeJobID {

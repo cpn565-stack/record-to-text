@@ -241,4 +241,67 @@ tests.check(
     "AtomicFileWriter exclusive mode never replaces an existing output"
 )
 
+tests.check(
+    try {
+        let plan = try AudioSegmentPlanner.makePlan(sourceDuration: 31 * 60)
+        return plan.expectedSegmentCount == 2
+            && plan.segments.map(\.durationSeconds) == [1_800, 60]
+    }(),
+    "AudioSegmentPlanner splits 31 minutes into 2 segments"
+)
+
+tests.check(
+    try {
+        let plan = try AudioSegmentPlanner.makePlan(sourceDuration: 65 * 60)
+        return plan.expectedSegmentCount == 3
+            && plan.segments.map(\.durationSeconds) == [1_800, 1_800, 300]
+    }(),
+    "AudioSegmentPlanner splits 65 minutes into 3 segments"
+)
+
+tests.check(
+    try {
+        let plan = try AudioSegmentPlanner.makePlan(sourceDuration: 120 * 60)
+        return plan.expectedSegmentCount == 4
+            && plan.segments.allSatisfy {
+                $0.durationSeconds == 1_800
+            }
+            && plan.segments.last?.endSeconds == 7_200
+    }(),
+    "AudioSegmentPlanner covers the tail of a 120 minute recording"
+)
+
+tests.check(
+    try {
+        let plan = try AudioSegmentPlanner.makePlan(sourceDuration: 65 * 60)
+        var manifest = AudioSegmentManifest(
+            jobID: UUID(),
+            sourceDurationSeconds: plan.sourceDurationSeconds,
+            maximumSegmentDurationSeconds:
+                plan.maximumSegmentDurationSeconds,
+            expectedSegmentCount: plan.expectedSegmentCount,
+            segments: plan.segments.map { segment in
+                AudioSegmentRecord(
+                    segmentIndex: segment.index,
+                    segmentCount: plan.expectedSegmentCount,
+                    startSeconds: segment.startSeconds,
+                    endSeconds: segment.endSeconds,
+                    audioPath: segment.audioFileName,
+                    outputPath: segment.transcriptFileName
+                )
+            }
+        )
+        for segment in plan.segments {
+            try manifest.mark(
+                segmentIndex: segment.index,
+                status: .completed,
+                completedEventCount: 1
+            )
+        }
+        return try manifest.validatedCompletedSegments()
+            .map(\.segmentIndex) == [1, 2, 3]
+    }(),
+    "AudioSegmentManifest gates merge on one completion per ordered segment"
+)
+
 tests.finish()

@@ -103,7 +103,8 @@ public final class AudioProbeService {
 
     public func validateDiskSpace(
         for metadata: AudioMetadata,
-        temporaryDirectory: URL
+        temporaryDirectory: URL,
+        pcmWorkingCopies: Int = 1
     ) throws {
         let values = try temporaryDirectory.resourceValues(
             forKeys: [
@@ -124,9 +125,16 @@ public final class AudioProbeService {
             // The write itself remains the authoritative failure boundary.
             return
         }
-        guard available >= metadata.estimatedPCMBytes else {
+        let copyCount = Int64(max(pcmWorkingCopies, 1))
+        let multiplication = metadata.estimatedPCMBytes.multipliedReportingOverflow(
+            by: copyCount
+        )
+        let required = multiplication.overflow
+            ? Int64.max
+            : multiplication.partialValue
+        guard available >= required else {
             throw AudioServiceError.insufficientDiskSpace(
-                required: metadata.estimatedPCMBytes,
+                required: required,
                 available: available
             )
         }
@@ -193,6 +201,51 @@ public final class FFmpegService {
         guard byteCount > 44 else {
             throw AudioServiceError.outputEmpty(destinationURL.path)
         }
+    }
+
+    public func extractSegment(
+        sourceURL: URL,
+        destinationURL: URL,
+        startSeconds: Double,
+        durationSeconds: Double
+    ) async throws {
+        try FileManager.default.createDirectory(
+            at: destinationURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+
+        _ = try await runner.run(
+            executableURL: executableURL,
+            arguments: [
+                "-hide_banner",
+                "-loglevel", "error",
+                "-y",
+                "-ss", Self.ffmpegTime(startSeconds),
+                "-i", sourceURL.path,
+                "-t", Self.ffmpegTime(durationSeconds),
+                "-vn",
+                "-ar", "16000",
+                "-ac", "1",
+                "-c:a", "pcm_s16le",
+                destinationURL.path
+            ]
+        )
+
+        guard FileManager.default.fileExists(atPath: destinationURL.path) else {
+            throw AudioServiceError.outputMissing(destinationURL.path)
+        }
+        let attributes = try FileManager.default.attributesOfItem(
+            atPath: destinationURL.path
+        )
+        let byteCount = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+        guard byteCount > 44 else {
+            throw AudioServiceError.outputEmpty(destinationURL.path)
+        }
+    }
+
+    private static func ffmpegTime(_ seconds: Double) -> String {
+        String(format: "%.6f", locale: Locale(identifier: "en_US_POSIX"), seconds)
     }
 }
 

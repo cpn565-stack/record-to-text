@@ -2,22 +2,29 @@
 
 目前 checkpoint 是 Phase 0 / Apple Silicon Developer Mode MVP，不是可交付一般使用者的 Stable DMG。
 
-## 第一優先：長錄音完整性
+## 已完成：長錄音完整性
 
-依 2026-07-30 的實際觀察，直接處理長錄音可能只輸出前段。下一次先實作 PD-013：
+PD-013 的 coordinator-level 實作已完成：
 
-1. ffprobe 取得總時長。
-2. 超過 30 分鐘時，由 Swift coordinator／ffmpeg 產生每段最長 30 分鐘的編號 WAV。
-3. 每段使用獨立 ASR 呼叫、token budget、完成事件與非空白 UTF-8 驗證。
-4. 全部片段數量與順序完整後才合併、OpenCC、原子提交正式 TXT。
-5. 以 31、65、120 分鐘 fixture 驗證；尾端放置唯一驗證句。
-6. 任一片段失敗、空白、達 token limit 或未 completed 時，不得提交部分正式 TXT。
+1. ffprobe 取得總時長，`AudioSegmentPlanner` 以 1,800 秒建立分段計畫。
+2. Swift coordinator／ffmpeg 產生依序編號的 WAV。
+3. 每段使用獨立 ASR 呼叫與 token budget。
+4. Segment manifest 要求編號連續、順序正確、非空白 UTF-8 且 completed 恰好一次。
+5. 全部片段通過後才以 LF 合併、OpenCC、原子提交正式 TXT。
+6. 31／65／120 分鐘規劃 fixture，以及縮時真實 ffmpeg／OpenCC mock E2E 已通過。
+7. 中段／尾段失敗、空白、token limit 或未 completed 時，皆不提交部分正式 TXT。
 
-現有 helper 內部 chunk 不算完成此需求。
+尚待真實 Metal 模型與 31／65／120 分鐘音檔 soak test；完成前不宣稱正式支援任意長度。
+
+## 第一優先：Job ledger 保存
+
+- Job ledger 的保存上限不得套用到 active／queued 工作。
+- `recentJobLimit=0` 仍須保存所有未完成工作。
+- 佇列大於歷史顯示上限時，crash／重開不得遺失 queued 工作。
+- 上限只裁切 terminal history，並補上 persistence 與 restart 測試。
 
 ## 其次處理
 
-- Job ledger 的保存上限不得套用到 active／queued 工作；`recentJobLimit=0` 仍須保存未完成工作。
 - 啟動時掃描並整理 system temp 與 `Temp-Recovery`，避免 crash 後產生孤兒音訊或 request。
 - 修正 ProcessRunner 在 launch 前取消的 race，並評估 helper 子程序樹終止。
 - 為 ffprobe、ffmpeg、OpenCC 加入合理 timeout／inactivity watchdog。
@@ -26,7 +33,7 @@
 
 ## 尚待外部驗證
 
-- 完整 Xcode 執行 45 個 XCTest。
+- 完整 Xcode 執行 55 個 XCTest。
 - 可使用 Metal 的真實 Qwen3-ASR：1、30、65、120 分鐘。
 - App 管理且簽署的 Runtime／Model installer、Intel 實機、Universal 2。
 - Developer ID、notarization、乾淨帳號與正式 DMG。

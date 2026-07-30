@@ -12,6 +12,18 @@ private struct PipelineSelfTest {
                 print("PASS mock ASR failure → transcribing-stage recovery → temp cleanup")
             case "slow":
                 print("PASS slow mock ASR → cancellation → temp cleanup")
+            case "segmented":
+                print("PASS coordinator split → ordered ASR merge → tail phrase")
+            case "segmented-failure":
+                print("PASS final segment failure → no partial final TXT")
+            case "segmented-middle-failure":
+                print("PASS middle segment failure → no partial final TXT")
+            case "segmented-blank":
+                print("PASS blank final segment → no partial final TXT")
+            case "segmented-token-limit":
+                print("PASS final segment token limit → no partial final TXT")
+            case "segmented-no-completed":
+                print("PASS final segment without completed → no partial final TXT")
             default:
                 print("PASS ffprobe → ffmpeg → mock ASR → OpenCC → atomic TXT")
             }
@@ -51,6 +63,10 @@ private struct PipelineSelfTest {
             }
         }
 
+        let scenario = ProcessInfo.processInfo.environment[
+            "RECORD_TO_TEXT_MOCK_SCENARIO"
+        ]
+        let isSegmentedScenario = scenario?.hasPrefix("segmented") == true
         let generator = ProcessRunner()
         _ = try await generator.run(
             executableURL: ffmpeg,
@@ -58,7 +74,7 @@ private struct PipelineSelfTest {
                 "-hide_banner", "-loglevel", "error", "-y",
                 "-f", "lavfi",
                 "-i", "sine=frequency=440:sample_rate=44100",
-                "-t", "0.5",
+                "-t", isSegmentedScenario ? "2.2" : "0.5",
                 "-c:a", "aac",
                 sourceURL.path
             ]
@@ -82,13 +98,24 @@ private struct PipelineSelfTest {
             helper: mockHelper,
             isDeveloperRuntime: true
         )
-        let scenario = ProcessInfo.processInfo.environment["RECORD_TO_TEXT_MOCK_SCENARIO"]
         let mockModelID: String
         switch scenario {
         case "failure":
             mockModelID = "mock/failure"
         case "slow":
             mockModelID = "mock/slow"
+        case "segmented":
+            mockModelID = "mock/segmented"
+        case "segmented-failure":
+            mockModelID = "mock/segmentedFailure"
+        case "segmented-middle-failure":
+            mockModelID = "mock/segmentedMiddleFailure"
+        case "segmented-blank":
+            mockModelID = "mock/segmentedBlank"
+        case "segmented-token-limit":
+            mockModelID = "mock/segmentedTokenLimit"
+        case "segmented-no-completed":
+            mockModelID = "mock/segmentedNoCompleted"
         default:
             mockModelID = "mock/success"
         }
@@ -108,12 +135,18 @@ private struct PipelineSelfTest {
             keepRawTranscript: false
         )
         let job = TranscriptionJob(sourcePath: sourceURL.path, snapshot: snapshot)
-        let engine = TranscriptionEngine(runtime: runtime, paths: supportPaths)
+        let engine = TranscriptionEngine(
+            runtime: runtime,
+            paths: supportPaths,
+            maximumASRSegmentDuration: isSegmentedScenario ? 1 : 1_800
+        )
         let workingDirectory = fileManager.temporaryDirectory
             .appendingPathComponent("record-to-text", isDirectory: true)
             .appendingPathComponent(job.id.uuidString, isDirectory: true)
         var observedStages: [TranscriptionStage] = []
+        var observedSegmentProgress: [(current: Double, total: Double)] = []
         let expectsFailure = scenario == "failure"
+            || scenario?.hasPrefix("segmented-") == true
         let expectsCancellation = scenario == "slow"
 
         if expectsCancellation {
@@ -154,6 +187,11 @@ private struct PipelineSelfTest {
             result = try await engine.run(job: job) { update in
                 if case let .stage(stage) = update {
                     observedStages.append(stage)
+                } else if
+                    case let .progress(current, total, unit) = update,
+                    unit == "segments"
+                {
+                    observedSegmentProgress.append((current, total))
                 }
             }
         } catch let error as PipelineExecutionError where expectsFailure {
@@ -177,6 +215,49 @@ private struct PipelineSelfTest {
             guard metadata.failureStage == TranscriptionStage.transcribing.rawValue else {
                 throw SelfTestError.unexpectedRecoveryStage(metadata.failureStage)
             }
+            if isSegmentedScenario {
+                let manifestURL = recovery.appendingPathComponent(
+                    "segment-manifest.json"
+                )
+                guard fileManager.fileExists(atPath: manifestURL.path) else {
+                    throw SelfTestError.segmentManifestMissing
+                }
+                let manifest = try JSONDecoder().decode(
+                    AudioSegmentManifest.self,
+                    from: Data(contentsOf: manifestURL)
+                )
+                let expectedStatuses: [AudioSegmentStatus]
+                let expectedCompletionCounts: [Int]
+                if scenario == "segmented-middle-failure" {
+                    expectedStatuses = [.completed, .failed, .prepared]
+                    expectedCompletionCounts = [1, 0, 0]
+                } else {
+                    expectedStatuses = [.completed, .completed, .failed]
+                    expectedCompletionCounts = [1, 1, 0]
+                }
+                guard
+                    manifest.expectedSegmentCount == 3,
+                    manifest.segments.map(\.segmentIndex) == [1, 2, 3],
+                    manifest.segments.map(\.status) == expectedStatuses,
+                    manifest.segments.map(\.completedEventCount)
+                        == expectedCompletionCounts
+                else {
+                    throw SelfTestError.unexpectedSegmentManifest(manifest)
+                }
+                if fileManager.fileExists(atPath: outputDirectory.path) {
+                    let partialOutputs = try fileManager.contentsOfDirectory(
+                        at: outputDirectory,
+                        includingPropertiesForKeys: nil
+                    ).filter {
+                        $0.lastPathComponent.hasSuffix("_繁體.txt")
+                    }
+                    guard partialOutputs.isEmpty else {
+                        throw SelfTestError.partialFinalOutputExists(
+                            partialOutputs.map(\.path)
+                        )
+                    }
+                }
+            }
             guard try FileIntegrity.sha256(of: sourceURL) == sourceHash else {
                 throw SelfTestError.sourceChanged
             }
@@ -191,8 +272,35 @@ private struct PipelineSelfTest {
         }
 
         let output = try String(contentsOf: result.outputURL, encoding: .utf8)
-        guard output.contains("這是 mock 逐字稿"), output.contains("OGSTM") else {
-            throw SelfTestError.unexpectedOutput(output)
+        if isSegmentedScenario {
+            let first = output.range(of: "這是第 1 段。")
+            let second = output.range(of: "這是第 2 段。")
+            let third = output.range(of: "這是第 3 段。")
+            let lines = output.split(
+                separator: "\n",
+                omittingEmptySubsequences: false
+            )
+            let tailPhraseCount = output.components(
+                separatedBy: "尾段唯一驗證句"
+            ).count - 1
+            guard
+                let first,
+                let second,
+                let third,
+                first.lowerBound < second.lowerBound,
+                second.lowerBound < third.lowerBound,
+                lines.count == 3,
+                tailPhraseCount == 1,
+                observedSegmentProgress.contains(where: {
+                    $0.current == 3 && $0.total == 3
+                })
+            else {
+                throw SelfTestError.unexpectedSegmentedOutput(output)
+            }
+        } else {
+            guard output.contains("這是 mock 逐字稿"), output.contains("OGSTM") else {
+                throw SelfTestError.unexpectedOutput(output)
+            }
         }
         guard result.outputURL.lastPathComponent == "會議 音檔（第一場）_繁體.txt" else {
             throw SelfTestError.unexpectedName(result.outputURL.lastPathComponent)
@@ -225,6 +333,7 @@ private enum SelfTestError: LocalizedError {
     case missingTool(String)
     case missingMockHelper(String)
     case unexpectedOutput(String)
+    case unexpectedSegmentedOutput(String)
     case unexpectedName(String)
     case sourceChanged
     case temporaryFilesRemain
@@ -234,6 +343,9 @@ private enum SelfTestError: LocalizedError {
     case recoveryMissing
     case cancelledRecoveryRemains
     case unexpectedRecoveryStage(String)
+    case segmentManifestMissing
+    case unexpectedSegmentManifest(AudioSegmentManifest)
+    case partialFinalOutputExists([String])
 
     var errorDescription: String? {
         switch self {
@@ -243,6 +355,8 @@ private enum SelfTestError: LocalizedError {
             return "Build record-to-text-mock-helper first: \(path)"
         case let .unexpectedOutput(output):
             return "Unexpected OpenCC output: \(output)"
+        case let .unexpectedSegmentedOutput(output):
+            return "Segmented output is incomplete or out of order: \(output)"
         case let .unexpectedName(name):
             return "Unexpected output name: \(name)"
         case .sourceChanged:
@@ -261,6 +375,12 @@ private enum SelfTestError: LocalizedError {
             return "Cancelled job left files in Temp-Recovery"
         case let .unexpectedRecoveryStage(stage):
             return "Recovery metadata recorded the wrong failure stage: \(stage)"
+        case .segmentManifestMissing:
+            return "Failed segmented job did not preserve segment-manifest.json"
+        case let .unexpectedSegmentManifest(manifest):
+            return "Unexpected segment manifest after failure: \(manifest)"
+        case let .partialFinalOutputExists(paths):
+            return "Failed segmented job committed partial final output: \(paths)"
         }
     }
 }

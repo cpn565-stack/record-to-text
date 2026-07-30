@@ -10,10 +10,11 @@
 - 專有名詞解析、去重、Prompt 預覽與工作 Snapshot。
 - 拖放、NSOpenPanel 多選、單工佇列、取消、錯誤與最近工作。
 - `ffprobe -> ffmpeg -> ASR helper -> OpenCC -> 原子 TXT` 管線。
+- 超過 30 分鐘時由 coordinator 產生編號 WAV、逐段獨立 ASR，全部片段通過 manifest gate 後才依序合併。
 - MLX-Audio Apple Silicon helper；Prompt 走 Qwen3-ASR 的 `system_prompt`，不支援時 fail closed。
 - Intel Experimental helper 與獨立版本鎖；尚未通過 Intel 實機。
 - 設定與詞庫 JSON 持久化、失敗 WAV `Temp-Recovery`、來源檔不經修改。
-- 45 個 XCTest（需完整 Xcode）與 14 項不依賴 XCTest 的本機 self-test。
+- 55 個 XCTest（需完整 Xcode）與 18 項不依賴 XCTest 的本機 self-test。
 - Mock helper 真實串接 ffmpeg／OpenCC 的成功、失敗復原與慢速取消測試。
 - 30 秒 helper 無活動警告、非覆寫原子輸出、空白／非 UTF-8 結果拒收。
 - 簽署、公證、DMG 與 Release scripts；缺憑證時不會冒充正式發佈。
@@ -85,11 +86,13 @@ scripts/run-checks.sh
 這會執行：
 
 - Core 與 App 編譯。
-- 14 項 executable self-test。
+- 18 項 executable self-test。
 - Swift mock helper 編譯。
 - 真實 ffprobe／ffmpeg／OpenCC 成功管線。
 - Mock ASR 失敗時的 `Temp-Recovery`、正確失敗階段與暫存清除。
 - 慢速 Mock ASR 取消與取消後暫存清除。
+- 可控短音檔模擬長錄音切分，驗證逐段順序合併與尾端唯一驗證句。
+- 模擬中段／尾段失敗、空白、token limit 與缺少 completed；皆不得產生部分正式 TXT。
 
 完整 Xcode 可用後再執行：
 
@@ -130,14 +133,14 @@ swift test
 
 - 真實 MLX 模型端到端驗證：Codex 的受限執行環境沒有 Metal，不能把 native abort 當成 App 實測。
 - 1 分鐘、30 分鐘與 2 小時真實音檔 benchmark。
-- Coordinator-level 長錄音切分：超過 30 分鐘先切成編號 WAV，逐段獨立 ASR，全部片段通過後才合併正式輸出。目前 helper 內部 chunk 不視為此需求已完成。
+- 31、65、120 分鐘真實音檔與真實模型的長時間驗收；coordinator 邏輯與縮時 mock 管線已完成。
 - App 管理的 arm64 Runtime artifact、簽章信任鏈、下載與 rollback。
 - 模型檔案完整 digest manifest 與下載 UI。
 - Intel 實機推論。
 - Universal 2 `.app` 實機矩陣。
 - Developer ID 簽署、公證與正式 DMG。
 - 乾淨帳號首次啟動驗收。
-- 完整 Xcode 下的 45 個 XCTest 與互動式 UI 驗收。
+- 完整 Xcode 下的 55 個 XCTest 與互動式 UI 驗收。
 
 ## 發佈
 

@@ -204,17 +204,19 @@ Phase 0 只有在 SP-01 至 SP-12 都有實際證據後才算完成。若 Metal�
 已通過：
 
 - `RecordToTextCore` 以 Swift 6.1.2 compiler、Swift 5 language mode 編譯成功。
-- executable self-test：14 passed，0 failed。
+- executable self-test：18 passed，0 failed。
 - Swift mock helper 編譯成功。
 - 使用真實 ffprobe、ffmpeg 與 OpenCC 的 mock ASR E2E 成功。
 - 路徑包含中文、空格、全形括號與單引號；來源 SHA-256 前後相同。
-- 成功工作清除暫存；mock ASR 失敗時只保存 normalized WAV 與 recovery metadata 到 `Temp-Recovery`，且 failure stage 正確記錄為 `transcribing`。
+- 成功工作清除暫存；mock ASR 失敗時保存 normalized WAV、recovery metadata 與 segment manifest 到 `Temp-Recovery`，且 failure stage 正確記錄為 `transcribing`。
 - 慢速 mock helper 可被取消，取消後不留下工作暫存或 recovery WAV。
 - 30 秒無合法 helper event 的 liveness monitor 會發出可繼續等待／取消的警告。
 - 最終輸出採 exclusive atomic rename；競態下不覆寫既有檔案。
 - OpenCC `s2twp`、UTF-8、LF、無 BOM 與 `_繁體.txt` 命名驗證成功。
+- 31／65／120 分鐘 planner fixture 分別產生 2／3／4 段；縮時 E2E 使用真實 ffmpeg／OpenCC 驗證逐段 ASR、LF 順序合併與尾端唯一驗證句。
+- 中段／尾段 ASR 失敗、空白輸出、token limit 與缺少 completed event 時，皆不產生部分正式 TXT。
 - SwiftPM debug／release App 與 `.app` bundle 建置成功，兩個 helper resource 均位於 `Contents/Resources`。
-- 已建立 45 個 XCTest；目前 Command Line Tools 缺少 XCTest module，須待完整 Xcode 或 GitHub Actions 執行。
+- 已建立 55 個 XCTest；目前 Command Line Tools 缺少 XCTest module，須由完整 Xcode 或 GitHub Actions 執行。
 
 仍未通過：
 

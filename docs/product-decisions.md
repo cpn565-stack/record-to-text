@@ -281,7 +281,9 @@ Release 不得只白名單 `mlx-community/Qwen3-ASR-1.7B-8bit` 這個可變 repo
 
 **目前狀態**
 
-現有 helper 內部的 chunk 行為不算完成此決策。Coordinator-level 30 分鐘預切、分段 manifest、完整性 gate 與長音檔 fixture 留待下一階段實作。
+Coordinator-level 30 分鐘預切、分段 manifest 與完整性 gate 已完成。31／65／120 分鐘的 deterministic planner fixture，以及縮時 ffmpeg／OpenCC／mock ASR E2E 已驗證順序合併、尾段唯一驗證句與「中段／尾段失敗、空白、token limit、未 completed 時不提交正式 TXT」。
+
+尚未完成的證據邊界是真實 Metal 模型搭配 31／65／120 分鐘實際音檔的 soak test；在此之前不得把本決策的程式完成誤寫成正式支援任意長度。
 
 ## 4. Phase 0 決策閘門
 

@@ -13,6 +13,8 @@
 - Core XCTest、executable self-test、mock helper 與管線整合測試。
 - Runtime／模型完整性資料模型與 Release scripts。
 - Helper liveness warning、慢速取消整合測試與失敗復原資料刪除 UI。
+- Coordinator-level 30 分鐘預切、segment manifest、逐段獨立 ASR 與全段完整性 gate。
+- 31／65／120 分鐘 planner fixture，以及中段／尾段失敗、空白、token limit、未 completed 的 fail-closed 管線測試。
 
 ### Changed
 
@@ -27,4 +29,4 @@
 
 - 尚未在可使用 Metal 的 App 執行環境完成真實 Qwen3-ASR 驗證。
 - 正式 Runtime、Universal 2、Developer ID、公證與 DMG 尚需外部條件。
-- 已觀察到長錄音直接轉錄可能只留下前段；30 分鐘 coordinator 預切與完整性 gate 已寫入規格，尚未實作。
+- Coordinator 分段邏輯已完成，但真實 Metal 模型搭配 31／65／120 分鐘音檔的 soak test 尚未執行。

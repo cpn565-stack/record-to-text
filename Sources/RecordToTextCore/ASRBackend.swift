@@ -14,6 +14,8 @@ public struct ASRRequest: Codable, Equatable, Sendable {
     public let allowMissingPrompt: Bool
     public let maximumTokens: Int
     public let chunkDurationSeconds: Double
+    public let segmentIndex: Int
+    public let segmentCount: Int
 
     public init(
         jobID: String,
@@ -28,7 +30,9 @@ public struct ASRRequest: Codable, Equatable, Sendable {
         offline: Bool,
         allowMissingPrompt: Bool = false,
         maximumTokens: Int = 8_192,
-        chunkDurationSeconds: Double = 1_200
+        chunkDurationSeconds: Double = 1_200,
+        segmentIndex: Int = 1,
+        segmentCount: Int = 1
     ) {
         self.jobID = jobID
         self.audioPath = audioPath
@@ -43,6 +47,8 @@ public struct ASRRequest: Codable, Equatable, Sendable {
         self.allowMissingPrompt = allowMissingPrompt
         self.maximumTokens = maximumTokens
         self.chunkDurationSeconds = chunkDurationSeconds
+        self.segmentIndex = segmentIndex
+        self.segmentCount = segmentCount
     }
 }
 

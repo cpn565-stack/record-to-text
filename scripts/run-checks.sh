@@ -26,6 +26,18 @@ RECORD_TO_TEXT_MOCK_SCENARIO=failure \
   "${BUILD_DIR}/debug/record-to-text-pipeline-self-test"
 RECORD_TO_TEXT_MOCK_SCENARIO=slow \
   "${BUILD_DIR}/debug/record-to-text-pipeline-self-test"
+RECORD_TO_TEXT_MOCK_SCENARIO=segmented \
+  "${BUILD_DIR}/debug/record-to-text-pipeline-self-test"
+RECORD_TO_TEXT_MOCK_SCENARIO=segmented-failure \
+  "${BUILD_DIR}/debug/record-to-text-pipeline-self-test"
+RECORD_TO_TEXT_MOCK_SCENARIO=segmented-middle-failure \
+  "${BUILD_DIR}/debug/record-to-text-pipeline-self-test"
+RECORD_TO_TEXT_MOCK_SCENARIO=segmented-blank \
+  "${BUILD_DIR}/debug/record-to-text-pipeline-self-test"
+RECORD_TO_TEXT_MOCK_SCENARIO=segmented-token-limit \
+  "${BUILD_DIR}/debug/record-to-text-pipeline-self-test"
+RECORD_TO_TEXT_MOCK_SCENARIO=segmented-no-completed \
+  "${BUILD_DIR}/debug/record-to-text-pipeline-self-test"
 
 if xcodebuild -version >/dev/null 2>&1; then
   swift test "${SWIFT_ARGS[@]}"

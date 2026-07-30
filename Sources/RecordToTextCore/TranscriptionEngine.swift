@@ -85,6 +85,7 @@ public final class TranscriptionEngine {
     private let openCCService: OpenCCService
     private let backend: HelperASRBackend
     private let sleepPrevention: SleepPreventionService
+    private let maximumASRSegmentDuration: TimeInterval
     private let cancellationLock = NSLock()
     private var cancellationRequested = false
 
@@ -92,7 +93,9 @@ public final class TranscriptionEngine {
         runtime: ResolvedRuntime,
         paths: ApplicationPaths,
         runner: ProcessRunner = ProcessRunner(),
-        sleepPrevention: SleepPreventionService = SleepPreventionService()
+        sleepPrevention: SleepPreventionService = SleepPreventionService(),
+        maximumASRSegmentDuration: TimeInterval =
+            AudioSegmentPlanner.productionMaximumDuration
     ) {
         self.runtime = runtime
         self.paths = paths
@@ -102,6 +105,7 @@ public final class TranscriptionEngine {
         self.openCCService = OpenCCService(executableURL: runtime.opencc, runner: runner)
         self.backend = HelperASRBackend(runtime: runtime, paths: paths, runner: runner)
         self.sleepPrevention = sleepPrevention
+        self.maximumASRSegmentDuration = maximumASRSegmentDuration
     }
 
     public func run(
@@ -124,6 +128,13 @@ public final class TranscriptionEngine {
         let rawTranscriptURL = workingDirectory.appendingPathComponent("raw.txt")
         let convertedTranscriptURL = workingDirectory.appendingPathComponent("traditional.txt")
         let requestURL = workingDirectory.appendingPathComponent("request.json")
+        let segmentsDirectory = workingDirectory.appendingPathComponent(
+            "segments",
+            isDirectory: true
+        )
+        let segmentManifestURL = workingDirectory.appendingPathComponent(
+            "segment-manifest.json"
+        )
         let currentStage = PipelineStageTracker(.validating)
         let fileManager = FileManager.default
         var cleanupWarningWasEmitted = false
@@ -162,9 +173,14 @@ public final class TranscriptionEngine {
 
             update(.stage(.validating))
             let metadata = try await probeService.probe(sourceURL)
+            let segmentPlan = try AudioSegmentPlanner.makePlan(
+                sourceDuration: metadata.duration,
+                maximumSegmentDuration: maximumASRSegmentDuration
+            )
             try probeService.validateDiskSpace(
                 for: metadata,
-                temporaryDirectory: workingDirectory
+                temporaryDirectory: workingDirectory,
+                pcmWorkingCopies: segmentPlan.requiresSplitting ? 2 : 1
             )
 
             let outputDirectory = try resolvedOutputDirectory(
@@ -187,63 +203,299 @@ public final class TranscriptionEngine {
                 update(.progress(current: current, total: total, unit: "seconds"))
             }
 
-            try Task.checkCancellation()
-            currentStage.set(.loadingModel)
-            update(.stage(.loadingModel))
-            let request = ASRRequest(
-                jobID: job.id.uuidString,
-                audioPath: normalizedAudioURL.path,
-                outputPath: rawTranscriptURL.path,
-                modelID: job.snapshot.modelID,
-                modelRevision: job.snapshot.modelRevision,
-                language: job.snapshot.language,
-                prompt: job.snapshot.prompt,
-                terms: job.snapshot.terms,
-                modelCacheDirectory: paths.models.path,
-                offline: offline,
-                allowMissingPrompt: allowMissingPrompt
-            )
+            if segmentPlan.requiresSplitting {
+                try fileManager.createDirectory(
+                    at: segmentsDirectory,
+                    withIntermediateDirectories: true,
+                    attributes: [.posixPermissions: 0o700]
+                )
+                try fileManager.setAttributes(
+                    [.posixPermissions: 0o700],
+                    ofItemAtPath: segmentsDirectory.path
+                )
+            }
 
-            let livenessMonitor = HelperLivenessMonitor()
-            let livenessTask = Task {
-                while !Task.isCancelled {
+            var segmentManifest = AudioSegmentManifest(
+                jobID: job.id,
+                sourceDurationSeconds: segmentPlan.sourceDurationSeconds,
+                maximumSegmentDurationSeconds:
+                    segmentPlan.maximumSegmentDurationSeconds,
+                expectedSegmentCount: segmentPlan.expectedSegmentCount,
+                segments: segmentPlan.segments.map { segment in
+                    let audioURL = segmentPlan.requiresSplitting
+                        ? segmentsDirectory.appendingPathComponent(
+                            segment.audioFileName
+                        )
+                        : normalizedAudioURL
+                    let outputURL = segmentPlan.requiresSplitting
+                        ? segmentsDirectory.appendingPathComponent(
+                            segment.transcriptFileName
+                        )
+                        : rawTranscriptURL
+                    return AudioSegmentRecord(
+                        segmentIndex: segment.index,
+                        segmentCount: segmentPlan.expectedSegmentCount,
+                        startSeconds: segment.startSeconds,
+                        endSeconds: segment.endSeconds,
+                        audioPath: audioURL.path,
+                        outputPath: outputURL.path
+                    )
+                }
+            )
+            try writeSegmentManifest(segmentManifest, to: segmentManifestURL)
+
+            if segmentPlan.requiresSplitting {
+                update(
+                    .log(
+                        level: "info",
+                        message: "音檔超過 30 分鐘，將切成 \(segmentPlan.expectedSegmentCount) 段後逐段轉錄。"
+                    )
+                )
+                for segment in segmentPlan.segments {
+                    try Task.checkCancellation()
+                    let record = segmentManifest.segments[segment.index - 1]
                     do {
-                        try await Task.sleep(
-                            nanoseconds: Self.helperLivenessPollNanoseconds
+                        update(
+                            .progress(
+                                current: Double(segment.index),
+                                total: Double(segmentPlan.expectedSegmentCount),
+                                unit: "segments"
+                            )
+                        )
+                        update(
+                            .log(
+                                level: "info",
+                                message: "正在準備第 \(segment.index)／\(segmentPlan.expectedSegmentCount) 段音訊。"
+                            )
+                        )
+                        try await ffmpegService.extractSegment(
+                            sourceURL: normalizedAudioURL,
+                            destinationURL: URL(fileURLWithPath: record.audioPath),
+                            startSeconds: segment.startSeconds,
+                            durationSeconds: segment.durationSeconds
+                        )
+                        let preparedMetadata = try await probeService.probe(
+                            URL(fileURLWithPath: record.audioPath)
+                        )
+                        if preparedMetadata.duration
+                            > maximumASRSegmentDuration + 0.01 {
+                            throw AudioSegmentationError.segmentOutputTooLong(
+                                index: segment.index,
+                                duration: preparedMetadata.duration,
+                                maximum: maximumASRSegmentDuration
+                            )
+                        }
+                        try segmentManifest.mark(
+                            segmentIndex: segment.index,
+                            status: .prepared
+                        )
+                        try writeSegmentManifest(
+                            segmentManifest,
+                            to: segmentManifestURL
                         )
                     } catch {
-                        return
+                        try? segmentManifest.mark(
+                            segmentIndex: segment.index,
+                            status: .failed,
+                            failureMessage: error.localizedDescription
+                        )
+                        try? writeSegmentManifest(
+                            segmentManifest,
+                            to: segmentManifestURL
+                        )
+                        throw error
                     }
-                    if livenessMonitor.consumeWarningIfInactive(
-                        timeout: Self.helperLivenessTimeout
-                    ) {
+                }
+            } else {
+                try segmentManifest.mark(segmentIndex: 1, status: .prepared)
+                try writeSegmentManifest(segmentManifest, to: segmentManifestURL)
+            }
+
+            var segmentTexts: [Int: String] = [:]
+            for segment in segmentPlan.segments {
+                try Task.checkCancellation()
+                let record = segmentManifest.segments[segment.index - 1]
+                let perSegmentRequestURL = segmentPlan.requiresSplitting
+                    ? segmentsDirectory.appendingPathComponent(
+                        segment.requestFileName
+                    )
+                    : requestURL
+
+                if segment.index == 1 {
+                    currentStage.set(.loadingModel)
+                    update(.stage(.loadingModel))
+                }
+                if segmentPlan.requiresSplitting {
+                    update(
+                        .log(
+                            level: "info",
+                            message: "正在轉錄第 \(segment.index)／\(segmentPlan.expectedSegmentCount) 段。"
+                        )
+                    )
+                    update(
+                        .progress(
+                            current: Double(segment.index),
+                            total: Double(segmentPlan.expectedSegmentCount),
+                            unit: "segments"
+                        )
+                    )
+                }
+                try segmentManifest.mark(
+                    segmentIndex: segment.index,
+                    status: .transcribing
+                )
+                try writeSegmentManifest(segmentManifest, to: segmentManifestURL)
+
+                let request = ASRRequest(
+                    jobID: String(
+                        format: "%@-segment-%04d-of-%04d",
+                        job.id.uuidString,
+                        segment.index,
+                        segmentPlan.expectedSegmentCount
+                    ),
+                    audioPath: record.audioPath,
+                    outputPath: record.outputPath,
+                    modelID: job.snapshot.modelID,
+                    modelRevision: job.snapshot.modelRevision,
+                    language: job.snapshot.language,
+                    prompt: job.snapshot.prompt,
+                    terms: job.snapshot.terms,
+                    modelCacheDirectory: paths.models.path,
+                    offline: offline,
+                    allowMissingPrompt: allowMissingPrompt,
+                    segmentIndex: segment.index,
+                    segmentCount: segmentPlan.expectedSegmentCount
+                )
+
+                let livenessMonitor = HelperLivenessMonitor()
+                let livenessTask = Task {
+                    while !Task.isCancelled {
+                        do {
+                            try await Task.sleep(
+                                nanoseconds: Self.helperLivenessPollNanoseconds
+                            )
+                        } catch {
+                            return
+                        }
+                        if livenessMonitor.consumeWarningIfInactive(
+                            timeout: Self.helperLivenessTimeout
+                        ) {
+                            let segmentPrefix = segmentPlan.requiresSplitting
+                                ? "第 \(segment.index)／\(segmentPlan.expectedSegmentCount) 段 "
+                                : ""
+                            update(
+                                .warning(
+                                    code: "helper_unresponsive",
+                                    message: "\(segmentPrefix)ASR 已超過 30 秒沒有回報活動；工作仍在執行，可繼續等待或取消。"
+                                )
+                            )
+                        }
+                    }
+                }
+                do {
+                    _ = try await backend.transcribe(
+                        request: request,
+                        requestURL: perSegmentRequestURL
+                    ) { event in
+                        livenessMonitor.recordActivity()
+                        var shouldForward = true
+                        if event.type == "stage",
+                           let value = event.value,
+                           let stage = self.helperStage(value) {
+                            if
+                                segmentPlan.requiresSplitting,
+                                segment.index > 1,
+                                stage == .loadingModel
+                            {
+                                shouldForward = false
+                            } else {
+                                currentStage.set(stage)
+                            }
+                        }
+                        if shouldForward {
+                            self.forward(
+                                event: event,
+                                suppressProgress: segmentPlan.requiresSplitting,
+                                update: update
+                            )
+                        }
+                        if
+                            segmentPlan.requiresSplitting,
+                            event.type == "stage"
+                                || event.type == "progress"
+                                || event.type == "heartbeat"
+                        {
+                            update(
+                                .progress(
+                                    current: Double(segment.index),
+                                    total: Double(
+                                        segmentPlan.expectedSegmentCount
+                                    ),
+                                    unit: "segments"
+                                )
+                            )
+                        }
+                    }
+                    livenessTask.cancel()
+
+                    let segmentText = try TextFileValidator.readNonEmptyUTF8(
+                        at: URL(fileURLWithPath: record.outputPath)
+                    ).trimmingCharacters(in: .whitespacesAndNewlines)
+                    segmentTexts[segment.index] = segmentText
+                    try segmentManifest.mark(
+                        segmentIndex: segment.index,
+                        status: .completed,
+                        completedEventCount: 1
+                    )
+                    try writeSegmentManifest(
+                        segmentManifest,
+                        to: segmentManifestURL
+                    )
+                    if segmentPlan.requiresSplitting {
                         update(
-                            .warning(
-                                code: "helper_unresponsive",
-                                message: "ASR 已超過 30 秒沒有回報活動；工作仍在執行，可繼續等待或取消。"
+                            .progress(
+                                current: Double(segment.index),
+                                total: Double(segmentPlan.expectedSegmentCount),
+                                unit: "segments"
                             )
                         )
                     }
-                }
-            }
-            do {
-                _ = try await backend.transcribe(
-                    request: request,
-                    requestURL: requestURL
-                ) { event in
-                    livenessMonitor.recordActivity()
-                    if event.type == "stage",
-                       let value = event.value,
-                       let stage = self.helperStage(value) {
-                        currentStage.set(stage)
+                } catch {
+                    livenessTask.cancel()
+                    try? segmentManifest.mark(
+                        segmentIndex: segment.index,
+                        status: .failed,
+                        failureMessage: error.localizedDescription
+                    )
+                    try? writeSegmentManifest(
+                        segmentManifest,
+                        to: segmentManifestURL
+                    )
+                    if
+                        let backendError = error as? ASRBackendError,
+                        case .glossaryPromptUnsupported = backendError
+                    {
+                        throw backendError
                     }
-                    self.forward(event: event, update: update)
+                    throw AudioSegmentationError.segmentTranscriptionFailed(
+                        index: segment.index,
+                        count: segmentPlan.expectedSegmentCount,
+                        reason: error.localizedDescription
+                    )
                 }
-            } catch {
-                livenessTask.cancel()
-                throw error
             }
-            livenessTask.cancel()
+
+            let completedSegments = try segmentManifest
+                .validatedCompletedSegments()
+            let mergedRawText = try completedSegments.map { segment in
+                guard let text = segmentTexts[segment.segmentIndex] else {
+                    throw AudioSegmentationError.segmentTranscriptMissing(
+                        segment.segmentIndex
+                    )
+                }
+                return text
+            }.joined(separator: "\n")
+            try AtomicFileWriter.writeText(mergedRawText, to: rawTranscriptURL)
 
             try Task.checkCancellation()
             currentStage.set(.convertingTraditionalChinese)
@@ -322,6 +574,7 @@ public final class TranscriptionEngine {
                         stage: currentStage.current(),
                         error: error,
                         normalizedAudioURL: normalizedAudioURL,
+                        segmentManifestURL: segmentManifestURL,
                         recoveryDirectory: recoveryDirectory
                     )
                 } catch {
@@ -389,6 +642,7 @@ public final class TranscriptionEngine {
 
     private func forward(
         event: HelperEvent,
+        suppressProgress: Bool = false,
         update: @escaping (PipelineUpdate) -> Void
     ) {
         switch event.type {
@@ -398,6 +652,7 @@ public final class TranscriptionEngine {
             }
         case "progress":
             if
+                !suppressProgress,
                 let current = event.current,
                 let total = event.total,
                 let unit = event.unit
@@ -425,6 +680,18 @@ public final class TranscriptionEngine {
         }
     }
 
+    private func writeSegmentManifest(
+        _ manifest: AudioSegmentManifest,
+        to destinationURL: URL
+    ) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        try AtomicFileWriter.write(
+            try encoder.encode(manifest),
+            to: destinationURL
+        )
+    }
+
     private func helperStage(_ value: String) -> TranscriptionStage? {
         switch value {
         case "validating":
@@ -447,6 +714,7 @@ public final class TranscriptionEngine {
         stage: TranscriptionStage,
         error: Error,
         normalizedAudioURL: URL,
+        segmentManifestURL: URL,
         recoveryDirectory: URL
     ) throws -> URL {
         struct RecoveryMetadata: Codable {
@@ -474,6 +742,19 @@ public final class TranscriptionEngine {
             try fileManager.removeItem(at: recoveredWAV)
         }
         try fileManager.moveItem(at: normalizedAudioURL, to: recoveredWAV)
+
+        if fileManager.fileExists(atPath: segmentManifestURL.path) {
+            let recoveredManifest = recoveryDirectory.appendingPathComponent(
+                "segment-manifest.json"
+            )
+            if fileManager.fileExists(atPath: recoveredManifest.path) {
+                try fileManager.removeItem(at: recoveredManifest)
+            }
+            try fileManager.copyItem(
+                at: segmentManifestURL,
+                to: recoveredManifest
+            )
+        }
 
         let metadata = RecoveryMetadata(
             schemaVersion: 1,

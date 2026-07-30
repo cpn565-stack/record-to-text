@@ -7,56 +7,60 @@
 
 ## 一句話狀態
 
-目前已完成可編譯、可測試的 **Phase 0 / Apple Silicon Developer Mode MVP**，但尚不是可交付一般使用者的 Stable 版本。下一個 checkpoint 必須先解決長錄音只輸出前段的完整性問題。
+目前已完成可編譯、可測試的 **Phase 0 / Apple Silicon Developer Mode MVP**，以及 coordinator-level 30 分鐘預切與完整性 gate；但尚不是可交付一般使用者的 Stable 版本。下一個 checkpoint 是修正 Job ledger 對 active／queued 工作的保存上限。
 
 ## 已確認完成
 
 - 原生 SwiftUI macOS App 與 SwiftPM 專案。
 - 詞庫、Prompt、工作 Snapshot、拖放、多檔單工佇列、取消、錯誤與最近工作。
 - `ffprobe -> ffmpeg -> ASR helper -> OpenCC -> 原子 TXT` 管線。
+- 超過 30 分鐘時產生編號 WAV、逐段獨立 ASR、manifest 狀態追蹤與全段成功後順序合併。
 - Apple Silicon MLX-Audio helper，以及標示為 Experimental 的 Intel helper。
 - 非覆寫原子輸出、空白／非 UTF-8 拒收、失敗 WAV 復原與暫存清理。
-- 14 項 executable self-test，以及成功、失敗復原、慢速取消三種管線整合測試。
-- 45 個 XCTest。
+- 18 項 executable self-test，以及九種成功／失敗／取消／分段管線整合情境。
+- 55 個 XCTest。
 - Release、簽署、公證、DMG 與驗證 scripts；缺少憑證時會停止，不會假裝正式發佈成功。
 
 ## 驗證狀態
 
 - 本機 `scripts/run-checks.sh`：通過可在 Command Line Tools 執行的建置、自測與 mock 管線。
-- GitHub Actions CI：成功。
+- Phase 0 基準 GitHub Actions CI：成功。
   - Run：https://github.com/cpn565-stack/record-to-text/actions/runs/30532925926
-  - 完整 Xcode 下 45 個 XCTest 通過。
+  - 完整 Xcode 下當時的 45 個 XCTest 通過。
   - unsigned App bundle 建置通過。
   - App bundle 無模型權重檢查通過。
 - Codex 受限環境沒有可用 Metal，因此**尚未確認真實 Qwen3-ASR 端到端轉錄**。
 
-## 下一次第一優先：30 分鐘預切
+## 已完成 checkpoint：30 分鐘預切
 
-已實際觀察到直接處理長錄音可能只輸出前段。需求已補入原始規格與 `docs/NEXT_STEPS.md`，但尚未實作。
+已實際觀察到直接處理長錄音可能只輸出前段。現在已在 Swift coordinator 完成：
 
-接續順序：
+- `AudioSegmentPlanner` 對 31／65／120 分鐘產生 2／3／4 段。
+- `ffmpeg` 依計畫輸出 `segment-0001.wav` 起的 16 kHz mono PCM WAV。
+- 每段使用獨立 ASR request 與 token budget。
+- `segment-manifest.json` 記錄片段編號、時間範圍、路徑、狀態與 completed 次數。
+- 只有片段連續、依序、非空白 UTF-8 且各恰好 completed 一次時才以 LF 合併。
+- 縮時 mock E2E 已證明尾端唯一驗證句存在且順序正確。
+- 中段／尾段失敗、空白、token limit 或未 completed 時，不產生 `_繁體.txt`。
+- 失敗時 recovery 會保留 `normalized.wav`、`recovery.json` 與 segment manifest。
 
-1. 由 Swift coordinator 使用 `ffprobe` 取得總時長。
-2. 超過 30 分鐘時，以 `ffmpeg` 產生依序編號、每段最長 30 分鐘的 WAV。
-3. 每段必須使用獨立 ASR 呼叫、token budget、完成事件與非空白 UTF-8 驗證。
-4. 只有片段數量、順序與內容全部通過，才能依 LF 合併、執行 OpenCC 並原子提交正式 TXT。
-5. 任一片段失敗、空白、達 token limit 或未送出 completed，整項工作失敗；不得留下部分正式 TXT。
-6. 使用 31、65、120 分鐘 fixture，並在尾端放唯一驗證句，確認最後一段沒有遺失。
+仍待以真實 Metal 模型及 31／65／120 分鐘音檔完成長時間驗收；目前不能宣稱任意長度會議已正式支援。
 
-現有 Python helper 內部 chunk **不算完成**這項需求；切段與完整性 gate 必須在 coordinator 層可觀察、可驗證。
+## 下一次第一優先：Job ledger
+
+`persistJobs()` 的保存上限不得套用到 active／queued 工作。即使 `recentJobLimit=0` 或佇列長度超過歷史顯示上限，App crash／重開後仍必須完整保存所有未完成工作；上限只可裁切 terminal history。
 
 ## 後續風險與待辦
 
 依優先順序：
 
-1. Job ledger 不可因 `recentJobLimit` 截掉 active／queued 工作。
-2. 啟動時掃描 system temp 與 `Temp-Recovery`，處理 crash 後孤兒檔案。
-3. 修正 ProcessRunner 在 launch 前取消的 race，並處理 helper 子程序樹。
-4. 為 ffprobe、ffmpeg、OpenCC 加入 timeout／inactivity watchdog。
-5. 同時檢查暫存位置與輸出 volume 的可用空間。
-6. 顯示最近工作的來源／輸出檔是否已移動或刪除，並決定完成工作日誌保留策略。
-7. 建立 App 管理、可重現且有簽章信任鏈的 arm64 Runtime／Model installer。
-8. 完成真實 Metal ASR、Intel 實機、Universal 2、Developer ID、公證、乾淨帳號與正式 DMG 驗收。
+1. 啟動時掃描 system temp 與 `Temp-Recovery`，處理 crash 後孤兒檔案。
+2. 修正 ProcessRunner 在 launch 前取消的 race，並處理 helper 子程序樹。
+3. 為 ffprobe、ffmpeg、OpenCC 加入 timeout／inactivity watchdog。
+4. 同時檢查暫存位置與輸出 volume 的可用空間。
+5. 顯示最近工作的來源／輸出檔是否已移動或刪除，並決定完成工作日誌保留策略。
+6. 建立 App 管理、可重現且有簽章信任鏈的 arm64 Runtime／Model installer。
+7. 完成真實 Metal ASR、Intel 實機、Universal 2、Developer ID、公證、乾淨帳號與正式 DMG 驗收。
 
 ## 重要界線
 
@@ -90,4 +94,4 @@ git status --short
 scripts/run-checks.sh
 ```
 
-若有完整 Xcode，`scripts/run-checks.sh` 會一併執行 XCTest。不要用真實長錄音開始下一輪；先以可控 fixture 完成 30 分鐘切段及尾段完整性測試。
+若有完整 Xcode，`scripts/run-checks.sh` 會一併執行 XCTest。下一輪先為 Job ledger 補上 `recentJobLimit=0`、超長佇列與 terminal history 裁切測試，再修改保存邏輯。
