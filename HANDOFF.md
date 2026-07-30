@@ -3,7 +3,7 @@
 - 交班日期：2026-07-30
 - Repository：https://github.com/cpn565-stack/record-to-text
 - 分支：`main`
-- 實作基準：`ff401b4`（Phase 0 checkpoint）
+- 實作基準：`2283747`（長錄音完整性 checkpoint）
 
 ## 一句話狀態
 
@@ -24,9 +24,10 @@
 ## 驗證狀態
 
 - 本機 `scripts/run-checks.sh`：通過可在 Command Line Tools 執行的建置、自測與 mock 管線。
-- Phase 0 基準 GitHub Actions CI：成功。
-  - Run：https://github.com/cpn565-stack/record-to-text/actions/runs/30532925926
-  - 完整 Xcode 下當時的 45 個 XCTest 通過。
+- 長錄音 checkpoint GitHub Actions CI：成功。
+  - Run：https://github.com/cpn565-stack/record-to-text/actions/runs/30537812415
+  - 完整 Xcode 下 55 個 XCTest 通過。
+  - 18 項 executable self-test 與九種管線情境通過。
   - unsigned App bundle 建置通過。
   - App bundle 無模型權重檢查通過。
 - Codex 受限環境沒有可用 Metal，因此**尚未確認真實 Qwen3-ASR 端到端轉錄**。

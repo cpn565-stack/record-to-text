@@ -216,14 +216,14 @@ Phase 0 只有在 SP-01 至 SP-12 都有實際證據後才算完成。若 Metal�
 - 31／65／120 分鐘 planner fixture 分別產生 2／3／4 段；縮時 E2E 使用真實 ffmpeg／OpenCC 驗證逐段 ASR、LF 順序合併與尾端唯一驗證句。
 - 中段／尾段 ASR 失敗、空白輸出、token limit 與缺少 completed event 時，皆不產生部分正式 TXT。
 - SwiftPM debug／release App 與 `.app` bundle 建置成功，兩個 helper resource 均位於 `Contents/Resources`。
-- 已建立 55 個 XCTest；目前 Command Line Tools 缺少 XCTest module，須由完整 Xcode 或 GitHub Actions 執行。
+- 55 個 XCTest 已由 GitHub Actions 完整 Xcode runner 通過；本機 Command Line Tools 仍無 XCTest module。
 
 仍未通過：
 
 - 真實 Qwen3-ASR／Metal 推論。
 - 1 分鐘、30 分鐘與 2 小時真實音檔。
 - 正式 Runtime、模型下載完整性、Intel、Universal 2、Developer ID、公證與乾淨帳號。
-- 完整 Xcode 下的 XCTest 與互動式 UI 驗收。
+- 互動式 UI 驗收。
 
 ## 10. Phase 0 不包含
 

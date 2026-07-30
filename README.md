@@ -140,7 +140,7 @@ swift test
 - Universal 2 `.app` 實機矩陣。
 - Developer ID 簽署、公證與正式 DMG。
 - 乾淨帳號首次啟動驗收。
-- 完整 Xcode 下的 55 個 XCTest 與互動式 UI 驗收。
+- 互動式 UI 驗收；55 個 XCTest 已由 GitHub Actions 完整通過。
 
 ## 發佈
 

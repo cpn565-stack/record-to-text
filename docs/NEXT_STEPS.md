@@ -33,7 +33,6 @@ PD-013 的 coordinator-level 實作已完成：
 
 ## 尚待外部驗證
 
-- 完整 Xcode 執行 55 個 XCTest。
 - 可使用 Metal 的真實 Qwen3-ASR：1、30、65、120 分鐘。
 - App 管理且簽署的 Runtime／Model installer、Intel 實機、Universal 2。
 - Developer ID、notarization、乾淨帳號與正式 DMG。
