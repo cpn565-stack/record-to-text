@@ -1,7 +1,7 @@
 import Foundation
 
 public enum OutputNameBuilder {
-    public static let defaultFinalSuffix = "_繁體"
+    public static let defaultFinalSuffix = "_逐字稿"
     public static let defaultRawSuffix = "_Qwen原始"
 
     public static func sanitizedStem(for sourceURL: URL) -> String {

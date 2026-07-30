@@ -11,15 +11,15 @@ final class OutputNameBuilderTests: XCTestCase {
             fileExists: { _ in false }
         )
 
-        XCTAssertEqual(output.lastPathComponent, "客戶 會議.v2_繁體.txt")
+        XCTAssertEqual(output.lastPathComponent, "客戶 會議.v2_逐字稿.txt")
     }
 
     func testAvailableNameIncrementsWithoutOverwritingExistingNames() {
         let directory = URL(fileURLWithPath: "/tmp/output", isDirectory: true)
         let source = URL(fileURLWithPath: "/tmp/訪談.m4a")
         let occupied = Set([
-            directory.appendingPathComponent("訪談_繁體.txt").path,
-            directory.appendingPathComponent("訪談_繁體_2.txt").path
+            directory.appendingPathComponent("訪談_逐字稿.txt").path,
+            directory.appendingPathComponent("訪談_逐字稿_2.txt").path
         ])
 
         let output = OutputNameBuilder.availableOutputURL(
@@ -28,7 +28,7 @@ final class OutputNameBuilderTests: XCTestCase {
             fileExists: { occupied.contains($0) }
         )
 
-        XCTAssertEqual(output.lastPathComponent, "訪談_繁體_3.txt")
+        XCTAssertEqual(output.lastPathComponent, "訪談_逐字稿_3.txt")
     }
 
     func testSanitizedStemRemovesControlCharactersAndColonThenTrims() {
@@ -80,12 +80,12 @@ final class OutputNameBuilderTests: XCTestCase {
             "原檔名_會議紀錄.txt"
         )
         XCTAssertEqual(
-            OutputNameBuilder.sanitizedSuffix("  a/b:c  ", fallback: "_繁體"),
+            OutputNameBuilder.sanitizedSuffix("  a/b:c  ", fallback: "_逐字稿"),
             "abc"
         )
         XCTAssertEqual(
-            OutputNameBuilder.sanitizedSuffix("   ", fallback: "_繁體"),
-            "_繁體"
+            OutputNameBuilder.sanitizedSuffix("   ", fallback: "_逐字稿"),
+            "_逐字稿"
         )
     }
 
@@ -105,7 +105,7 @@ final class OutputNameBuilderTests: XCTestCase {
         """.data(using: .utf8)!
 
         let snapshot = try JSONDecoder().decode(JobSnapshot.self, from: json)
-        XCTAssertEqual(snapshot.outputFilenameSuffix, "_繁體")
+        XCTAssertEqual(snapshot.outputFilenameSuffix, "_逐字稿")
         XCTAssertEqual(snapshot.rawFilenameSuffix, "_Qwen原始")
     }
 }

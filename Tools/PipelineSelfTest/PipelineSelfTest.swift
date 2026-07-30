@@ -246,7 +246,7 @@ private struct PipelineSelfTest {
                         at: outputDirectory,
                         includingPropertiesForKeys: nil
                     ).filter {
-                        $0.lastPathComponent.hasSuffix("_繁體.txt")
+                        $0.lastPathComponent.hasSuffix("_逐字稿.txt")
                     }
                     guard partialOutputs.isEmpty else {
                         throw SelfTestError.partialFinalOutputExists(
@@ -308,7 +308,7 @@ private struct PipelineSelfTest {
                 throw SelfTestError.unexpectedOutput(output)
             }
         }
-        guard result.outputURL.lastPathComponent == "會議 音檔（第一場）_繁體.txt" else {
+        guard result.outputURL.lastPathComponent == "會議 音檔（第一場）_逐字稿.txt" else {
             throw SelfTestError.unexpectedName(result.outputURL.lastPathComponent)
         }
         guard try FileIntegrity.sha256(of: sourceURL) == sourceHash else {

@@ -80,9 +80,9 @@ tests.check(
         let url = OutputNameBuilder.availableOutputURL(
             sourceURL: URL(fileURLWithPath: "/tmp/會議.m4a"),
             directory: directory,
-            fileExists: { $0.hasSuffix("會議_繁體.txt") }
+            fileExists: { $0.hasSuffix("會議_逐字稿.txt") }
         )
-        return url.lastPathComponent == "會議_繁體_2.txt"
+        return url.lastPathComponent == "會議_逐字稿_2.txt"
     }(),
     "OutputNameBuilder increments without overwrite"
 )
