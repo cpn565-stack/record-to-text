@@ -1,0 +1,266 @@
+import Darwin
+import Foundation
+import RecordToTextCore
+
+@main
+private struct PipelineSelfTest {
+    static func main() async {
+        do {
+            try await run()
+            switch ProcessInfo.processInfo.environment["RECORD_TO_TEXT_MOCK_SCENARIO"] {
+            case "failure":
+                print("PASS mock ASR failure → transcribing-stage recovery → temp cleanup")
+            case "slow":
+                print("PASS slow mock ASR → cancellation → temp cleanup")
+            default:
+                print("PASS ffprobe → ffmpeg → mock ASR → OpenCC → atomic TXT")
+            }
+            Darwin.exit(0)
+        } catch {
+            print("FAIL pipeline self-test: \(error)")
+            Darwin.exit(1)
+        }
+    }
+
+    private static func run() async throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("record-to-text-pipeline-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fileManager.removeItem(at: root) }
+
+        let sourceDirectory = root.appendingPathComponent(
+            "中文 路徑（測試）'single-quote'",
+            isDirectory: true
+        )
+        let sourceURL = sourceDirectory.appendingPathComponent("會議 音檔（第一場）.m4a")
+        let outputDirectory = root.appendingPathComponent("轉出的文字", isDirectory: true)
+        let supportPaths = ApplicationPaths(
+            root: root.appendingPathComponent("Application Support", isDirectory: true)
+        )
+        try fileManager.createDirectory(
+            at: sourceDirectory,
+            withIntermediateDirectories: true
+        )
+
+        let ffmpeg = URL(fileURLWithPath: "/opt/homebrew/bin/ffmpeg")
+        let ffprobe = URL(fileURLWithPath: "/opt/homebrew/bin/ffprobe")
+        let opencc = URL(fileURLWithPath: "/opt/homebrew/bin/opencc")
+        for tool in [ffmpeg, ffprobe, opencc] {
+            guard fileManager.isExecutableFile(atPath: tool.path) else {
+                throw SelfTestError.missingTool(tool.path)
+            }
+        }
+
+        let generator = ProcessRunner()
+        _ = try await generator.run(
+            executableURL: ffmpeg,
+            arguments: [
+                "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi",
+                "-i", "sine=frequency=440:sample_rate=44100",
+                "-t", "0.5",
+                "-c:a", "aac",
+                sourceURL.path
+            ]
+        )
+        let sourceHash = try FileIntegrity.sha256(of: sourceURL)
+
+        let executableDirectory = URL(
+            fileURLWithPath: CommandLine.arguments[0]
+        ).deletingLastPathComponent()
+        let mockHelper = executableDirectory
+            .appendingPathComponent("record-to-text-mock-helper")
+        guard fileManager.isExecutableFile(atPath: mockHelper.path) else {
+            throw SelfTestError.missingMockHelper(mockHelper.path)
+        }
+
+        let runtime = ResolvedRuntime(
+            python: URL(fileURLWithPath: "/usr/bin/env"),
+            ffmpeg: ffmpeg,
+            ffprobe: ffprobe,
+            opencc: opencc,
+            helper: mockHelper,
+            isDeveloperRuntime: true
+        )
+        let scenario = ProcessInfo.processInfo.environment["RECORD_TO_TEXT_MOCK_SCENARIO"]
+        let mockModelID: String
+        switch scenario {
+        case "failure":
+            mockModelID = "mock/failure"
+        case "slow":
+            mockModelID = "mock/slow"
+        default:
+            mockModelID = "mock/success"
+        }
+        let prompt = try PromptBuilder.build(
+            commonTerms: ["SPECIFIQUE"],
+            glossaryTerms: ["OGSTM"],
+            temporaryTerms: ["測試專有名詞"]
+        )
+        let snapshot = JobSnapshot(
+            modelID: mockModelID,
+            glossaryID: "self-test",
+            glossaryName: "Self Test",
+            terms: prompt.terms,
+            prompt: prompt.prompt,
+            outputLocationMode: .fixedDirectory,
+            outputDirectory: outputDirectory.path,
+            keepRawTranscript: false
+        )
+        let job = TranscriptionJob(sourcePath: sourceURL.path, snapshot: snapshot)
+        let engine = TranscriptionEngine(runtime: runtime, paths: supportPaths)
+        let workingDirectory = fileManager.temporaryDirectory
+            .appendingPathComponent("record-to-text", isDirectory: true)
+            .appendingPathComponent(job.id.uuidString, isDirectory: true)
+        var observedStages: [TranscriptionStage] = []
+        let expectsFailure = scenario == "failure"
+        let expectsCancellation = scenario == "slow"
+
+        if expectsCancellation {
+            let task = Task {
+                try await engine.run(job: job) { update in
+                    if case let .stage(stage) = update {
+                        observedStages.append(stage)
+                    }
+                }
+            }
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+            task.cancel()
+            engine.cancelCurrentJob()
+            do {
+                _ = try await task.value
+                throw SelfTestError.expectedCancellationMissing
+            } catch is CancellationError {
+                guard try FileIntegrity.sha256(of: sourceURL) == sourceHash else {
+                    throw SelfTestError.sourceChanged
+                }
+                if fileManager.fileExists(atPath: supportPaths.tempRecovery.path) {
+                    let remaining = try fileManager.contentsOfDirectory(
+                        atPath: supportPaths.tempRecovery.path
+                    )
+                    guard remaining.isEmpty else {
+                        throw SelfTestError.cancelledRecoveryRemains
+                    }
+                }
+                guard !fileManager.fileExists(atPath: workingDirectory.path) else {
+                    throw SelfTestError.temporaryFilesRemain
+                }
+                return
+            }
+        }
+
+        let result: PipelineResult
+        do {
+            result = try await engine.run(job: job) { update in
+                if case let .stage(stage) = update {
+                    observedStages.append(stage)
+                }
+            }
+        } catch let error as PipelineExecutionError where expectsFailure {
+            guard
+                let recovery = error.recoveryDirectory,
+                fileManager.fileExists(
+                    atPath: recovery.appendingPathComponent("normalized.wav").path
+                )
+            else {
+                throw SelfTestError.recoveryMissing
+            }
+            struct RecoveryMetadata: Decodable {
+                let failureStage: String
+            }
+            let metadata = try JSONDecoder().decode(
+                RecoveryMetadata.self,
+                from: Data(
+                    contentsOf: recovery.appendingPathComponent("recovery.json")
+                )
+            )
+            guard metadata.failureStage == TranscriptionStage.transcribing.rawValue else {
+                throw SelfTestError.unexpectedRecoveryStage(metadata.failureStage)
+            }
+            guard try FileIntegrity.sha256(of: sourceURL) == sourceHash else {
+                throw SelfTestError.sourceChanged
+            }
+            guard !fileManager.fileExists(atPath: workingDirectory.path) else {
+                throw SelfTestError.temporaryFilesRemain
+            }
+            return
+        }
+
+        if expectsFailure {
+            throw SelfTestError.expectedFailureMissing
+        }
+
+        let output = try String(contentsOf: result.outputURL, encoding: .utf8)
+        guard output.contains("這是 mock 逐字稿"), output.contains("OGSTM") else {
+            throw SelfTestError.unexpectedOutput(output)
+        }
+        guard result.outputURL.lastPathComponent == "會議 音檔（第一場）_繁體.txt" else {
+            throw SelfTestError.unexpectedName(result.outputURL.lastPathComponent)
+        }
+        guard try FileIntegrity.sha256(of: sourceURL) == sourceHash else {
+            throw SelfTestError.sourceChanged
+        }
+        guard !fileManager.fileExists(
+            atPath: supportPaths.tempRecovery
+                .appendingPathComponent(job.id.uuidString)
+                .path
+        ) else {
+            throw SelfTestError.temporaryFilesRemain
+        }
+        guard !fileManager.fileExists(atPath: workingDirectory.path) else {
+            throw SelfTestError.temporaryFilesRemain
+        }
+        guard
+            observedStages.contains(.convertingAudio),
+            observedStages.contains(.transcribing),
+            observedStages.contains(.convertingTraditionalChinese),
+            observedStages.last == .completed
+        else {
+            throw SelfTestError.missingStages(observedStages)
+        }
+    }
+}
+
+private enum SelfTestError: LocalizedError {
+    case missingTool(String)
+    case missingMockHelper(String)
+    case unexpectedOutput(String)
+    case unexpectedName(String)
+    case sourceChanged
+    case temporaryFilesRemain
+    case missingStages([TranscriptionStage])
+    case expectedFailureMissing
+    case expectedCancellationMissing
+    case recoveryMissing
+    case cancelledRecoveryRemains
+    case unexpectedRecoveryStage(String)
+
+    var errorDescription: String? {
+        switch self {
+        case let .missingTool(path):
+            return "Missing developer tool: \(path)"
+        case let .missingMockHelper(path):
+            return "Build record-to-text-mock-helper first: \(path)"
+        case let .unexpectedOutput(output):
+            return "Unexpected OpenCC output: \(output)"
+        case let .unexpectedName(name):
+            return "Unexpected output name: \(name)"
+        case .sourceChanged:
+            return "Source audio hash changed"
+        case .temporaryFilesRemain:
+            return "Successful job left recovery files"
+        case let .missingStages(stages):
+            return "Missing expected stages: \(stages.map(\.rawValue))"
+        case .expectedFailureMissing:
+            return "Mock failure scenario unexpectedly completed"
+        case .expectedCancellationMissing:
+            return "Slow mock scenario unexpectedly completed instead of cancelling"
+        case .recoveryMissing:
+            return "Failed job did not preserve normalized.wav in Temp-Recovery"
+        case .cancelledRecoveryRemains:
+            return "Cancelled job left files in Temp-Recovery"
+        case let .unexpectedRecoveryStage(stage):
+            return "Recovery metadata recorded the wrong failure stage: \(stage)"
+        }
+    }
+}

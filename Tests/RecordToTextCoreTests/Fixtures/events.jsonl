@@ -1,0 +1,6 @@
+{"type":"capability","supportsSystemPrompt":true,"supportsContext":false}
+{"type":"stage","value":"loading_model"}
+{"type":"progress","current":12,"total":72,"unit":"chunks"}
+{"type":"heartbeat"}
+{"type":"warning","code":"glossary_hint","message":"已套用專有名詞提示","recoverable":true}
+{"type":"completed","outputPath":"/tmp/raw.txt","durationSeconds":95.4}

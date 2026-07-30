@@ -1,0 +1,3 @@
+# Phase 0 core pins. NOT a release-ready --require-hashes lock.
+mlx-audio==0.4.6
+transformers==5.12.1

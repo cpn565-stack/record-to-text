@@ -1,0 +1,16 @@
+# EXPERIMENTAL Intel x86_64 spike core compatibility lock.
+#
+# This is deliberately not represented as a release-grade, hash-locked
+# dependency closure. qwen-asr 0.0.6 leaves several transitive dependencies
+# unpinned. Freeze the complete x86_64 wheelhouse with SHA-256 hashes only after
+# a successful cold install and inference run on genuine Intel Mac hardware.
+#
+# Required interpreter: CPython 3.12.x, macOS x86_64.
+
+numpy==1.26.4
+torch==2.2.2
+qwen-asr==0.0.6
+transformers==4.57.6
+accelerate==1.12.0
+nagisa==0.2.11
+soynlp==0.0.493

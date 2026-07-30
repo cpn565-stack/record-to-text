@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install integration-test tools
+        run: brew install ffmpeg opencc
+
+      - name: Build and test
+        env:
+          REQUIRE_XCTEST: "1"
+        run: scripts/run-checks.sh
+
+      - name: Build unsigned App bundle
+        run: scripts/build-app.sh
+
+      - name: Verify bundle has no model weights
+        run: ALLOW_UNSIGNED=1 scripts/verify-release.sh dist/record-to-text.app

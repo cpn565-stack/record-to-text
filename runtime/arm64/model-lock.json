@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "status": "phase0-integrity-incomplete",
+  "repositoryID": "mlx-community/Qwen3-ASR-1.7B-8bit",
+  "revision": "a8379a2e2f9e313c9292cdf1af4055ab56d50d55",
+  "license": "apache-2.0",
+  "architecture": "arm64",
+  "backend": "mlx-audio-0.4.6",
+  "files": [],
+  "releaseGate": "Populate expected file paths, sizes and SHA-256 digests before release."
+}
