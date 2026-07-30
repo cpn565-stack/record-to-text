@@ -35,6 +35,16 @@
 | Universal 2 | Pending | 需完整 Xcode 與兩種實機 |
 | 簽署／公證／DMG | Scripts ready, credentials pending | 需 Developer ID 與 notarytool profile |
 | 乾淨帳號 | Pending | 需正式 Runtime artifact |
+| 自動檢查更新 | Planned | 約每週一次；啟動後若逾間隔則安靜檢查 GitHub Releases；有新版再提示；可手動檢查；見 [NEXT_STEPS.md](NEXT_STEPS.md) |
+
+## 規劃中（非 P0 阻塞，但要做）
+
+### 自動檢查更新
+
+- **間隔**：預設約每 **7 天** 一次（設定可調或關閉）。
+- **行為**：檢查遠端是否有新 App 版本；有則提示下載／Release 頁，不強制中斷使用。
+- **不做（第一階段）**：未簽署前不強制自動替換本機 `.app`；不與模型下載混成同一個「更新」按鈕語意。
+- **證據完成條件**：settings 記錄上次檢查時間；mock／fixture 可測「有更新／無更新／離線」；正式發佈通道就緒後對真實 Release 驗一次。
 
 ## 第一版明確不做
 

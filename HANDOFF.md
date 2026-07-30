@@ -70,10 +70,11 @@
 1. 復原掃描的清理／復原操作 UI（二次確認、只動 App 管理範圍）。
 2. 修正 ProcessRunner 在 launch 前取消的 race，並處理 helper 子程序樹。
 3. 為 ffprobe、ffmpeg、OpenCC 加入 timeout／inactivity watchdog。
-4. 同時檢查暫存位置與輸出 volume 的可用空間。
+4. 同時檢查暫存磁碟與輸出 volume 的可用空間。
 5. 顯示最近工作的來源／輸出檔是否已移動或刪除，並決定完成工作日誌保留策略。
 6. 建立 App 管理、可重現且有簽章信任鏈的 arm64 Runtime／Model installer。
-7. 完成真實 Metal ASR、Intel 實機、Universal 2、Developer ID、公證、乾淨帳號與正式 DMG 驗收。
+7. **自動檢查更新**（約每週一次）：見 `docs/NEXT_STEPS.md`「規劃中：自動檢查更新」；預設 7 天間隔、安靜檢查、有新版再提示、可手動檢查；第一階段以 GitHub Releases 為來源，不強制自動覆蓋安裝。
+8. 完成真實 Metal ASR、Intel 實機、Universal 2、Developer ID、公證、乾淨帳號與正式 DMG 驗收。
 
 ## 重要界線
 

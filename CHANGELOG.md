@@ -31,8 +31,13 @@
 - Helper 改用最小環境變數白名單，不繼承終端機或 CI 的無關憑證。
 - `recentJobLimit` 只裁切最近摘要與 terminal history，不再刪除 queued／active／interrupted ledger 工作。
 
+### Planned
+
+- 自動檢查更新（PD-015）：預設約每 7 天檢查 GitHub Releases；有新版再提示；可手動檢查；細節見 `docs/NEXT_STEPS.md`。
+
 ### Known limitations
 
 - 尚未在可使用 Metal 的 App 執行環境完成真實 Qwen3-ASR 驗證。
 - 正式 Runtime、Universal 2、Developer ID、公證與 DMG 尚需外部條件。
 - Coordinator 分段邏輯已完成，但真實 Metal 模型搭配 31／65／120 分鐘音檔的 soak test 尚未執行。
+- 尚無 App 自動檢查更新。

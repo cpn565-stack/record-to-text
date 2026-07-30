@@ -31,6 +31,7 @@
 | PD-012 | 公開顯示名稱待品牌檢視，不以 Qwen 名稱暗示官方關係 | Accepted |
 | PD-013 | 超過 30 分鐘的音檔必須由 coordinator 在 ASR 前明確切段；不得只依賴 backend 內部 chunk | Accepted |
 | PD-014 | Job ledger 的 durable work 不受最近工作顯示上限裁切 | Accepted |
+| PD-015 | App 自動檢查更新：預設約每 7 天一次，安靜檢查、有新版再提示 | Accepted（待實作） |
 
 ## 3. 詳細決策
 
@@ -304,6 +305,26 @@ Coordinator-level 30 分鐘預切、分段 manifest 與完整性 gate 已完成�
 
 Core policy 測試涵蓋 limit 0、佇列長於上限、interrupted 保存、terminal 新舊排序、completed 排除、日誌裁切與 JSON round-trip。
 
+### PD-015：自動檢查更新（約每週一次）
+
+**決策**
+
+- 產品應提供 **App 版本** 自動檢查更新，預設間隔約 **7 天**（可關閉或調整）。
+- 檢查應安靜進行：不擋轉錄佇列；無新版本或離線時不反覆打擾。
+- 發現新版本時以非阻斷方式提示，並引導至 Release／下載頁；使用者自行決定是否更新。
+- 設定內提供「立即檢查更新」與「上次檢查時間」。
+- 第一階段以 **GitHub Releases** 為來源；Stable 通道不應把 prerelease 當成必裝更新。
+- 第一階段不做強制自動覆蓋安裝；自動下載／替換 `.app` 須在簽署與公證流程就緒後另案評估（例如 Sparkle）。
+- App 更新與 **模型／Runtime 更新** 語意分離。
+
+**理由**
+
+開發期依賴手動抓 DMG 可行；進入可對外發版後，使用者需要低干擾的更新感知，又不能每次啟動都打網路或打斷會議轉錄。
+
+**狀態**
+
+已寫入 `docs/NEXT_STEPS.md` 與 `docs/product-spec.md`；**程式尚未實作**。
+
 ## 4. Phase 0 決策閘門
 
 Phase 0 完成時必須回答：
@@ -327,4 +348,5 @@ Phase 0 完成時必須回答：
 - 正式 Runtime artifact。
 - Developer ID、notarization 與 DMG。
 - 乾淨帳號首次啟動。
+- 自動檢查更新（PD-015，約每週一次）。
 - 首次 GitHub Actions 完整 XCTest 執行。

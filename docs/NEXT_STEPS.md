@@ -39,6 +39,30 @@ PD-013 的 coordinator-level 實作已完成：
 - 同時檢查暫存磁碟與實際輸出 volume 的可用空間。
 - 最近工作顯示來源／輸出已移動或刪除；決定完成工作日誌的保留策略。
 
+## 規劃中：自動檢查更新（約每週一次）
+
+產品要做 **App 自動檢查更新**，不要做成每次開 App 都打網路。
+
+### 行為目標
+
+- **預設間隔**：約 **7 天** 檢查一次（可設定，例如關閉／每天／每週）。
+- **觸發時機**：App 啟動後、且距上次成功檢查已超過間隔；背景安靜檢查，不擋轉錄佇列。
+- **有新版本時**：非阻斷提示（通知或設定內 banner），顯示目前版號、新版版號與 Release 說明摘要；使用者決定是否開啟下載頁。
+- **無新版本／離線／檢查失敗**：安靜失敗或僅在設定顯示「上次檢查時間」，不要一直跳錯誤。
+- **手動**：設定內提供「立即檢查更新」。
+
+### 技術方向（實作時再定稿）
+
+- 來源優先 **GitHub Releases**（例如 `cpn565-stack/record-to-text` 的 latest / 已標記 prerelease 策略要分開：Stable 只看正式 release）。
+- 比對 `CFBundleShortVersionString`／`CFBundleVersion` 與遠端 tag 或 manifest。
+- 只做 **檢查 + 引導下載**；自動下載安裝可第二階段（需簽署 DMG／公證後再談 Sparkle 或自管 installer）。
+- 記錄 `lastUpdateCheckAt` 於 `settings.json`；遵守「不把 token 寫進 repo」；公開 API 即可，不需使用者 HF token。
+- 與 Runtime／模型更新分開：App 更新 ≠ 模型重下；模型更新仍走既有 Models 流程。
+
+### 依賴
+
+- 較適合在 **有正式 Release 發佈流程** 後上線；Phase 0 可先做 stub／設定項與週期邏輯，遠端 URL 對準 GitHub Releases。
+
 ## 尚待外部驗證
 
 - 可使用 Metal 的真實 Qwen3-ASR：1、30、65、120 分鐘。
