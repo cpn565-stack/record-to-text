@@ -15,6 +15,7 @@
 - Helper liveness warning、慢速取消整合測試與失敗復原資料刪除 UI。
 - Coordinator-level 30 分鐘預切、segment manifest、逐段獨立 ASR 與全段完整性 gate。
 - 31／65／120 分鐘 planner fixture，以及中段／尾段失敗、空白、token limit、未 completed 的 fail-closed 管線測試。
+- Durable Job retention policy 與 limit 0、長佇列、terminal history、日誌裁切及 JSON round-trip 測試。
 
 ### Changed
 
@@ -24,6 +25,7 @@
 - `settings.json` 成為產品設定唯一 source of truth。
 - 使用 exclusive atomic rename 避免競態覆寫；拒收空白或非 UTF-8 逐字稿。
 - Helper 改用最小環境變數白名單，不繼承終端機或 CI 的無關憑證。
+- `recentJobLimit` 只裁切最近摘要與 terminal history，不再刪除 queued／active／interrupted ledger 工作。
 
 ### Known limitations
 

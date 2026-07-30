@@ -14,7 +14,8 @@
 - MLX-Audio Apple Silicon helper；Prompt 走 Qwen3-ASR 的 `system_prompt`，不支援時 fail closed。
 - Intel Experimental helper 與獨立版本鎖；尚未通過 Intel 實機。
 - 設定與詞庫 JSON 持久化、失敗 WAV `Temp-Recovery`、來源檔不經修改。
-- 55 個 XCTest（需完整 Xcode）與 18 項不依賴 XCTest 的本機 self-test。
+- Job ledger 將 queued／active／interrupted 工作視為 durable，不受最近工作顯示上限裁切。
+- 63 個 XCTest（需完整 Xcode）與 20 項不依賴 XCTest 的本機 self-test。
 - Mock helper 真實串接 ffmpeg／OpenCC 的成功、失敗復原與慢速取消測試。
 - 30 秒 helper 無活動警告、非覆寫原子輸出、空白／非 UTF-8 結果拒收。
 - 簽署、公證、DMG 與 Release scripts；缺憑證時不會冒充正式發佈。
@@ -86,7 +87,7 @@ scripts/run-checks.sh
 這會執行：
 
 - Core 與 App 編譯。
-- 18 項 executable self-test。
+- 20 項 executable self-test。
 - Swift mock helper 編譯。
 - 真實 ffprobe／ffmpeg／OpenCC 成功管線。
 - Mock ASR 失敗時的 `Temp-Recovery`、正確失敗階段與暫存清除。
@@ -127,7 +128,7 @@ swift test
 
 轉錄內容、詞庫、檔名與路徑不會上傳。網路只預留給 Runtime／模型下載及使用者主動檢查更新。
 
-`recent-jobs.json` 只保存不含 Prompt、詞彙與日誌的摘要；可重試工作的完整 Snapshot 僅在 `job-ledger.json` 保存，並限制筆數與日誌行數。
+`recent-jobs.json` 只保存不含 Prompt、詞彙與日誌的摘要。可重試工作的完整 Snapshot 僅在 `job-ledger.json` 保存；queued／active／interrupted 工作不受 `recentJobLimit` 影響，只有 terminal history 會裁切，單筆日誌仍限制行數。
 
 ## 目前未完成
 
@@ -140,7 +141,7 @@ swift test
 - Universal 2 `.app` 實機矩陣。
 - Developer ID 簽署、公證與正式 DMG。
 - 乾淨帳號首次啟動驗收。
-- 互動式 UI 驗收；55 個 XCTest 已由 GitHub Actions 完整通過。
+- 互動式 UI 驗收；63 個 XCTest 由 GitHub Actions 作為完整 gate。
 
 ## 發佈
 

@@ -204,7 +204,7 @@ Phase 0 只有在 SP-01 至 SP-12 都有實際證據後才算完成。若 Metal�
 已通過：
 
 - `RecordToTextCore` 以 Swift 6.1.2 compiler、Swift 5 language mode 編譯成功。
-- executable self-test：18 passed，0 failed。
+- executable self-test：20 passed，0 failed。
 - Swift mock helper 編譯成功。
 - 使用真實 ffprobe、ffmpeg 與 OpenCC 的 mock ASR E2E 成功。
 - 路徑包含中文、空格、全形括號與單引號；來源 SHA-256 前後相同。
@@ -215,8 +215,9 @@ Phase 0 只有在 SP-01 至 SP-12 都有實際證據後才算完成。若 Metal�
 - OpenCC `s2twp`、UTF-8、LF、無 BOM 與 `_繁體.txt` 命名驗證成功。
 - 31／65／120 分鐘 planner fixture 分別產生 2／3／4 段；縮時 E2E 使用真實 ffmpeg／OpenCC 驗證逐段 ASR、LF 順序合併與尾端唯一驗證句。
 - 中段／尾段 ASR 失敗、空白輸出、token limit 與缺少 completed event 時，皆不產生部分正式 TXT。
+- Job retention policy 在 `recentJobLimit=0` 與佇列長於上限時仍保存全部 durable work；terminal history、log cap 與 JSON round-trip 測試通過。
 - SwiftPM debug／release App 與 `.app` bundle 建置成功，兩個 helper resource 均位於 `Contents/Resources`。
-- 55 個 XCTest 已由 GitHub Actions 完整 Xcode runner 通過；本機 Command Line Tools 仍無 XCTest module。
+- 已建立 63 個 XCTest；前一 checkpoint 的 55 個已由 GitHub Actions 通過，本次新增測試須由下一次 CI gate 驗證。
 
 仍未通過：
 

@@ -304,4 +304,62 @@ tests.check(
     "AudioSegmentManifest gates merge on one completion per ordered segment"
 )
 
+private let retentionSnapshot = JobSnapshot(
+    modelID: "mock/model",
+    glossaryID: nil,
+    glossaryName: nil,
+    terms: [],
+    prompt: "忠實轉錄",
+    outputLocationMode: .fixedDirectory,
+    outputDirectory: "/tmp/output",
+    keepRawTranscript: false
+)
+
+tests.check(
+    {
+        let queued = TranscriptionJob(
+            sourcePath: "/tmp/queued.m4a",
+            snapshot: retentionSnapshot,
+            stage: .queued
+        )
+        let active = TranscriptionJob(
+            sourcePath: "/tmp/active.m4a",
+            snapshot: retentionSnapshot,
+            stage: .transcribing
+        )
+        let interrupted = TranscriptionJob(
+            sourcePath: "/tmp/interrupted.m4a",
+            snapshot: retentionSnapshot,
+            stage: .interrupted
+        )
+        let completed = TranscriptionJob(
+            sourcePath: "/tmp/completed.m4a",
+            snapshot: retentionSnapshot,
+            stage: .completed
+        )
+        return JobRetentionPolicy.ledgerJobs(
+            [queued, active, interrupted, completed],
+            terminalHistoryLimit: 0
+        ).map(\.id) == [queued.id, active.id, interrupted.id]
+    }(),
+    "JobRetentionPolicy keeps unfinished work when recentJobLimit is zero"
+)
+
+tests.check(
+    {
+        let queued = (0..<20).map { index in
+            TranscriptionJob(
+                sourcePath: "/tmp/queued-\(index).m4a",
+                snapshot: retentionSnapshot,
+                stage: .queued
+            )
+        }
+        return JobRetentionPolicy.ledgerJobs(
+            queued,
+            terminalHistoryLimit: 2
+        ).map(\.id) == queued.map(\.id)
+    }(),
+    "JobRetentionPolicy never truncates a queue longer than history limit"
+)
+
 tests.finish()

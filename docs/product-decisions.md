@@ -30,6 +30,7 @@
 | PD-011 | Phase 0 長音檔門檻為 30 分鐘；更長支援須另行驗證 | Provisional |
 | PD-012 | 公開顯示名稱待品牌檢視，不以 Qwen 名稱暗示官方關係 | Accepted |
 | PD-013 | 超過 30 分鐘的音檔必須由 coordinator 在 ASR 前明確切段；不得只依賴 backend 內部 chunk | Accepted |
+| PD-014 | Job ledger 的 durable work 不受最近工作顯示上限裁切 | Accepted |
 
 ## 3. 詳細決策
 
@@ -284,6 +285,24 @@ Release 不得只白名單 `mlx-community/Qwen3-ASR-1.7B-8bit` 這個可變 repo
 Coordinator-level 30 分鐘預切、分段 manifest 與完整性 gate 已完成。31／65／120 分鐘的 deterministic planner fixture，以及縮時 ffmpeg／OpenCC／mock ASR E2E 已驗證順序合併、尾段唯一驗證句與「中段／尾段失敗、空白、token limit、未 completed 時不提交正式 TXT」。
 
 尚未完成的證據邊界是真實 Metal 模型搭配 31／65／120 分鐘實際音檔的 soak test；在此之前不得把本決策的程式完成誤寫成正式支援任意長度。
+
+### PD-014：Job ledger 保存與顯示上限分離
+
+**決策**
+
+- queued、所有 active stages，以及 crash 後轉成 interrupted 的工作是 durable work。
+- `recentJobLimit` 只控制最近工作摘要與 terminal history，不得截斷 durable work。
+- `recentJobLimit=0` 仍須完整保存 durable work。
+- completed 工作不寫入 ledger；failed／cancelled 可依上限只保留最新項目。
+- Ledger 保存仍限制單筆日誌行數，避免無限增長。
+
+**理由**
+
+最近工作是 UI 顯示偏好，不是資料耐久性設定。若把同一上限直接套到 ledger，長佇列或 limit 0 會在 crash／重開後遺失尚未處理的錄音，這不是歷史裁切，而是工作資料遺失。
+
+**驗證**
+
+Core policy 測試涵蓋 limit 0、佇列長於上限、interrupted 保存、terminal 新舊排序、completed 排除、日誌裁切與 JSON round-trip。
 
 ## 4. Phase 0 決策閘門
 

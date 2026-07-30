@@ -16,16 +16,22 @@ PD-013 的 coordinator-level 實作已完成：
 
 尚待真實 Metal 模型與 31／65／120 分鐘音檔 soak test；完成前不宣稱正式支援任意長度。
 
-## 第一優先：Job ledger 保存
+## 已完成：Job ledger 保存
 
-- Job ledger 的保存上限不得套用到 active／queued 工作。
-- `recentJobLimit=0` 仍須保存所有未完成工作。
-- 佇列大於歷史顯示上限時，crash／重開不得遺失 queued 工作。
-- 上限只裁切 terminal history，並補上 persistence 與 restart 測試。
+- Job ledger 保存上限不再套用到 queued／active／interrupted 工作。
+- `recentJobLimit=0` 與超長佇列都會完整保存 durable jobs。
+- completed 不進 ledger；failed／cancelled 只保留最新 terminal history。
+- 已加入 JSON round-trip、restart retention、terminal 裁切與 log cap 測試。
+
+## 第一優先：啟動復原掃描
+
+- 建立唯讀 scanner，盤點 system temp `record-to-text/<jobID>` 與 `Temp-Recovery`。
+- 只接受 UUID job 目錄與本 App 定義的檔名／metadata schema。
+- 顯示可復原、孤立、損壞三種狀態；第一步不自動刪除。
+- 不追蹤或刪除 App 管理根目錄以外的任何路徑。
 
 ## 其次處理
 
-- 啟動時掃描並整理 system temp 與 `Temp-Recovery`，避免 crash 後產生孤兒音訊或 request。
 - 修正 ProcessRunner 在 launch 前取消的 race，並評估 helper 子程序樹終止。
 - 為 ffprobe、ffmpeg、OpenCC 加入合理 timeout／inactivity watchdog。
 - 同時檢查暫存磁碟與實際輸出 volume 的可用空間。

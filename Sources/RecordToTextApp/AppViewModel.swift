@@ -1082,29 +1082,14 @@ final class AppViewModel: ObservableObject {
         }
 
         let limit = max(settings.recentJobLimit, 0)
-        recentJobs.sort {
-            ($0.completedAt ?? $0.startedAt ?? .distantPast)
-                < ($1.completedAt ?? $1.startedAt ?? .distantPast)
-        }
-        if recentJobs.count > limit {
-            recentJobs.removeFirst(recentJobs.count - limit)
-        }
-
-        var ledgerJobs = jobs.filter { $0.stage != .completed }
-        if ledgerJobs.count > limit {
-            var retained = Array(ledgerJobs.suffix(limit))
-            if let activeJobID,
-               let active = ledgerJobs.first(where: { $0.id == activeJobID }),
-               !retained.contains(where: { $0.id == activeJobID }),
-               !retained.isEmpty {
-                retained.removeFirst()
-                retained.insert(active, at: 0)
-            }
-            ledgerJobs = retained
-        }
-        for index in ledgerJobs.indices where ledgerJobs[index].logLines.count > 100 {
-            ledgerJobs[index].logLines = Array(ledgerJobs[index].logLines.suffix(100))
-        }
+        recentJobs = JobRetentionPolicy.recentSummaries(
+            recentJobs,
+            limit: limit
+        )
+        let ledgerJobs = JobRetentionPolicy.ledgerJobs(
+            jobs,
+            terminalHistoryLimit: limit
+        )
 
         do {
             try recentJobsRepository.save(RecentJobCollection(jobs: recentJobs))
@@ -1118,24 +1103,15 @@ final class AppViewModel: ObservableObject {
     }
 
     private func pruneHistoryIfNeeded() {
-        let terminal = jobs
-            .filter(\.stage.isTerminal)
-            .sorted {
-                ($0.completedAt ?? $0.createdAt)
-                    < ($1.completedAt ?? $1.createdAt)
-            }
-        let overflow = terminal.count - max(settings.recentJobLimit, 0)
-        guard overflow > 0 else {
-            return
-        }
-        let idsToRemove = Set(terminal.prefix(overflow).map(\.id))
-        jobs.removeAll(where: { idsToRemove.contains($0.id) })
-
-        if recentJobs.count > max(settings.recentJobLimit, 0) {
-            recentJobs.removeFirst(
-                recentJobs.count - max(settings.recentJobLimit, 0)
-            )
-        }
+        let limit = max(settings.recentJobLimit, 0)
+        jobs = JobRetentionPolicy.inMemoryJobs(
+            jobs,
+            terminalHistoryLimit: limit
+        )
+        recentJobs = JobRetentionPolicy.recentSummaries(
+            recentJobs,
+            limit: limit
+        )
     }
 
     private static let durationFormatter: DateComponentsFormatter = {

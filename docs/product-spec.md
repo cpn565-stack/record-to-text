@@ -27,7 +27,7 @@
 | OpenCC 台灣繁體 | Implemented | mock E2E 使用真實 `s2twp` 通過 |
 | UTF-8 / LF / 無 BOM | Implemented | self-test 通過 |
 | 原子輸出與不覆蓋 | Implemented | `renamex_np(RENAME_EXCL)`；self-test / XCTest |
-| 設定／詞庫／最近工作 | Implemented | JSON repository 與 App wiring；互動仍待驗收 |
+| 設定／詞庫／最近工作 | Implemented | JSON repository 與 App wiring；durable ledger 不受 recentJobLimit 裁切，含 limit 0／長佇列 round-trip 測試；互動仍待驗收 |
 | Runtime／模型下載管理 | Partial | schema 與安全決策已完成；正式 artifact、下載 UI、簽章未完成 |
 | Apple Silicon 真實工作 | Pending | 需可用 Metal 的 App 執行環境與測試音檔 |
 | 超過 30 分鐘長錄音 | Implemented, real soak pending | Coordinator-level 30 分鐘預切、逐段獨立 ASR、manifest gate、LF 順序合併與 fail-closed mock E2E 已完成；真實 Metal 31／65／120 分鐘仍待驗證 |

@@ -7,7 +7,7 @@
 
 ## 一句話狀態
 
-目前已完成可編譯、可測試的 **Phase 0 / Apple Silicon Developer Mode MVP**，以及 coordinator-level 30 分鐘預切與完整性 gate；但尚不是可交付一般使用者的 Stable 版本。下一個 checkpoint 是修正 Job ledger 對 active／queued 工作的保存上限。
+目前已完成可編譯、可測試的 **Phase 0 / Apple Silicon Developer Mode MVP**、coordinator-level 30 分鐘預切，以及 durable Job ledger；但尚不是可交付一般使用者的 Stable 版本。下一個 checkpoint 是啟動時掃描並整理 system temp／`Temp-Recovery`。
 
 ## 已確認完成
 
@@ -15,10 +15,11 @@
 - 詞庫、Prompt、工作 Snapshot、拖放、多檔單工佇列、取消、錯誤與最近工作。
 - `ffprobe -> ffmpeg -> ASR helper -> OpenCC -> 原子 TXT` 管線。
 - 超過 30 分鐘時產生編號 WAV、逐段獨立 ASR、manifest 狀態追蹤與全段成功後順序合併。
+- Job ledger 永遠保留 queued／active／interrupted 工作，`recentJobLimit` 只裁切 terminal history。
 - Apple Silicon MLX-Audio helper，以及標示為 Experimental 的 Intel helper。
 - 非覆寫原子輸出、空白／非 UTF-8 拒收、失敗 WAV 復原與暫存清理。
-- 18 項 executable self-test，以及九種成功／失敗／取消／分段管線整合情境。
-- 55 個 XCTest。
+- 20 項 executable self-test，以及九種成功／失敗／取消／分段管線整合情境。
+- 63 個 XCTest。
 - Release、簽署、公證、DMG 與驗證 scripts；缺少憑證時會停止，不會假裝正式發佈成功。
 
 ## 驗證狀態
@@ -47,21 +48,29 @@
 
 仍待以真實 Metal 模型及 31／65／120 分鐘音檔完成長時間驗收；目前不能宣稱任意長度會議已正式支援。
 
-## 下一次第一優先：Job ledger
+## 已完成 checkpoint：Job ledger
 
-`persistJobs()` 的保存上限不得套用到 active／queued 工作。即使 `recentJobLimit=0` 或佇列長度超過歷史顯示上限，App crash／重開後仍必須完整保存所有未完成工作；上限只可裁切 terminal history。
+- `JobRetentionPolicy` 將 queued、active stages 與 crash 後的 interrupted 工作視為 durable。
+- `recentJobLimit=0` 仍會保存全部未完成工作。
+- 佇列即使長於歷史顯示上限也不會被 ledger 截斷。
+- completed 不寫入 ledger；failed／cancelled 只保留最新 terminal history。
+- 保存時每筆 ledger 日誌仍裁切為最後 100 行。
+- 已加入 JSON round-trip、limit 0、長佇列、terminal 新舊排序與 log cap 測試。
+
+## 下一次第一優先：啟動復原掃描
+
+App 啟動時掃描自己管理的 system temp `record-to-text/<jobID>` 與 `Temp-Recovery`。必須區分可顯示的復原資料、已孤立的工作暫存和不屬於本 App 的路徑；不得自動刪除無法確認歸屬的檔案。
 
 ## 後續風險與待辦
 
 依優先順序：
 
-1. 啟動時掃描 system temp 與 `Temp-Recovery`，處理 crash 後孤兒檔案。
-2. 修正 ProcessRunner 在 launch 前取消的 race，並處理 helper 子程序樹。
-3. 為 ffprobe、ffmpeg、OpenCC 加入 timeout／inactivity watchdog。
-4. 同時檢查暫存位置與輸出 volume 的可用空間。
-5. 顯示最近工作的來源／輸出檔是否已移動或刪除，並決定完成工作日誌保留策略。
-6. 建立 App 管理、可重現且有簽章信任鏈的 arm64 Runtime／Model installer。
-7. 完成真實 Metal ASR、Intel 實機、Universal 2、Developer ID、公證、乾淨帳號與正式 DMG 驗收。
+1. 修正 ProcessRunner 在 launch 前取消的 race，並處理 helper 子程序樹。
+2. 為 ffprobe、ffmpeg、OpenCC 加入 timeout／inactivity watchdog。
+3. 同時檢查暫存位置與輸出 volume 的可用空間。
+4. 顯示最近工作的來源／輸出檔是否已移動或刪除，並決定完成工作日誌保留策略。
+5. 建立 App 管理、可重現且有簽章信任鏈的 arm64 Runtime／Model installer。
+6. 完成真實 Metal ASR、Intel 實機、Universal 2、Developer ID、公證、乾淨帳號與正式 DMG 驗收。
 
 ## 重要界線
 
@@ -95,4 +104,4 @@ git status --short
 scripts/run-checks.sh
 ```
 
-若有完整 Xcode，`scripts/run-checks.sh` 會一併執行 XCTest。下一輪先為 Job ledger 補上 `recentJobLimit=0`、超長佇列與 terminal history 裁切測試，再修改保存邏輯。
+若有完整 Xcode，`scripts/run-checks.sh` 會一併執行 XCTest。下一輪先建立不執行刪除的 recovery scanner 與 fixture，確認只辨識 App 管理範圍後，再決定孤兒暫存的清理 UI。
