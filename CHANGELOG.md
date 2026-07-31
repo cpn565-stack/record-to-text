@@ -9,7 +9,8 @@
 - Runtime 設定可選 Apple Silicon 模型：`Qwen3-ASR 1.7B 8-bit`、`1.7B BF16`、`0.6B 8-bit`（含鎖定 revision）。
 - 模型選擇旁提供「下載模型／匯入本機模型」：優先從 `~/.cache/huggingface` 匯入，否則下載到 App Models 目錄。
 - 預設輸出檔名後綴改為 `_逐字稿`（例如 `原檔名_逐字稿.txt`）。
-- 啟動時唯讀掃描 system temp 與 Temp-Recovery，分類可復原／孤立／損壞；不自動刪除。
+- 啟動時掃描 system temp 與 Temp-Recovery，分類可復原／孤立／損壞；可確認後刪除或批次清孤立／損壞；可復原可重新加入來源音檔。
+- ProcessRunner：修復 launch 前取消 race；取消時終止 process group（helper 子程序）。
 - 建立 `record-to-text` SwiftPM 專案與原生 SwiftUI App。
 - Apple Silicon MLX-Audio JSONL helper 與 Intel Experimental helper。
 - 專有名詞、Prompt、詞庫、設定、佇列、輸出命名與原子寫入。
@@ -23,6 +24,7 @@
 
 ### Changed
 
+- 長音檔 coordinator 預切由 30 分鐘改為 **20 分鐘**；ASR 預設 `maximumTokens` 由 8192 提高到 **16384**（helper 上限），降低密語段撞 token 上限的機率。
 - 最低系統由原始規格的 macOS 13 修正為 macOS 14。
 - 正式產品名稱改為 `record-to-text`。
 - Intel 支援由既定功能修正為 Blocked / Experimental，需實機 Spike。

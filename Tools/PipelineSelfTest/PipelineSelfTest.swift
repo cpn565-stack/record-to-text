@@ -138,7 +138,7 @@ private struct PipelineSelfTest {
         let engine = TranscriptionEngine(
             runtime: runtime,
             paths: supportPaths,
-            maximumASRSegmentDuration: isSegmentedScenario ? 1 : 1_800
+            maximumASRSegmentDuration: isSegmentedScenario ? 1 : 1_200
         )
         let workingDirectory = fileManager.temporaryDirectory
             .appendingPathComponent("record-to-text", isDirectory: true)

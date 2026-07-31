@@ -2,53 +2,65 @@ import XCTest
 @testable import RecordToTextCore
 
 final class AudioSegmentationTests: XCTestCase {
-    func testThirtyOneMinutesProducesTwoSegments() throws {
-        let plan = try AudioSegmentPlanner.makePlan(sourceDuration: 31 * 60)
+    func testTwentyOneMinutesProducesTwoSegments() throws {
+        let plan = try AudioSegmentPlanner.makePlan(sourceDuration: 21 * 60)
 
         XCTAssertEqual(plan.expectedSegmentCount, 2)
         XCTAssertTrue(plan.requiresSplitting)
         XCTAssertEqual(plan.segments.map(\.index), [1, 2])
-        XCTAssertEqual(plan.segments.map(\.durationSeconds), [1_800, 60])
+        XCTAssertEqual(plan.segments.map(\.durationSeconds), [1_200, 60])
         XCTAssertEqual(
             plan.segments.map(\.audioFileName),
             ["segment-0001.wav", "segment-0002.wav"]
         )
     }
 
-    func testSixtyFiveMinutesProducesThreeSegments() throws {
-        let plan = try AudioSegmentPlanner.makePlan(sourceDuration: 65 * 60)
+    func testThirtyOneMinutesProducesTwoSegmentsWithTwentyMinuteCap() throws {
+        let plan = try AudioSegmentPlanner.makePlan(sourceDuration: 31 * 60)
 
-        XCTAssertEqual(plan.expectedSegmentCount, 3)
-        XCTAssertEqual(
-            plan.segments.map(\.startSeconds),
-            [0, 1_800, 3_600]
-        )
-        XCTAssertEqual(
-            plan.segments.map(\.durationSeconds),
-            [1_800, 1_800, 300]
-        )
-        XCTAssertEqual(plan.segments[0].endSeconds, plan.segments[1].startSeconds)
-        XCTAssertEqual(plan.segments[1].endSeconds, plan.segments[2].startSeconds)
-        XCTAssertEqual(plan.segments[2].endSeconds, 65 * 60)
+        XCTAssertEqual(plan.expectedSegmentCount, 2)
+        XCTAssertEqual(plan.segments.map(\.durationSeconds), [1_200, 660])
     }
 
-    func testOneHundredTwentyMinutesProducesFourFullSegments() throws {
-        let plan = try AudioSegmentPlanner.makePlan(sourceDuration: 120 * 60)
+    func testSixtyFiveMinutesProducesFourSegments() throws {
+        let plan = try AudioSegmentPlanner.makePlan(sourceDuration: 65 * 60)
 
         XCTAssertEqual(plan.expectedSegmentCount, 4)
         XCTAssertEqual(
+            plan.segments.map(\.startSeconds),
+            [0, 1_200, 2_400, 3_600]
+        )
+        XCTAssertEqual(
             plan.segments.map(\.durationSeconds),
-            [1_800, 1_800, 1_800, 1_800]
+            [1_200, 1_200, 1_200, 300]
+        )
+        XCTAssertEqual(plan.segments[0].endSeconds, plan.segments[1].startSeconds)
+        XCTAssertEqual(plan.segments[1].endSeconds, plan.segments[2].startSeconds)
+        XCTAssertEqual(plan.segments[2].endSeconds, plan.segments[3].startSeconds)
+        XCTAssertEqual(plan.segments[3].endSeconds, 65 * 60)
+    }
+
+    func testOneHundredTwentyMinutesProducesSixFullSegments() throws {
+        let plan = try AudioSegmentPlanner.makePlan(sourceDuration: 120 * 60)
+
+        XCTAssertEqual(plan.expectedSegmentCount, 6)
+        XCTAssertEqual(
+            plan.segments.map(\.durationSeconds),
+            [1_200, 1_200, 1_200, 1_200, 1_200, 1_200]
         )
         XCTAssertEqual(plan.segments.last?.endSeconds, 7_200)
     }
 
-    func testExactlyThirtyMinutesDoesNotRequireSplitting() throws {
-        let plan = try AudioSegmentPlanner.makePlan(sourceDuration: 30 * 60)
+    func testExactlyTwentyMinutesDoesNotRequireSplitting() throws {
+        let plan = try AudioSegmentPlanner.makePlan(sourceDuration: 20 * 60)
 
         XCTAssertEqual(plan.expectedSegmentCount, 1)
         XCTAssertFalse(plan.requiresSplitting)
-        XCTAssertEqual(plan.segments[0].durationSeconds, 1_800)
+        XCTAssertEqual(plan.segments[0].durationSeconds, 1_200)
+        XCTAssertEqual(
+            AudioSegmentPlanner.productionMaximumDuration,
+            20 * 60
+        )
     }
 
     func testManifestRequiresEverySegmentCompletedExactlyOnce() throws {
@@ -65,7 +77,7 @@ final class AudioSegmentationTests: XCTestCase {
 
         XCTAssertEqual(
             try manifest.validatedCompletedSegments().map(\.segmentIndex),
-            [1, 2, 3]
+            [1, 2, 3, 4]
         )
     }
 
@@ -83,8 +95,8 @@ final class AudioSegmentationTests: XCTestCase {
             else {
                 return XCTFail("Unexpected error: \(error)")
             }
-            XCTAssertEqual(expected, 3)
-            XCTAssertEqual(actual, 2)
+            XCTAssertEqual(expected, 4)
+            XCTAssertEqual(actual, 3)
         }
     }
 
@@ -102,8 +114,8 @@ final class AudioSegmentationTests: XCTestCase {
             else {
                 return XCTFail("Unexpected error: \(error)")
             }
-            XCTAssertEqual(expected, [1, 2, 3])
-            XCTAssertEqual(actual, [2, 1, 3])
+            XCTAssertEqual(expected, [1, 2, 3, 4])
+            XCTAssertEqual(actual, [2, 1, 3, 4])
         }
     }
 

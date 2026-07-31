@@ -256,7 +256,7 @@ public final class TranscriptionEngine {
                 update(
                     .log(
                         level: "info",
-                        message: "音檔超過 30 分鐘，將切成 \(segmentPlan.expectedSegmentCount) 段後逐段轉錄。"
+                        message: "音檔超過 20 分鐘，將切成 \(segmentPlan.expectedSegmentCount) 段後逐段轉錄。"
                     )
                 )
                 for segment in segmentPlan.segments {

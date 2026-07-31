@@ -27,9 +27,9 @@
 | PD-008 | 失敗 WAV 移入 `Temp-Recovery`，成功與取消則清除 | Accepted |
 | PD-009 | 所有合法 JSONL event 都刷新 liveness，無事件時 helper 發 heartbeat | Accepted |
 | PD-010 | 模型必須固定 revision 與 digest，不能只鎖 repo ID | Accepted |
-| PD-011 | Phase 0 長音檔門檻為 30 分鐘；更長支援須另行驗證 | Provisional |
+| PD-011 | Phase 0 長音檔門檻／預切長度為 **20 分鐘**；更長支援須另行驗證 | Provisional |
 | PD-012 | 公開顯示名稱待品牌檢視，不以 Qwen 名稱暗示官方關係 | Accepted |
-| PD-013 | 超過 30 分鐘的音檔必須由 coordinator 在 ASR 前明確切段；不得只依賴 backend 內部 chunk | Accepted |
+| PD-013 | 超過預切上限的音檔必須由 coordinator 在 ASR 前明確切段；不得只依賴 backend 內部 chunk（目前上限 **20 分鐘**） | Accepted |
 | PD-014 | Job ledger 的 durable work 不受最近工作顯示上限裁切 | Accepted |
 | PD-015 | App 自動檢查更新：預設約每 7 天一次，安靜檢查、有新版再提示 | Accepted（待實作） |
 
@@ -275,7 +275,8 @@ Release 不得只白名單 `mlx-community/Qwen3-ASR-1.7B-8bit` 這個可變 repo
 
 **決策**
 
-- 超過 30 分鐘的來源音檔，在送入 ASR 前由 coordinator 切成每段最長 30 分鐘的編號 WAV。
+- 超過 **20 分鐘**的來源音檔，在送入 ASR 前由 coordinator 切成每段最長 **20 分鐘**的編號 WAV。
+- 每段 ASR 預設 `maximumTokens` 為 **16384**（helper 允許上限），fail-closed 於 token 頂滿時不交部分正式 TXT。
 - 每段使用獨立 ASR 呼叫與獨立 token budget。
 - 預期片段全部成功、非空白、UTF-8、順序完整後，才可合併並提交正式 TXT。
 - 任一片段失敗、缺漏、達 token limit 或未 completed，整筆工作失敗；不得把前段輸出當成完整結果。

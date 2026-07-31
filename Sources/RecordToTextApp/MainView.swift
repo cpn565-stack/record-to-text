@@ -26,7 +26,9 @@ struct MainView: View {
                 } label: {
                     Label("詞庫管理", systemImage: "text.book.closed")
                 }
-                .help("管理共用詞彙與專案詞庫")
+                .help("詞庫管理：編輯共用詞彙與專案詞庫，供轉錄 Prompt 使用")
+                .accessibilityLabel("詞庫管理")
+                .accessibilityHint("開啟詞庫管理視窗")
 
                 Button {
                     viewModel.refreshEnvironment()
@@ -34,19 +36,25 @@ struct MainView: View {
                 } label: {
                     Label("環境檢查", systemImage: "checkmark.shield")
                 }
-                .help("檢查 Runtime 與轉錄工具")
+                .help("環境檢查：確認 Python、ffmpeg、ffprobe、OpenCC 與 ASR helper 是否就緒")
+                .accessibilityLabel("環境檢查")
+                .accessibilityHint("開啟執行環境檢查")
 
                 Button {
                     viewModel.refreshRecoveryScan()
                 } label: {
                     Label("復原掃描", systemImage: "externaldrive.badge.timemachine")
                 }
-                .help("唯讀掃描系統暫存與 Temp-Recovery")
+                .help("復原掃描：檢查系統暫存與 Temp-Recovery，可刪除殘留或重新加入來源音檔")
+                .accessibilityLabel("復原掃描")
+                .accessibilityHint("掃描並管理未清理的暫存與復原資料")
 
                 SettingsLink {
                     Label("設定", systemImage: "gearshape")
                 }
-                .help("開啟設定")
+                .help("設定：輸出位置、檔名後綴、模型選擇、通知與 Developer Mode")
+                .accessibilityLabel("設定")
+                .accessibilityHint("開啟 App 設定")
             }
         }
         .sheet(isPresented: $viewModel.isPromptPreviewPresented) {

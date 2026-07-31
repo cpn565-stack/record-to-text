@@ -207,7 +207,9 @@ public enum AudioSegmentationError: LocalizedError {
 }
 
 public enum AudioSegmentPlanner {
-    public static let productionMaximumDuration: TimeInterval = 30 * 60
+    /// Coordinator pre-split length. 20 minutes balances token budget risk
+    /// vs segment count for long meetings.
+    public static let productionMaximumDuration: TimeInterval = 20 * 60
 
     public static func makePlan(
         sourceDuration: TimeInterval,

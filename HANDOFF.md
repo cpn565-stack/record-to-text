@@ -7,7 +7,7 @@
 
 ## 一句話狀態
 
-目前已完成可編譯、可測試的 **Phase 0 / Apple Silicon Developer Mode MVP**、coordinator-level 30 分鐘預切、durable Job ledger，以及**啟動時唯讀復原掃描**；但尚不是可交付一般使用者的 Stable 版本。下一個 checkpoint 是復原掃描之上的清理／復原操作 UI（仍須確認且只動 App 管理範圍）。
+目前已完成可編譯、可測試的 **Phase 0 / Apple Silicon Developer Mode MVP**、coordinator-level 30 分鐘預切、durable Job ledger、**復原掃描（含清理／重新加入來源）**，以及 ProcessRunner 取消 race／程序樹終止；但尚不是可交付一般使用者的 Stable 版本。下一個 checkpoint 建議為 timeout／watchdog 與磁碟空間檢查。
 
 ## 已確認完成
 
@@ -57,24 +57,27 @@
 - 保存時每筆 ledger 日誌仍裁切為最後 100 行。
 - 已加入 JSON round-trip、limit 0、長佇列、terminal 新舊排序與 log cap 測試。
 
-## 已完成 checkpoint：啟動復原掃描（唯讀）
+## 已完成 checkpoint：啟動復原掃描 + 操作 UI
 
 - `RecoveryScanner` 盤點 `{tmpdir}/record-to-text/<UUID>` 與 `Temp-Recovery/<UUID>`。
-- 狀態：可復原／孤立／損壞；非 UUID 忽略；**不刪除**。
-- 啟動有發現時顯示 sheet；工具列「復原掃描」可重跑。
+- 狀態：可復原／孤立／損壞；非 UUID 忽略。
+- 刪除／批次清孤立與損壞：二次確認 + 路徑驗證；可復原可「重新加入來源」。
+- **不自動刪除**；不刪原始音檔或正式 TXT。
+
+## 已完成 checkpoint：ProcessRunner 取消
+
+- launch 前取消以 `cancelRequested` 中止；執行中對 process group 升級終止訊號。
 
 ## 後續風險與待辦
 
 依優先順序：
 
-1. 復原掃描的清理／復原操作 UI（二次確認、只動 App 管理範圍）。
-2. 修正 ProcessRunner 在 launch 前取消的 race，並處理 helper 子程序樹。
-3. 為 ffprobe、ffmpeg、OpenCC 加入 timeout／inactivity watchdog。
-4. 同時檢查暫存磁碟與輸出 volume 的可用空間。
-5. 顯示最近工作的來源／輸出檔是否已移動或刪除，並決定完成工作日誌保留策略。
-6. 建立 App 管理、可重現且有簽章信任鏈的 arm64 Runtime／Model installer。
-7. **自動檢查更新**（約每週一次）：見 `docs/NEXT_STEPS.md`「規劃中：自動檢查更新」；預設 7 天間隔、安靜檢查、有新版再提示、可手動檢查；第一階段以 GitHub Releases 為來源，不強制自動覆蓋安裝。
-8. 完成真實 Metal ASR、Intel 實機、Universal 2、Developer ID、公證、乾淨帳號與正式 DMG 驗收。
+1. 為 ffprobe、ffmpeg、OpenCC 加入 timeout／inactivity watchdog。
+2. 同時檢查暫存磁碟與輸出 volume 的可用空間。
+3. 顯示最近工作的來源／輸出檔是否已移動或刪除，並決定完成工作日誌保留策略。
+4. 建立 App 管理、可重現且有簽章信任鏈的 arm64 Runtime／Model installer。
+5. **自動檢查更新**（約每週一次）：見 `docs/NEXT_STEPS.md`「規劃中：自動檢查更新」。
+6. 完成真實 Metal ASR、Intel 實機、Universal 2、Developer ID、公證、乾淨帳號與正式 DMG 驗收。
 
 ## 重要界線
 

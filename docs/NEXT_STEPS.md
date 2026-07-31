@@ -6,7 +6,7 @@
 
 PD-013 的 coordinator-level 實作已完成：
 
-1. ffprobe 取得總時長，`AudioSegmentPlanner` 以 1,800 秒建立分段計畫。
+1. ffprobe 取得總時長，`AudioSegmentPlanner` 以 **1,200 秒（20 分鐘）** 建立分段計畫；每段 ASR 預設 token 預算 **16384**。
 2. Swift coordinator／ffmpeg 產生依序編號的 WAV。
 3. 每段使用獨立 ASR 呼叫與 token budget。
 4. Segment manifest 要求編號連續、順序正確、非空白 UTF-8 且 completed 恰好一次。
@@ -23,18 +23,23 @@ PD-013 的 coordinator-level 實作已完成：
 - completed 不進 ledger；failed／cancelled 只保留最新 terminal history。
 - 已加入 JSON round-trip、restart retention、terminal 裁切與 log cap 測試。
 
-## 已完成：啟動復原掃描（唯讀）
+## 已完成：啟動復原掃描（唯讀 + 操作 UI）
 
 - `RecoveryScanner` 盤點 system temp `record-to-text/<UUID>` 與 App `Temp-Recovery/<UUID>`。
 - 只接受 UUID 目錄；非 UUID 計入 ignored，不掃管線外路徑。
 - 分類：可復原（有效 recovery.json + WAV）、孤立暫存、損壞／schema 不符。
-- 啟動有發現時顯示 sheet；工具列「復原掃描」可重跑；**不自動刪除**。
-- Finder 開啟前再次驗證路徑落在管理根目錄內。
+- 啟動有發現時顯示 sheet；工具列「復原掃描」可重跑。
+- **刪除／批次清除孤立與損壞**：二次確認；`validatedManagedJobDirectory` 拒絕範圍外路徑。
+- **可復原**：可「重新加入來源」音檔到佇列（來源仍存在時）；Finder 顯示復原目錄。
+- **不自動刪除**；不刪原始錄音或正式 TXT。
+
+## 已完成：ProcessRunner 取消 race 與程序樹
+
+- `cancelRequested`：launch 前取消也能中止，不再只在 `isRunning` 時送訊號。
+- 啟動後 `setpgid`；取消時對 **process group** 送 SIGINT → SIGTERM → SIGKILL，涵蓋 helper 子程序。
 
 ## 第一優先（下一輪）
 
-- 在唯讀掃描之上提供清理／復原操作 UI（仍須二次確認，且只動 App 管理範圍）。
-- 修正 ProcessRunner 在 launch 前取消的 race，並評估 helper 子程序樹終止。
 - 為 ffprobe、ffmpeg、OpenCC 加入合理 timeout／inactivity watchdog。
 - 同時檢查暫存磁碟與實際輸出 volume 的可用空間。
 - 最近工作顯示來源／輸出已移動或刪除；決定完成工作日誌的保留策略。

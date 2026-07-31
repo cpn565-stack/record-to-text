@@ -20,7 +20,7 @@
 - 專有名詞解析、去重、Prompt 預覽與工作 Snapshot。
 - 拖放、多選、單工佇列、取消、錯誤與最近工作。
 - `ffprobe → ffmpeg → ASR helper → OpenCC → 原子寫入 TXT`。
-- 超過 30 分鐘：coordinator 切成編號 WAV、逐段獨立 ASR；全部通過 manifest gate 後才合併，中段／尾段失敗不交部分結果。
+- 超過 **20 分鐘**：coordinator 切成編號 WAV、逐段獨立 ASR（預設 token 預算 16384）；全部通過 manifest gate 後才合併，中段／尾段失敗不交部分結果。
 - Apple Silicon：MLX-Audio helper；Prompt 走 `system_prompt`，不支援則 fail closed。
 - 設定／詞庫 JSON、失敗 WAV `Temp-Recovery`、來源檔不修改。
 - Job ledger：queued／active／interrupted 為 durable，不受「最近工作」上限裁切。

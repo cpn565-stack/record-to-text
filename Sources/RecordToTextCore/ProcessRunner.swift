@@ -32,6 +32,7 @@ public enum ProcessRunnerError: LocalizedError {
     case alreadyRunning
     case couldNotLaunch(executable: String, underlying: Error)
     case nonZeroExit(executable: String, status: Int32, standardError: String)
+    case cancelledBeforeLaunch(executable: String)
 
     public var errorDescription: String? {
         switch self {
@@ -42,6 +43,8 @@ public enum ProcessRunnerError: LocalizedError {
         case let .nonZeroExit(executable, status, standardError):
             let details = standardError.trimmingCharacters(in: .whitespacesAndNewlines)
             return "\(executable) 結束碼為 \(status)。\(details)"
+        case let .cancelledBeforeLaunch(executable):
+            return "\(executable) 在啟動前已取消。"
         }
     }
 }
@@ -145,6 +148,9 @@ private final class ProcessCapture: @unchecked Sendable {
 public final class ProcessRunner: @unchecked Sendable {
     private let lock = NSLock()
     private var currentProcess: Process?
+    /// Set by `cancelCurrent()`; checked before/after launch so cancel
+    /// before `process.run()` cannot leave an orphan process.
+    private var cancelRequested = false
 
     public init() {}
 
@@ -184,11 +190,19 @@ public final class ProcessRunner: @unchecked Sendable {
             guard currentProcess == nil else {
                 return false
             }
+            // Fresh run: clear prior cancel so a new job can start after cancel.
+            cancelRequested = false
             currentProcess = process
             return true
         }
         guard didRegister else {
             throw ProcessRunnerError.alreadyRunning
+        }
+
+        // Cancel may arrive after registration but before launch.
+        if lock.withLock({ cancelRequested }) || Task.isCancelled {
+            clear(process)
+            throw CancellationError()
         }
 
         stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
@@ -202,6 +216,18 @@ public final class ProcessRunner: @unchecked Sendable {
         do {
             result = try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation { continuation in
+                    var resumed = false
+                    let resumeLock = NSLock()
+                    func resumeOnce(_ body: () -> Void) {
+                        resumeLock.lock()
+                        defer { resumeLock.unlock() }
+                        guard !resumed else {
+                            return
+                        }
+                        resumed = true
+                        body()
+                    }
+
                     process.terminationHandler = { [weak self] terminated in
                         stdoutPipe.fileHandleForReading.readabilityHandler = nil
                         stderrPipe.fileHandleForReading.readabilityHandler = nil
@@ -211,26 +237,50 @@ public final class ProcessRunner: @unchecked Sendable {
                         let captured = capture.finish()
 
                         self?.clear(process)
-                        continuation.resume(
-                            returning: ProcessResult(
-                                terminationStatus: terminated.terminationStatus,
-                                terminationReason: terminated.terminationReason,
-                                standardOutput: captured.stdout,
-                                standardError: captured.stderr
+                        resumeOnce {
+                            continuation.resume(
+                                returning: ProcessResult(
+                                    terminationStatus: terminated.terminationStatus,
+                                    terminationReason: terminated.terminationReason,
+                                    standardOutput: captured.stdout,
+                                    standardError: captured.stderr
+                                )
                             )
-                        )
+                        }
                     }
 
                     do {
+                        // Abort if cancelled while setting up handlers.
+                        if self.lock.withLock({ self.cancelRequested }) || Task.isCancelled {
+                            self.clear(process)
+                            resumeOnce {
+                                continuation.resume(throwing: CancellationError())
+                            }
+                            return
+                        }
+
                         try process.run()
+
+                        // Become process-group leader so cancel can signal the tree.
+                        let pid = process.processIdentifier
+                        if pid > 0 {
+                            _ = setpgid(pid, 0)
+                        }
+
+                        // Cancel raced in between run() and setpgid — kill now.
+                        if self.lock.withLock({ self.cancelRequested }) || Task.isCancelled {
+                            self.terminateProcessTree(process)
+                        }
                     } catch {
                         self.clear(process)
-                        continuation.resume(
-                            throwing: ProcessRunnerError.couldNotLaunch(
-                                executable: executableURL.path,
-                                underlying: error
+                        resumeOnce {
+                            continuation.resume(
+                                throwing: ProcessRunnerError.couldNotLaunch(
+                                    executable: executableURL.path,
+                                    underlying: error
+                                )
                             )
-                        )
+                        }
                     }
                 }
             } onCancel: { [weak self] in
@@ -239,6 +289,12 @@ public final class ProcessRunner: @unchecked Sendable {
         } catch {
             clear(process)
             throw error
+        }
+
+        // If we were cancelled, surface CancellationError even when the process
+        // exited with a non-zero status from SIGINT/SIGTERM/SIGKILL.
+        if lock.withLock({ cancelRequested }) || Task.isCancelled {
+            throw CancellationError()
         }
 
         if requireSuccess, result.terminationStatus != 0 {
@@ -252,25 +308,51 @@ public final class ProcessRunner: @unchecked Sendable {
     }
 
     public func cancelCurrent() {
-        let process = lock.withLock { currentProcess }
+        let process = lock.withLock { () -> Process? in
+            cancelRequested = true
+            return currentProcess
+        }
 
-        guard let process, process.isRunning else {
+        guard let process else {
             return
         }
 
-        Darwin.kill(process.processIdentifier, SIGINT)
+        // Even if not yet isRunning (pre-launch), mark cancel; run() aborts.
+        // If already running, escalate signals across the process group.
+        if process.isRunning {
+            terminateProcessTree(process)
+        }
+    }
+
+    /// SIGINT → SIGTERM → SIGKILL against the process group (negative PID)
+    /// so helper children (e.g. Python → MLX workers) are included when
+    /// `setpgid` succeeded after launch.
+    private func terminateProcessTree(_ process: Process) {
+        let pid = process.processIdentifier
+        guard pid > 0 else {
+            return
+        }
+
+        // Negative PID = process group. Also interrupt the Process handle.
+        _ = Darwin.kill(-pid, SIGINT)
+        if process.isRunning {
+            process.interrupt()
+        }
 
         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2) {
             guard process.isRunning else {
                 return
             }
-            Darwin.kill(process.processIdentifier, SIGTERM)
+            _ = Darwin.kill(-pid, SIGTERM)
+            process.terminate()
 
             DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2) {
                 guard process.isRunning else {
                     return
                 }
-                Darwin.kill(process.processIdentifier, SIGKILL)
+                _ = Darwin.kill(-pid, SIGKILL)
+                // Fallback: direct PID if group kill failed.
+                _ = Darwin.kill(pid, SIGKILL)
             }
         }
     }

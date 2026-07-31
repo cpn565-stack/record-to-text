@@ -219,6 +219,107 @@ public enum RecoveryScanner {
         }
     }
 
+    public static func managedRoots(
+        paths: ApplicationPaths,
+        fileManager: FileManager = .default,
+        systemTempRoot: URL? = nil
+    ) -> [URL] {
+        let tempRoot = (systemTempRoot ?? systemTempJobsRoot(fileManager: fileManager))
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+        let recoveryRoot = paths.tempRecovery
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+        return [tempRoot, recoveryRoot]
+    }
+
+    /// Validates that `item.directoryPath` is exactly one UUID child of a managed root.
+    public static func validatedManagedJobDirectory(
+        for item: RecoveryScanItem,
+        paths: ApplicationPaths,
+        fileManager: FileManager = .default,
+        systemTempRoot: URL? = nil
+    ) throws -> URL {
+        let roots = managedRoots(
+            paths: paths,
+            fileManager: fileManager,
+            systemTempRoot: systemTempRoot
+        )
+        let target = URL(fileURLWithPath: item.directoryPath, isDirectory: true)
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+
+        guard parseJobDirectoryName(target.lastPathComponent) != nil else {
+            throw RecoveryCleanupError.notUUIDDirectory(target.path)
+        }
+
+        let parent = target.deletingLastPathComponent()
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+        let parentMatches = roots.contains { root in
+            root.standardizedFileURL.resolvingSymlinksInPath().path == parent.path
+        }
+        guard parentMatches else {
+            throw RecoveryCleanupError.pathOutsideManagedRoots(target.path)
+        }
+
+        // Exact match: directory must be direct child of root, not a nested path.
+        guard isPathInsideManagedRoot(target, roots: roots) else {
+            throw RecoveryCleanupError.pathOutsideManagedRoots(target.path)
+        }
+
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: target.path, isDirectory: &isDirectory),
+              isDirectory.boolValue
+        else {
+            throw RecoveryCleanupError.directoryMissing(target.path)
+        }
+
+        return target
+    }
+
+    /// Deletes one scanned leftover directory after path validation.
+    /// Never touches paths outside App-managed temp / Temp-Recovery roots.
+    public static func deleteItem(
+        _ item: RecoveryScanItem,
+        paths: ApplicationPaths,
+        fileManager: FileManager = .default,
+        systemTempRoot: URL? = nil
+    ) throws {
+        let target = try validatedManagedJobDirectory(
+            for: item,
+            paths: paths,
+            fileManager: fileManager,
+            systemTempRoot: systemTempRoot
+        )
+        try fileManager.removeItem(at: target)
+    }
+
+    /// Deletes orphaned and damaged items only (never recoverable unless included).
+    public static func deleteItems(
+        _ items: [RecoveryScanItem],
+        paths: ApplicationPaths,
+        fileManager: FileManager = .default,
+        systemTempRoot: URL? = nil
+    ) throws -> (deleted: Int, failures: [(RecoveryScanItem, Error)]) {
+        var deleted = 0
+        var failures: [(RecoveryScanItem, Error)] = []
+        for item in items {
+            do {
+                try deleteItem(
+                    item,
+                    paths: paths,
+                    fileManager: fileManager,
+                    systemTempRoot: systemTempRoot
+                )
+                deleted += 1
+            } catch {
+                failures.append((item, error))
+            }
+        }
+        return (deleted, failures)
+    }
+
     // MARK: - Private
 
     private static func kindSortRank(_ kind: RecoveryItemKind) -> Int {
@@ -610,6 +711,23 @@ public enum RecoveryScanner {
             recognizedFileNames: recognized,
             unknownEntryNames: unknown
         )
+    }
+}
+
+public enum RecoveryCleanupError: LocalizedError, Equatable {
+    case pathOutsideManagedRoots(String)
+    case notUUIDDirectory(String)
+    case directoryMissing(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case let .pathOutsideManagedRoots(path):
+            return "拒絕操作：路徑不在 record-to-text 管理的暫存／復原範圍內（\(path)）。"
+        case let .notUUIDDirectory(path):
+            return "拒絕操作：不是 UUID 工作目錄（\(path)）。"
+        case let .directoryMissing(path):
+            return "目錄已不存在（\(path)）。"
+        }
     }
 }
 

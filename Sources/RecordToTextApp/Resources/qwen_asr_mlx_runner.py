@@ -98,7 +98,7 @@ def validate_request(request: dict[str, Any]) -> None:
     if not isinstance(terms, list) or not all(isinstance(term, str) for term in terms):
         raise ValueError("terms must be an array of strings")
 
-    maximum_tokens = request.get("maximumTokens", 8192)
+    maximum_tokens = request.get("maximumTokens", 16_384)
     if isinstance(maximum_tokens, bool) or not isinstance(maximum_tokens, int):
         raise ValueError("maximumTokens must be an integer")
     if maximum_tokens < 1 or maximum_tokens > 16_384:
@@ -250,7 +250,7 @@ def transcribe(request: dict[str, Any]) -> None:
 
     generation_arguments: dict[str, Any] = {
         "language": request.get("language") or "Chinese",
-        "max_tokens": int(request.get("maximumTokens", 8192)),
+        "max_tokens": int(request.get("maximumTokens", 16_384)),
         "verbose": False,
     }
     if prompt and supports_system_prompt:

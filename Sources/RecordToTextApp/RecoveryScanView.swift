@@ -12,9 +12,12 @@ struct RecoveryScanView: View {
             if let report = viewModel.recoveryScanReport, !report.items.isEmpty {
                 List {
                     ForEach(report.items) { item in
-                        RecoveryScanRow(item: item) {
-                            viewModel.revealRecoveryScanItem(item)
-                        }
+                        RecoveryScanRow(
+                            item: item,
+                            onReveal: { viewModel.revealRecoveryScanItem(item) },
+                            onRequeue: { viewModel.requeueRecoverableSource(item) },
+                            onDelete: { viewModel.requestDeleteRecoveryScanItem(item) }
+                        )
                     }
                 }
                 .listStyle(.inset)
@@ -28,13 +31,18 @@ struct RecoveryScanView: View {
                 .frame(maxWidth: .infinity, minHeight: 200)
             }
 
-            Text("此掃描為唯讀：不會自動刪除任何檔案。目前僅盤點 record-to-text 管理範圍內的 UUID 工作目錄。")
+            Text("刪除僅限 App 管理的 UUID 工作目錄，且需確認。不會動到原始錄音或正式輸出的文字檔。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
             HStack {
                 Button("重新掃描") {
                     viewModel.refreshRecoveryScan()
+                }
+                if hasNonRecoverableItems {
+                    Button("清除孤立與損壞…", role: .destructive) {
+                        viewModel.requestBulkCleanupNonRecoverable()
+                    }
                 }
                 Spacer()
                 Button("關閉") {
@@ -44,14 +52,80 @@ struct RecoveryScanView: View {
             }
         }
         .padding(20)
-        .frame(width: 640, height: 520)
+        .frame(width: 680, height: 560)
+        .confirmationDialog(
+            deleteDialogTitle,
+            isPresented: Binding(
+                get: { viewModel.recoveryItemPendingDeletion != nil },
+                set: { if !$0 { viewModel.cancelDeleteRecoveryScanItem() } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("刪除這個目錄", role: .destructive) {
+                viewModel.confirmDeleteRecoveryScanItem()
+            }
+            Button("取消", role: .cancel) {
+                viewModel.cancelDeleteRecoveryScanItem()
+            }
+        } message: {
+            Text(deleteDialogMessage)
+        }
+        .confirmationDialog(
+            "清除所有孤立與損壞項目？",
+            isPresented: $viewModel.isBulkCleanupConfirmationPresented,
+            titleVisibility: .visible
+        ) {
+            Button("清除 \(nonRecoverableCount) 項", role: .destructive) {
+                viewModel.confirmBulkCleanupNonRecoverable()
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("只會刪除「孤立暫存」與「損壞／異常」目錄，不會刪除「可復原」項目。此操作無法復原。")
+        }
+    }
+
+    private var hasNonRecoverableItems: Bool {
+        nonRecoverableCount > 0
+    }
+
+    private var nonRecoverableCount: Int {
+        viewModel.recoveryScanReport?.items.filter {
+            $0.kind == .orphaned || $0.kind == .damaged
+        }.count ?? 0
+    }
+
+    private var deleteDialogTitle: String {
+        if let item = viewModel.recoveryItemPendingDeletion {
+            return "刪除\(kindTitle(item.kind))？"
+        }
+        return "刪除復原資料？"
+    }
+
+    private var deleteDialogMessage: String {
+        guard let item = viewModel.recoveryItemPendingDeletion else {
+            return ""
+        }
+        return """
+        將永久刪除：
+        \(item.directoryPath)
+
+        不會刪除原始錄音或已輸出的文字檔。
+        """
+    }
+
+    private func kindTitle(_ kind: RecoveryItemKind) -> String {
+        switch kind {
+        case .recoverable: return "可復原資料"
+        case .orphaned: return "孤立暫存"
+        case .damaged: return "損壞項目"
+        }
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("啟動復原掃描")
+            Text("復原掃描")
                 .font(.title2.weight(.semibold))
-            Text("檢查上次未清乾淨的系統暫存與 Temp-Recovery。")
+            Text("盤點系統暫存與 Temp-Recovery；可刪除殘留或把可復原的來源音檔重新加入佇列。")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }
@@ -102,6 +176,8 @@ struct RecoveryScanView: View {
 private struct RecoveryScanRow: View {
     let item: RecoveryScanItem
     let onReveal: () -> Void
+    let onRequeue: () -> Void
+    let onDelete: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -152,7 +228,13 @@ private struct RecoveryScanRow: View {
                     badge("manifest")
                 }
                 Spacer()
-                Button("在 Finder 顯示", action: onReveal)
+                Button("Finder", action: onReveal)
+                    .buttonStyle(.bordered)
+                if item.kind == .recoverable {
+                    Button("重新加入來源", action: onRequeue)
+                        .buttonStyle(.borderedProminent)
+                }
+                Button("刪除…", role: .destructive, action: onDelete)
                     .buttonStyle(.bordered)
             }
         }

@@ -29,7 +29,7 @@ public struct ASRRequest: Codable, Equatable, Sendable {
         modelCacheDirectory: String,
         offline: Bool,
         allowMissingPrompt: Bool = false,
-        maximumTokens: Int = 8_192,
+        maximumTokens: Int = 16_384,
         chunkDurationSeconds: Double = 1_200,
         segmentIndex: Int = 1,
         segmentCount: Int = 1

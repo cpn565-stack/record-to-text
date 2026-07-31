@@ -235,6 +235,77 @@ tests.check(
 tests.check(
     {
         do {
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("record-to-text-selftest-cleanup-\(UUID().uuidString)")
+            defer { try? FileManager.default.removeItem(at: root) }
+            let paths = ApplicationPaths(root: root)
+            try paths.createDirectories()
+            let tempJobs = root.appendingPathComponent("tmp-jobs", isDirectory: true)
+            try FileManager.default.createDirectory(at: tempJobs, withIntermediateDirectories: true)
+
+            let orphanID = UUID()
+            let orphanDir = tempJobs.appendingPathComponent(orphanID.uuidString)
+            try FileManager.default.createDirectory(at: orphanDir, withIntermediateDirectories: true)
+            try Data("w".utf8).write(to: orphanDir.appendingPathComponent("normalized.wav"))
+
+            let item = RecoveryScanItem(
+                jobID: orphanID,
+                location: .systemTemp,
+                kind: .orphaned,
+                directoryPath: orphanDir.path,
+                summary: "orphan",
+                detail: "",
+                hasNormalizedWAV: true,
+                hasRecoveryJSON: false,
+                hasSegmentManifest: false,
+                recognizedFileNames: ["normalized.wav"],
+                unknownEntryNames: []
+            )
+            try RecoveryScanner.deleteItem(item, paths: paths, systemTempRoot: tempJobs)
+
+            let outside = RecoveryScanItem(
+                jobID: UUID(),
+                location: .systemTemp,
+                kind: .orphaned,
+                directoryPath: FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString).path,
+                summary: "outside",
+                detail: "",
+                hasNormalizedWAV: false,
+                hasRecoveryJSON: false,
+                hasSegmentManifest: false,
+                recognizedFileNames: [],
+                unknownEntryNames: []
+            )
+            var rejectedOutside = false
+            do {
+                try RecoveryScanner.deleteItem(outside, paths: paths, systemTempRoot: tempJobs)
+            } catch is RecoveryCleanupError {
+                rejectedOutside = true
+            }
+
+            return !FileManager.default.fileExists(atPath: orphanDir.path) && rejectedOutside
+        } catch {
+            return false
+        }
+    }(),
+    "RecoveryScanner deletes only validated managed directories"
+)
+
+tests.check(
+    {
+        // Cancel-before-launch must not require a running process; the flag
+        // is enough for run() to abort. Smoke-check the public API exists.
+        let runner = ProcessRunner()
+        runner.cancelCurrent()
+        return !runner.isRunning
+    }(),
+    "ProcessRunner cancelCurrent is safe when idle"
+)
+
+tests.check(
+    {
+        do {
             let modelID = "mlx-community/Qwen3-ASR-1.7B-bf16"
             let revision = "e1f6c266914abc5a46e8756e02580f834a6cf8a7"
             let root = FileManager.default.temporaryDirectory
@@ -357,30 +428,31 @@ tests.check(
     try {
         let plan = try AudioSegmentPlanner.makePlan(sourceDuration: 31 * 60)
         return plan.expectedSegmentCount == 2
-            && plan.segments.map(\.durationSeconds) == [1_800, 60]
+            && plan.segments.map(\.durationSeconds) == [1_200, 660]
+            && AudioSegmentPlanner.productionMaximumDuration == 20 * 60
     }(),
-    "AudioSegmentPlanner splits 31 minutes into 2 segments"
+    "AudioSegmentPlanner splits 31 minutes into 2 segments at 20-minute cap"
 )
 
 tests.check(
     try {
         let plan = try AudioSegmentPlanner.makePlan(sourceDuration: 65 * 60)
-        return plan.expectedSegmentCount == 3
-            && plan.segments.map(\.durationSeconds) == [1_800, 1_800, 300]
+        return plan.expectedSegmentCount == 4
+            && plan.segments.map(\.durationSeconds) == [1_200, 1_200, 1_200, 300]
     }(),
-    "AudioSegmentPlanner splits 65 minutes into 3 segments"
+    "AudioSegmentPlanner splits 65 minutes into 4 segments at 20-minute cap"
 )
 
 tests.check(
     try {
         let plan = try AudioSegmentPlanner.makePlan(sourceDuration: 120 * 60)
-        return plan.expectedSegmentCount == 4
+        return plan.expectedSegmentCount == 6
             && plan.segments.allSatisfy {
-                $0.durationSeconds == 1_800
+                $0.durationSeconds == 1_200
             }
             && plan.segments.last?.endSeconds == 7_200
     }(),
-    "AudioSegmentPlanner covers the tail of a 120 minute recording"
+    "AudioSegmentPlanner covers the tail of a 120 minute recording at 20-minute cap"
 )
 
 tests.check(
@@ -411,7 +483,7 @@ tests.check(
             )
         }
         return try manifest.validatedCompletedSegments()
-            .map(\.segmentIndex) == [1, 2, 3]
+            .map(\.segmentIndex) == [1, 2, 3, 4]
     }(),
     "AudioSegmentManifest gates merge on one completion per ordered segment"
 )

@@ -50,6 +50,9 @@ final class AppViewModel: ObservableObject {
     @Published var isDuplicateConfirmationPresented = false
     @Published var isPromptConsentPresented = false
     @Published var isRecoveryScanPresented = false
+    /// Pending delete confirmation for recovery scan UI.
+    @Published var recoveryItemPendingDeletion: RecoveryScanItem?
+    @Published var isBulkCleanupConfirmationPresented = false
 
     private let paths: ApplicationPaths
     private let settingsRepository: JSONRepository<AppSettings>
@@ -725,10 +728,10 @@ final class AppViewModel: ObservableObject {
     }
 
     func refreshRecoveryScan() {
+        // Always show the sheet when the user clicks the toolbar button,
+        // even if there is nothing to clean up (empty state is intentional UI).
         runRecoveryScan(presentIfNonEmpty: false)
-        if recoveryScanReport?.isEmpty == false {
-            isRecoveryScanPresented = true
-        }
+        isRecoveryScanPresented = true
     }
 
     func dismissRecoveryScan() {
@@ -736,28 +739,126 @@ final class AppViewModel: ObservableObject {
     }
 
     func revealRecoveryScanItem(_ item: RecoveryScanItem) {
-        let tempRoot = RecoveryScanner.systemTempJobsRoot(fileManager: fileManager)
-            .standardizedFileURL
-            .resolvingSymlinksInPath()
-        let recoveryRoot = paths.tempRecovery
-            .standardizedFileURL
-            .resolvingSymlinksInPath()
-        let target = URL(fileURLWithPath: item.directoryPath, isDirectory: true)
-            .standardizedFileURL
-            .resolvingSymlinksInPath()
-
-        guard RecoveryScanner.isPathInsideManagedRoot(
-            target,
-            roots: [tempRoot, recoveryRoot]
-        ) else {
+        do {
+            let target = try RecoveryScanner.validatedManagedJobDirectory(
+                for: item,
+                paths: paths,
+                fileManager: fileManager
+            )
+            NSWorkspace.shared.activateFileViewerSelecting([target])
+        } catch {
             alert = UserFacingAlert(
                 title: "拒絕開啟",
-                message: "路徑不在 record-to-text 管理的暫存／復原範圍內。"
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    func requestDeleteRecoveryScanItem(_ item: RecoveryScanItem) {
+        recoveryItemPendingDeletion = item
+    }
+
+    func cancelDeleteRecoveryScanItem() {
+        recoveryItemPendingDeletion = nil
+    }
+
+    func confirmDeleteRecoveryScanItem() {
+        guard let item = recoveryItemPendingDeletion else {
+            return
+        }
+        recoveryItemPendingDeletion = nil
+        do {
+            try RecoveryScanner.deleteItem(
+                item,
+                paths: paths,
+                fileManager: fileManager
+            )
+            // Clear matching job failure recovery pointer if present.
+            if let jobID = item.jobID,
+               let index = jobs.firstIndex(where: { $0.id == jobID }),
+               let failure = jobs[index].failure,
+               failure.recoveryDirectory == item.directoryPath
+            {
+                jobs[index].failure = JobFailure(
+                    stage: failure.stage,
+                    userMessage: failure.userMessage,
+                    technicalDetails: failure.technicalDetails,
+                    recoverable: failure.recoverable,
+                    recoveryDirectory: nil
+                )
+                jobs[index].logLines.append("已從復原掃描刪除暫存／復原資料。")
+                persistJobs()
+            }
+            runRecoveryScan(presentIfNonEmpty: false)
+        } catch {
+            alert = UserFacingAlert(
+                title: "無法刪除",
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    func requestBulkCleanupNonRecoverable() {
+        let count = recoveryScanReport?.items.filter {
+            $0.kind == .orphaned || $0.kind == .damaged
+        }.count ?? 0
+        guard count > 0 else {
+            return
+        }
+        isBulkCleanupConfirmationPresented = true
+    }
+
+    func confirmBulkCleanupNonRecoverable() {
+        isBulkCleanupConfirmationPresented = false
+        let targets = recoveryScanReport?.items.filter {
+            $0.kind == .orphaned || $0.kind == .damaged
+        } ?? []
+        guard !targets.isEmpty else {
+            return
+        }
+        do {
+            let result = try RecoveryScanner.deleteItems(
+                targets,
+                paths: paths,
+                fileManager: fileManager
+            )
+            runRecoveryScan(presentIfNonEmpty: false)
+            if !result.failures.isEmpty {
+                alert = UserFacingAlert(
+                    title: "部分項目未能刪除",
+                    message: "已刪除 \(result.deleted) 項；失敗 \(result.failures.count) 項。請重新掃描後再試。"
+                )
+            }
+        } catch {
+            alert = UserFacingAlert(
+                title: "無法批次清理",
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    /// Re-enqueue the original source audio if it still exists on disk.
+    func requeueRecoverableSource(_ item: RecoveryScanItem) {
+        guard item.kind == .recoverable else {
+            return
+        }
+        guard let sourcePath = item.sourcePath, !sourcePath.isEmpty else {
+            alert = UserFacingAlert(
+                title: "無法重新加入",
+                message: "這筆復原資料沒有記錄來源音檔路徑。"
             )
             return
         }
-
-        NSWorkspace.shared.activateFileViewerSelecting([target])
+        let url = URL(fileURLWithPath: sourcePath)
+        guard fileManager.fileExists(atPath: url.path) else {
+            alert = UserFacingAlert(
+                title: "來源音檔不存在",
+                message: "找不到：\(sourcePath)\n可先在 Finder 顯示復原的 WAV，或重新選擇音檔。"
+            )
+            return
+        }
+        isRecoveryScanPresented = false
+        addFiles([url], allowingDuplicates: true)
     }
 
     private func runRecoveryScan(presentIfNonEmpty: Bool) {

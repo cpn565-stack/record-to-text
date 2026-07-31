@@ -144,4 +144,84 @@ final class RecoveryScannerTests: XCTestCase {
         XCTAssertNil(RecoveryScanner.parseJobDirectoryName("abc"))
         XCTAssertNil(RecoveryScanner.parseJobDirectoryName(""))
     }
+
+    func testDeleteItemRemovesOnlyValidatedManagedDirectory() throws {
+        let jobID = UUID()
+        let dir = paths.tempRecovery.appendingPathComponent(jobID.uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data("wav".utf8).write(to: dir.appendingPathComponent("normalized.wav"))
+
+        let item = RecoveryScanItem(
+            jobID: jobID,
+            location: .tempRecovery,
+            kind: .orphaned,
+            directoryPath: dir.path,
+            summary: "test",
+            detail: "",
+            hasNormalizedWAV: true,
+            hasRecoveryJSON: false,
+            hasSegmentManifest: false,
+            recognizedFileNames: ["normalized.wav"],
+            unknownEntryNames: []
+        )
+
+        try RecoveryScanner.deleteItem(item, paths: paths, systemTempRoot: tempJobs)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.path))
+    }
+
+    func testDeleteItemRejectsPathOutsideManagedRoots() {
+        let outside = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let item = RecoveryScanItem(
+            jobID: UUID(),
+            location: .systemTemp,
+            kind: .orphaned,
+            directoryPath: outside.path,
+            summary: "evil",
+            detail: "",
+            hasNormalizedWAV: false,
+            hasRecoveryJSON: false,
+            hasSegmentManifest: false,
+            recognizedFileNames: [],
+            unknownEntryNames: []
+        )
+
+        XCTAssertThrowsError(
+            try RecoveryScanner.deleteItem(item, paths: paths, systemTempRoot: tempJobs)
+        ) { error in
+            guard case RecoveryCleanupError.pathOutsideManagedRoots = error else {
+                return XCTFail("expected pathOutsideManagedRoots, got \(error)")
+            }
+        }
+    }
+
+    func testDeleteItemsSkipsRecoverableWhenNotIncluded() throws {
+        let orphanID = UUID()
+        let orphanDir = tempJobs.appendingPathComponent(orphanID.uuidString)
+        try FileManager.default.createDirectory(at: orphanDir, withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: orphanDir.appendingPathComponent("normalized.wav"))
+
+        let orphan = RecoveryScanItem(
+            jobID: orphanID,
+            location: .systemTemp,
+            kind: .orphaned,
+            directoryPath: orphanDir.path,
+            summary: "orphan",
+            detail: "",
+            hasNormalizedWAV: true,
+            hasRecoveryJSON: false,
+            hasSegmentManifest: false,
+            recognizedFileNames: ["normalized.wav"],
+            unknownEntryNames: []
+        )
+
+        let result = try RecoveryScanner.deleteItems(
+            [orphan],
+            paths: paths,
+            systemTempRoot: tempJobs
+        )
+        XCTAssertEqual(result.deleted, 1)
+        XCTAssertTrue(result.failures.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: orphanDir.path))
+    }
 }
