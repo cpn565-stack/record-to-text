@@ -55,9 +55,10 @@ struct RecordToTextApp: App {
             }
 
             CommandMenu("轉錄") {
-                Button("開始佇列") {
+                Button("開始轉文字") {
                     viewModel.startQueuedJobs()
                 }
+                .keyboardShortcut(.return, modifiers: .command)
                 .disabled(!viewModel.hasQueuedJobs)
 
                 Button("取消目前工作") {

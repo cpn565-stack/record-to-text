@@ -57,6 +57,7 @@ public enum AudioSegmentStatus: String, Codable, Equatable, Sendable {
     case prepared
     case transcribing
     case completed
+    case completedWithGaps
     case failed
 }
 
@@ -153,7 +154,8 @@ public struct AudioSegmentManifest: Codable, Equatable, Sendable {
         }
         for segment in segments {
             guard
-                segment.status == .completed,
+                (segment.status == .completed
+                    || segment.status == .completedWithGaps),
                 segment.completedEventCount == 1
             else {
                 throw AudioSegmentationError.segmentIncomplete(
@@ -207,9 +209,9 @@ public enum AudioSegmentationError: LocalizedError {
 }
 
 public enum AudioSegmentPlanner {
-    /// Coordinator pre-split length. 20 minutes balances token budget risk
-    /// vs segment count for long meetings.
-    public static let productionMaximumDuration: TimeInterval = 20 * 60
+    /// Coordinator pre-split length: 20 minutes (1200 seconds).
+    /// Shorter than the original 30-minute cap to reduce per-segment token pressure.
+    public static let productionMaximumDuration: TimeInterval = 1_200
 
     public static func makePlan(
         sourceDuration: TimeInterval,

@@ -96,17 +96,7 @@ if scenario == .slow {
     }
 }
 
-if scenario == .segmentedTokenLimit && isLastSegment {
-    try emit(
-        HelperEvent(
-            type: "error",
-            message: "Mock segment reached the token limit",
-            code: "chunk_token_limit_reached",
-            recoverable: true
-        )
-    )
-    Darwin.exit(1)
-}
+let containsSkippedAudio = scenario == .segmentedTokenLimit && isLastSegment
 
 let transcript: String
 if scenario == .segmentedBlank && isLastSegment {
@@ -120,9 +110,23 @@ if scenario == .segmentedBlank && isLastSegment {
     .segmentedNoCompleted
 ].contains(scenario) {
     let tail = isLastSegment ? "尾段唯一验证句。" : ""
-    transcript = "这是第 \(request.segmentIndex) 段。\(tail)"
+    let gap = containsSkippedAudio
+        ? "\n【此處約缺少 30 秒：模型達到 token 上限，已跳過此片段】"
+        : ""
+    transcript = "这是第 \(request.segmentIndex) 段。\(tail)\(gap)"
 } else {
     transcript = "这是 mock 逐字稿，包含 OGSTM。"
+}
+
+if containsSkippedAudio {
+    try emit(
+        HelperEvent(
+            type: "warning",
+            message: "Mock 約 30 秒片段達到 token 上限，已跳過並繼續。",
+            code: "chunk_skipped_token_limit",
+            recoverable: true
+        )
+    )
 }
 
 try AtomicFileWriter.writeText(
@@ -138,7 +142,8 @@ if
         HelperEvent(
             type: "completed",
             outputPath: request.outputPath,
-            durationSeconds: 0.01
+            durationSeconds: 0.01,
+            containsSkippedAudio: containsSkippedAudio
         )
     )
 }

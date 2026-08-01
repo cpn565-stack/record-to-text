@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 struct MainView: View {
     @ObservedObject var viewModel: AppViewModel
     @State private var isDropTargeted = false
+    @State private var isClearFinishedJobsPresented = false
 
     var body: some View {
         ScrollView {
@@ -227,13 +228,12 @@ struct MainView: View {
                 DropZoneView(isTargeted: isDropTargeted) {
                     viewModel.chooseAudioFiles()
                 }
-                .dropDestination(for: URL.self) { urls, _ in
-                    viewModel.addFiles(urls)
-                    return !urls.isEmpty
-                } isTargeted: { targeted in
-                    withAnimation(.easeOut(duration: 0.15)) {
-                        isDropTargeted = targeted
-                    }
+                // Finder supplies dropped files as `public.file-url` item
+                // providers. Resolve that representation explicitly instead
+                // of relying on SwiftUI's URL Transferable conversion, which
+                // can return an empty URL array on macOS.
+                .onDrop(of: [UTType.fileURL], isTargeted: $isDropTargeted) { providers in
+                    handleFileDrop(providers)
                 }
 
                 HStack(alignment: .top, spacing: 12) {
@@ -250,12 +250,90 @@ struct MainView: View {
                             .textSelection(.enabled)
                     }
                     Spacer()
-                    Text(viewModel.settings.autoStartAfterSelection ? "加入後自動開始" : "等待手動開始")
+                    Text("等待手動開始")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+
+                if viewModel.hasQueuedJobs {
+                    Button {
+                        viewModel.startQueuedJobs()
+                    } label: {
+                        Label("開始轉文字", systemImage: "play.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .help("開始處理佇列中等待的錄音（一次一個）")
+                }
             }
         }
+    }
+
+    private func handleFileDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard !providers.isEmpty else {
+            return false
+        }
+
+        Task { @MainActor in
+            let urls = await Self.fileURLs(from: providers)
+            viewModel.addFiles(urls)
+        }
+        return true
+    }
+
+    private static func fileURLs(from providers: [NSItemProvider]) async -> [URL] {
+        var urls: [URL] = []
+        for provider in providers {
+            guard let url = await fileURL(from: provider) else {
+                continue
+            }
+            urls.append(url)
+        }
+        return urls
+    }
+
+    private static func fileURL(from provider: NSItemProvider) async -> URL? {
+        guard provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) else {
+            return nil
+        }
+
+        return await withCheckedContinuation { continuation in
+            provider.loadItem(
+                forTypeIdentifier: UTType.fileURL.identifier,
+                options: nil
+            ) { item, _ in
+                continuation.resume(returning: parseDroppedFileURL(item))
+            }
+        }
+    }
+
+    private static func parseDroppedFileURL(_ item: NSSecureCoding?) -> URL? {
+        if let url = item as? URL, url.isFileURL {
+            return url
+        }
+        if let url = item as? NSURL, url.isFileURL {
+            return url as URL
+        }
+        if let string = item as? String {
+            return parseDroppedFileURLString(string)
+        }
+        if let data = item as? Data {
+            return parseDroppedFileURLString(String(decoding: data, as: UTF8.self))
+        }
+        return nil
+    }
+
+    private static func parseDroppedFileURLString(_ value: String) -> URL? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+        if let url = URL(string: trimmed), url.isFileURL {
+            return url
+        }
+        let url = URL(fileURLWithPath: trimmed)
+        return url.isFileURL ? url : nil
     }
 
     private var queueCard: some View {
@@ -266,13 +344,14 @@ struct MainView: View {
                         .font(.headline)
                     Spacer()
 
-                    if !viewModel.settings.autoStartAfterSelection, viewModel.hasQueuedJobs {
+                    if viewModel.hasQueuedJobs {
                         Button {
                             viewModel.startQueuedJobs()
                         } label: {
-                            Label("開始", systemImage: "play.fill")
+                            Label("開始轉文字", systemImage: "play.fill")
                         }
                         .buttonStyle(.borderedProminent)
+                        .help("開始處理佇列中等待的錄音")
                     }
 
                     if viewModel.hasActiveJob {
@@ -281,6 +360,15 @@ struct MainView: View {
                         } label: {
                             Label("取消目前工作", systemImage: "stop.fill")
                         }
+                    }
+
+                    if viewModel.hasFinishedJobs {
+                        Button(role: .destructive) {
+                            isClearFinishedJobsPresented = true
+                        } label: {
+                            Label("刪除全部已結束", systemImage: "trash")
+                        }
+                        .help("刪除佇列與最近工作中所有已結束的工作（失敗／取消／完成等）")
                     }
                 }
 
@@ -320,6 +408,18 @@ struct MainView: View {
                     }
                 }
             }
+        }
+        .confirmationDialog(
+            "刪除全部已結束的工作？",
+            isPresented: $isClearFinishedJobsPresented,
+            titleVisibility: .visible
+        ) {
+            Button("刪除全部已結束", role: .destructive) {
+                viewModel.removeAllFinishedJobs()
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("會從佇列與最近工作移除所有失敗、取消、中斷與已完成的項目。不會刪除原始錄音或已輸出的文字檔。進行中與排隊中的工作會保留。")
         }
     }
 
@@ -383,6 +483,7 @@ private struct JobRowView: View {
     @ObservedObject var viewModel: AppViewModel
     @State private var isLogExpanded = false
     @State private var isDeleteRecoveryPresented = false
+    @State private var isDeleteJobPresented = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -437,7 +538,13 @@ private struct JobRowView: View {
                         .foregroundStyle(.red)
                     if failure.recoveryDirectory != nil {
                         HStack(spacing: 12) {
-                            Button("在 Finder 顯示保留的 WAV") {
+                            if failure.partialTranscriptPath != nil {
+                                Button("打開未完成稿") {
+                                    viewModel.openPartialTranscript(for: job)
+                                }
+                            }
+
+                            Button("在 Finder 顯示復原資料") {
                                 viewModel.revealRecovery(for: job)
                             }
                             .buttonStyle(.link)
@@ -494,18 +601,36 @@ private struct JobRowView: View {
                     viewModel.retryJob(job.id, usingCurrentSettings: true)
                 }
             }
+            if job.stage.isTerminal {
+                Divider()
+                Button("從列表刪除", role: .destructive) {
+                    isDeleteJobPresented = true
+                }
+            }
         }
         .confirmationDialog(
             "刪除這筆工作的復原資料？",
             isPresented: $isDeleteRecoveryPresented,
             titleVisibility: .visible
         ) {
-            Button("刪除保留的 WAV", role: .destructive) {
+            Button("刪除復原資料", role: .destructive) {
                 viewModel.deleteRecovery(for: job)
             }
             Button("取消", role: .cancel) {}
         } message: {
             Text("只會刪除 record-to-text 管理的復原資料，不會刪除原始錄音或文字稿。")
+        }
+        .confirmationDialog(
+            "從列表刪除這筆工作？",
+            isPresented: $isDeleteJobPresented,
+            titleVisibility: .visible
+        ) {
+            Button("刪除", role: .destructive) {
+                viewModel.removeFinishedJob(job.id)
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("只會從佇列／最近工作移除紀錄，不會刪除原始錄音或已輸出的文字檔。")
         }
     }
 
@@ -544,6 +669,14 @@ private struct JobRowView: View {
             }
             .buttonStyle(.borderless)
             .help("打開文字檔")
+
+            Button(role: .destructive) {
+                isDeleteJobPresented = true
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .help("從列表刪除這筆工作")
         } else if job.stage == .failed || job.stage == .cancelled || job.stage == .interrupted {
             Button {
                 viewModel.retryJob(job.id)
@@ -552,6 +685,14 @@ private struct JobRowView: View {
             }
             .buttonStyle(.borderless)
             .help("沿用原工作設定重試")
+
+            Button(role: .destructive) {
+                isDeleteJobPresented = true
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .help("從列表刪除這筆工作")
         }
     }
 
@@ -630,6 +771,7 @@ private struct JobElapsedView: View {
 private struct RecentJobRow: View {
     let summary: RecentJobSummary
     @ObservedObject var viewModel: AppViewModel
+    @State private var isDeletePresented = false
 
     var body: some View {
         HStack(spacing: 11) {
@@ -682,10 +824,30 @@ private struct RecentJobRow: View {
             }
             .buttonStyle(.borderless)
             .help("用目前設定建立新工作")
+
+            Button(role: .destructive) {
+                isDeletePresented = true
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .help("從列表刪除這筆工作")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 9))
+        .confirmationDialog(
+            "從列表刪除這筆工作？",
+            isPresented: $isDeletePresented,
+            titleVisibility: .visible
+        ) {
+            Button("刪除", role: .destructive) {
+                viewModel.removeFinishedJob(summary.id)
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("只會從最近工作移除紀錄，不會刪除原始錄音或已輸出的文字檔。")
+        }
         .contextMenu {
             if summary.stage == .completed, summary.outputPath != nil {
                 Button("打開文字檔") {
@@ -697,6 +859,10 @@ private struct RecentJobRow: View {
             }
             Button("用目前設定建立新工作") {
                 viewModel.retryRecentJob(summary)
+            }
+            Divider()
+            Button("從列表刪除", role: .destructive) {
+                isDeletePresented = true
             }
         }
     }

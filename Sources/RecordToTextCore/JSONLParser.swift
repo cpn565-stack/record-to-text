@@ -12,6 +12,7 @@ public struct HelperEvent: Codable, Equatable, Sendable {
     public let recoverable: Bool?
     public let outputPath: String?
     public let durationSeconds: Double?
+    public let containsSkippedAudio: Bool?
     public let supportsSystemPrompt: Bool?
     public let supportsContext: Bool?
 
@@ -27,6 +28,7 @@ public struct HelperEvent: Codable, Equatable, Sendable {
         recoverable: Bool? = nil,
         outputPath: String? = nil,
         durationSeconds: Double? = nil,
+        containsSkippedAudio: Bool? = nil,
         supportsSystemPrompt: Bool? = nil,
         supportsContext: Bool? = nil
     ) {
@@ -41,6 +43,7 @@ public struct HelperEvent: Codable, Equatable, Sendable {
         self.recoverable = recoverable
         self.outputPath = outputPath
         self.durationSeconds = durationSeconds
+        self.containsSkippedAudio = containsSkippedAudio
         self.supportsSystemPrompt = supportsSystemPrompt
         self.supportsContext = supportsContext
     }

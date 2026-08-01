@@ -269,10 +269,6 @@ final class AppViewModel: ObservableObject {
         updated[keyPath: keyPath] = value
         settings = updated
         persistSettings()
-
-        if settings.autoStartAfterSelection {
-            scheduleQueueIfNeeded()
-        }
     }
 
     func setTemporaryTerms(_ value: String) {
@@ -378,9 +374,33 @@ final class AppViewModel: ObservableObject {
     }
 
     func clearRecentJobs() {
+        removeAllFinishedJobs()
+    }
+
+    /// Removes one finished job (failed / cancelled / interrupted / completed)
+    /// from the live list and recent history. Does not delete source audio,
+    /// output TXT, or Temp-Recovery folders.
+    func removeFinishedJob(_ id: UUID) {
+        if let job = jobs.first(where: { $0.id == id }) {
+            guard job.stage.isTerminal else {
+                return
+            }
+            jobs.removeAll(where: { $0.id == id })
+        }
+        recentJobs.removeAll(where: { $0.id == id })
+        persistJobs()
+    }
+
+    /// Clears every finished job from the queue and the recent-jobs list.
+    /// Active and queued work are kept.
+    func removeAllFinishedJobs() {
         jobs.removeAll(where: { $0.stage.isTerminal })
         recentJobs.removeAll()
         persistJobs()
+    }
+
+    var hasFinishedJobs: Bool {
+        jobs.contains(where: { $0.stage.isTerminal }) || !recentJobs.isEmpty
     }
 
     func revealApplicationSupport() {
@@ -626,6 +646,13 @@ final class AppViewModel: ObservableObject {
         NSWorkspace.shared.open(URL(fileURLWithPath: path))
     }
 
+    func openPartialTranscript(for job: TranscriptionJob) {
+        guard let path = job.failure?.partialTranscriptPath else {
+            return
+        }
+        NSWorkspace.shared.open(URL(fileURLWithPath: path))
+    }
+
     func revealRecovery(for job: TranscriptionJob) {
         guard let path = job.failure?.recoveryDirectory else {
             return
@@ -667,7 +694,7 @@ final class AppViewModel: ObservableObject {
                     recoverable: failure.recoverable,
                     recoveryDirectory: nil
                 )
-                jobs[index].logLines.append("已刪除失敗時保留的 WAV。")
+                jobs[index].logLines.append("已刪除失敗時保留的復原資料。")
                 persistJobs()
             }
         } catch {
@@ -940,7 +967,7 @@ final class AppViewModel: ObservableObject {
 
         pruneHistoryIfNeeded()
         persistJobs()
-        scheduleQueueIfNeeded()
+        // Jobs stay queued until the user presses「開始轉文字」.
     }
 
     private func scheduleQueueIfNeeded() {
@@ -950,7 +977,8 @@ final class AppViewModel: ObservableObject {
         guard !queuePausedForEnvironment, !queuePausedForPromptConsent else {
             return
         }
-        guard settings.autoStartAfterSelection || manualDrainRequested else {
+        // Always require an explicit start (manualDrainRequested).
+        guard manualDrainRequested else {
             return
         }
 
@@ -969,14 +997,6 @@ final class AppViewModel: ObservableObject {
 
         manualDrainRequested = false
         queueTask = nil
-
-        if !Task.isCancelled,
-           !queuePausedForPromptConsent,
-           !queuePausedForEnvironment,
-           settings.autoStartAfterSelection,
-           hasQueuedJobs {
-            scheduleQueueIfNeeded()
-        }
     }
 
     private func runJob(_ id: UUID) async {
@@ -1029,9 +1049,14 @@ final class AppViewModel: ObservableObject {
                 jobs[index].outputPath = result.outputURL.path
                 jobs[index].rawOutputPath = result.rawOutputURL?.path
                 jobs[index].completedAt = Date()
-                jobs[index].logLines.append(
-                    "完成，耗時 \(Self.durationFormatter.string(from: result.duration) ?? "—")。"
-                )
+                let duration = Self.durationFormatter.string(from: result.duration) ?? "—"
+                if result.containsSkippedAudio {
+                    jobs[index].logLines.append(
+                        "完成，但有音訊片段因 token 上限跳過；請查看逐字稿中的缺口標記。耗時 \(duration)。"
+                    )
+                } else {
+                    jobs[index].logLines.append("完成，耗時 \(duration)。")
+                }
                 if cancellationArrivedTooLate {
                     jobs[index].logLines.append("取消要求送達時輸出已完成，因此保留完成結果。")
                 }
@@ -1054,8 +1079,7 @@ final class AppViewModel: ObservableObject {
                 }
                 if isGlossaryUnsupported(error) {
                     queuePausedForPromptConsent = true
-                    resumeQueueAfterPromptConsent =
-                        settings.autoStartAfterSelection || manualDrainRequested
+                    resumeQueueAfterPromptConsent = manualDrainRequested
                     promptConsentJobID = id
                     isPromptConsentPresented = true
                 }
@@ -1119,6 +1143,13 @@ final class AppViewModel: ObservableObject {
         let pipelineError = error as? PipelineExecutionError
         let stage = pipelineError?.stage ?? jobs[index].stage
         let recoveryDirectory = pipelineError?.recoveryDirectory?.path
+        let partialTranscriptPath = recoveryDirectory.flatMap { path in
+            let partialURL = URL(fileURLWithPath: path)
+                .appendingPathComponent("partial-transcript.txt")
+            return fileManager.fileExists(atPath: partialURL.path)
+                ? partialURL.path
+                : nil
+        }
 
         jobs[index].stage = .failed
         jobs[index].progressCurrent = nil
@@ -1130,7 +1161,8 @@ final class AppViewModel: ObservableObject {
             userMessage: error.localizedDescription,
             technicalDetails: String(reflecting: error),
             recoverable: true,
-            recoveryDirectory: recoveryDirectory
+            recoveryDirectory: recoveryDirectory,
+            partialTranscriptPath: partialTranscriptPath
         )
         jobs[index].logLines.append("失敗：\(error.localizedDescription)")
     }

@@ -96,7 +96,7 @@ final class ModelsDefaultsTests: XCTestCase {
             settings.selectedModels[CPUArchitecture.x86_64.rawValue],
             ASRModelDescriptor.intelDefault.id
         )
-        XCTAssertTrue(settings.autoStartAfterSelection)
+        XCTAssertFalse(settings.autoStartAfterSelection)
         XCTAssertTrue(settings.revealInFinderWhenCompleted)
         XCTAssertFalse(settings.openTextWhenCompleted)
         XCTAssertTrue(settings.showNotificationWhenCompleted)

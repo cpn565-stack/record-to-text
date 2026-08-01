@@ -10,6 +10,8 @@ cd "${PROJECT_DIR}"
 export SWIFTPM_MODULECACHE_OVERRIDE="${BUILD_DIR}/ModuleCache"
 export CLANG_MODULE_CACHE_PATH="${BUILD_DIR}/ModuleCache"
 
+python3 -B Tests/qwen_asr_chunking_test.py
+
 SWIFT_ARGS=(
   --disable-sandbox
   --scratch-path "${BUILD_DIR}"

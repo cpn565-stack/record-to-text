@@ -30,7 +30,10 @@ public struct ASRRequest: Codable, Equatable, Sendable {
         offline: Bool,
         allowMissingPrompt: Bool = false,
         maximumTokens: Int = 16_384,
-        chunkDurationSeconds: Double = 1_200,
+        /// Internal MLX generate() window inside each coordinator segment.
+        /// Dense meetings can fill 16k tokens in a few minutes; helper also
+        /// auto-splits further when a chunk hits the token cap.
+        chunkDurationSeconds: Double = 120,
         segmentIndex: Int = 1,
         segmentCount: Int = 1
     ) {
@@ -69,6 +72,7 @@ public struct ASRCapability: Equatable, Sendable {
 public enum ASRBackendError: LocalizedError {
     case malformedEvent(String)
     case helperFailed(status: Int32, message: String, technicalDetails: String)
+    case helperReported(message: String, code: String)
     case completedEventMissing
     case completedEventCount(Int)
     case completedPathMismatch(expected: String, actual: String)
@@ -84,6 +88,8 @@ public enum ASRBackendError: LocalizedError {
         case let .helperFailed(status, message, technicalDetails):
             let details = technicalDetails.trimmingCharacters(in: .whitespacesAndNewlines)
             return "\(message)（結束碼 \(status)）\(details.isEmpty ? "" : "：\(details)")"
+        case let .helperReported(message, code):
+            return "\(message)（錯誤碼 \(code)）"
         case .completedEventMissing:
             return "ASR Helper 未回報完成事件，結果不可信。"
         case let .completedEventCount(count):
@@ -102,12 +108,23 @@ public enum ASRBackendError: LocalizedError {
     }
 }
 
+public struct ASRTranscriptionResult: Equatable, Sendable {
+    public let capability: ASRCapability
+    public let containsSkippedAudio: Bool
+
+    public init(capability: ASRCapability, containsSkippedAudio: Bool) {
+        self.capability = capability
+        self.containsSkippedAudio = containsSkippedAudio
+    }
+}
+
 private final class HelperEventState: @unchecked Sendable {
     private let lock = NSLock()
     private var completedPath: String?
     private var completedCount = 0
     private var errorMessage: String?
     private var errorCode: String?
+    private var containsSkippedAudio = false
     private var capability: ASRCapability?
 
     func observe(_ event: HelperEvent) {
@@ -118,6 +135,7 @@ private final class HelperEventState: @unchecked Sendable {
         case "completed":
             completedPath = event.outputPath
             completedCount += 1
+            containsSkippedAudio = event.containsSkippedAudio ?? false
         case "error":
             errorMessage = event.message
             errorCode = event.code
@@ -136,11 +154,287 @@ private final class HelperEventState: @unchecked Sendable {
         completedCount: Int,
         errorMessage: String?,
         errorCode: String?,
+        containsSkippedAudio: Bool,
         capability: ASRCapability?
     ) {
         lock.lock()
         defer { lock.unlock() }
-        return (completedPath, completedCount, errorMessage, errorCode, capability)
+        return (
+            completedPath,
+            completedCount,
+            errorMessage,
+            errorCode,
+            containsSkippedAudio,
+            capability
+        )
+    }
+}
+
+private final class PersistentASRHelperSession: @unchecked Sendable {
+    private let runtime: ResolvedRuntime
+    private let environment: [String: String]
+    private let lock = NSLock()
+    private var process: Process?
+    private var inputPipe: Pipe?
+    private var outputPipe: Pipe?
+    private var errorPipe: Pipe?
+    private var outputBuffer = Data()
+    private var requestContinuation: CheckedContinuation<Void, Error>?
+    private var stdoutLineHandler: ((String) -> Bool)?
+    private var stderrLineHandler: ((String) -> Void)?
+
+    init(runtime: ResolvedRuntime, environment: [String: String]) {
+        self.runtime = runtime
+        self.environment = environment
+    }
+
+    deinit {
+        stop()
+    }
+
+    func send(
+        requestData: Data,
+        stdoutLineHandler: @escaping (String) -> Bool,
+        stderrLineHandler: @escaping (String) -> Void
+    ) async throws {
+        try startIfNeeded()
+
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Void, Error>) in
+                let input: FileHandle? = lock.withLock {
+                    guard requestContinuation == nil else {
+                        return nil
+                    }
+                    requestContinuation = continuation
+                    self.stdoutLineHandler = stdoutLineHandler
+                    self.stderrLineHandler = stderrLineHandler
+                    return inputPipe?.fileHandleForWriting
+                }
+
+                guard let input else {
+                    finishRequest(
+                        with: ASRBackendError.helperFailed(
+                            status: -1,
+                            message: "ASR Helper 同時只能處理一個請求。",
+                            technicalDetails: ""
+                        )
+                    )
+                    return
+                }
+
+                do {
+                    try input.write(contentsOf: requestData)
+                    try input.write(contentsOf: Data([0x0A]))
+                } catch {
+                    finishRequest(with: error)
+                }
+            }
+        } onCancel: {
+            self.cancel()
+        }
+    }
+
+    func cancel() {
+        let currentProcess = lock.withLock { process }
+        guard let currentProcess, currentProcess.isRunning else {
+            return
+        }
+        terminate(currentProcess)
+    }
+
+    func stop() {
+        let currentProcess = lock.withLock { () -> Process? in
+            let current = process
+            process = nil
+            inputPipe = nil
+            outputPipe = nil
+            errorPipe = nil
+            outputBuffer.removeAll()
+            stdoutLineHandler = nil
+            stderrLineHandler = nil
+            return current
+        }
+        finishRequest(with: CancellationError())
+        guard let currentProcess, currentProcess.isRunning else {
+            return
+        }
+        currentProcess.terminate()
+    }
+
+    private func startIfNeeded() throws {
+        let shouldStart = lock.withLock { self.process == nil }
+        guard shouldStart else {
+            return
+        }
+
+        let process = Process()
+        let inputPipe = Pipe()
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.executableURL = runtime.python
+        process.arguments = [runtime.helper.path, "--server", "--events-jsonl", "-"]
+        process.environment = environment
+        process.standardInput = inputPipe
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+        process.currentDirectoryURL = runtime.helper.deletingLastPathComponent()
+
+        outputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            self?.readOutput(handle)
+        }
+        errorPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            self?.readError(handle)
+        }
+        process.terminationHandler = { [weak self] terminated in
+            self?.handleTermination(terminated)
+        }
+
+        let didRegister = lock.withLock {
+            guard self.process == nil else {
+                return false
+            }
+            self.process = process
+            self.inputPipe = inputPipe
+            self.outputPipe = outputPipe
+            self.errorPipe = errorPipe
+            return true
+        }
+        guard didRegister else {
+            outputPipe.fileHandleForReading.readabilityHandler = nil
+            errorPipe.fileHandleForReading.readabilityHandler = nil
+            return
+        }
+
+        do {
+            try process.run()
+            let pid = process.processIdentifier
+            if pid > 0 {
+                _ = setpgid(pid, 0)
+            }
+        } catch {
+            lock.withLock {
+                if self.process === process {
+                    self.process = nil
+                }
+            }
+            outputPipe.fileHandleForReading.readabilityHandler = nil
+            errorPipe.fileHandleForReading.readabilityHandler = nil
+            throw ProcessRunnerError.couldNotLaunch(
+                executable: runtime.python.path,
+                underlying: error
+            )
+        }
+    }
+
+    private func readOutput(_ handle: FileHandle) {
+        let data = handle.availableData
+        guard !data.isEmpty else {
+            return
+        }
+
+        let lines: [String] = lock.withLock {
+            outputBuffer.append(data)
+            var lines: [String] = []
+            while let newline = outputBuffer.firstIndex(of: 0x0A) {
+                var line = Data(outputBuffer[..<newline])
+                if line.last == 0x0D {
+                    line.removeLast()
+                }
+                outputBuffer.removeSubrange(...newline)
+                lines.append(String(decoding: line, as: UTF8.self))
+            }
+            return lines
+        }
+
+        for line in lines {
+            let handler = lock.withLock { stdoutLineHandler }
+            let shouldFinish = handler?(line) ?? false
+            if shouldFinish {
+                finishRequest(with: nil)
+                return
+            }
+        }
+    }
+
+    private func readError(_ handle: FileHandle) {
+        let data = handle.availableData
+        guard !data.isEmpty else {
+            return
+        }
+        let lines = String(decoding: data, as: UTF8.self)
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+        for line in lines {
+            let handler = lock.withLock { stderrLineHandler }
+            handler?(line)
+        }
+    }
+
+    private func finishRequest(with error: Error?) {
+        let continuation = lock.withLock { () -> CheckedContinuation<Void, Error>? in
+            let continuation = requestContinuation
+            requestContinuation = nil
+            stdoutLineHandler = nil
+            stderrLineHandler = nil
+            return continuation
+        }
+        guard let continuation else {
+            return
+        }
+        if let error {
+            continuation.resume(throwing: error)
+        } else {
+            continuation.resume()
+        }
+    }
+
+    private func handleTermination(_ terminated: Process) {
+        let isCurrent = lock.withLock { process === terminated }
+        guard isCurrent else {
+            return
+        }
+        finishRequest(
+            with: ASRBackendError.helperFailed(
+                status: terminated.terminationStatus,
+                message: "ASR Helper 持久程序意外結束。",
+                technicalDetails: ""
+            )
+        )
+        lock.withLock {
+            if process === terminated {
+                process = nil
+                inputPipe = nil
+                outputPipe = nil
+                errorPipe = nil
+            }
+        }
+    }
+
+    private func terminate(_ process: Process) {
+        let pid = process.processIdentifier
+        if pid > 0 {
+            _ = kill(-pid, SIGINT)
+        }
+        process.interrupt()
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2) {
+            guard process.isRunning else {
+                return
+            }
+            if pid > 0 {
+                _ = kill(-pid, SIGTERM)
+            }
+            process.terminate()
+        }
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 4) {
+            guard process.isRunning else {
+                return
+            }
+            if pid > 0 {
+                _ = kill(-pid, SIGKILL)
+                _ = kill(pid, SIGKILL)
+            }
+        }
     }
 }
 
@@ -160,6 +454,8 @@ public final class HelperASRBackend {
     private let paths: ApplicationPaths
     private let runner: ProcessRunner
     private let decoder = JSONDecoder()
+    private let sessionLock = NSLock()
+    private var persistentSession: PersistentASRHelperSession?
 
     public init(
         runtime: ResolvedRuntime,
@@ -171,70 +467,144 @@ public final class HelperASRBackend {
         self.runner = runner
     }
 
+    deinit {
+        persistentSession?.stop()
+    }
+
     public func transcribe(
         request: ASRRequest,
         requestURL: URL,
         eventHandler: @escaping (HelperEvent) -> Void
-    ) async throws -> ASRCapability {
+    ) async throws -> ASRTranscriptionResult {
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-        try AtomicFileWriter.write(try encoder.encode(request), to: requestURL)
+        // The persistent helper reads stdin as JSONL: one complete JSON object
+        // per line. Pretty-printed JSON would send the opening brace alone and
+        // make the server fail with a JSONDecodeError. Keep request files
+        // readable in one-shot mode, but always use compact JSON for the
+        // long-lived session.
+        encoder.outputFormatting = usesPersistentSession
+            ? [.sortedKeys, .withoutEscapingSlashes]
+            : [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        let requestData = try encoder.encode(request)
+        try AtomicFileWriter.write(requestData, to: requestURL)
 
         let state = HelperEventState()
-        let result = try await runner.run(
-            executableURL: runtime.python,
-            arguments: [
-                runtime.helper.path,
-                "--request-json", requestURL.path,
-                "--events-jsonl", "-"
-            ],
-            environment: helperEnvironment(request: request),
-            requireSuccess: false,
-            stdoutLineHandler: { [decoder] line in
-                guard !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                    return
-                }
-                guard
-                    let data = line.data(using: .utf8),
-                    let event = try? decoder.decode(HelperEvent.self, from: data),
-                    Self.allowedEventTypes.contains(event.type)
-                else {
-                    let malformed = HelperEvent(
-                        type: "error",
-                        message: ASRBackendError.malformedEvent(line).localizedDescription,
-                        code: "invalid_jsonl",
-                        recoverable: false
-                    )
-                    state.observe(malformed)
-                    eventHandler(malformed)
-                    return
-                }
-                state.observe(event)
-                eventHandler(event)
-            },
-            stderrLineHandler: { line in
-                eventHandler(
-                    HelperEvent(type: "log", level: "technical", message: line)
-                )
+        let stdoutLineHandler: (String) -> Bool = { [decoder] line in
+            guard !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return false
             }
+            guard
+                let data = line.data(using: .utf8),
+                let event = try? decoder.decode(HelperEvent.self, from: data),
+                Self.allowedEventTypes.contains(event.type)
+            else {
+                let malformed = HelperEvent(
+                    type: "error",
+                    message: ASRBackendError.malformedEvent(line).localizedDescription,
+                    code: "invalid_jsonl",
+                    recoverable: false
+                )
+                state.observe(malformed)
+                eventHandler(malformed)
+                return true
+            }
+            state.observe(event)
+            eventHandler(event)
+            return event.type == "completed" || event.type == "error"
+        }
+        let stderrLineHandler: (String) -> Void = { line in
+            eventHandler(
+                HelperEvent(type: "log", level: "technical", message: line)
+            )
+        }
+
+        let terminationStatus: Int32
+        let technicalDetails: String
+        if usesPersistentSession {
+            let session = persistentSessionForRequest(request)
+            try await session.send(
+                requestData: requestData,
+                stdoutLineHandler: stdoutLineHandler,
+                stderrLineHandler: stderrLineHandler
+            )
+            terminationStatus = 0
+            technicalDetails = ""
+        } else {
+            let result = try await runner.run(
+                executableURL: runtime.python,
+                arguments: [
+                    runtime.helper.path,
+                    "--request-json", requestURL.path,
+                    "--events-jsonl", "-"
+                ],
+                environment: helperEnvironment(request: request),
+                requireSuccess: false,
+                stdoutLineHandler: { line in
+                    _ = stdoutLineHandler(line)
+                },
+                stderrLineHandler: stderrLineHandler
+            )
+            terminationStatus = result.terminationStatus
+            technicalDetails = result.standardErrorText
+        }
+
+        return try validateResult(
+            state: state,
+            request: request,
+            terminationStatus: terminationStatus,
+            technicalDetails: technicalDetails
         )
+    }
+
+    private var usesPersistentSession: Bool {
+        runtime.helper.lastPathComponent == "qwen_asr_mlx_runner.py"
+    }
+
+    private func persistentSessionForRequest(
+        _ request: ASRRequest
+    ) -> PersistentASRHelperSession {
+        sessionLock.withLock {
+            if let persistentSession {
+                return persistentSession
+            }
+            let session = PersistentASRHelperSession(
+                runtime: runtime,
+                environment: helperEnvironment(request: request)
+            )
+            persistentSession = session
+            return session
+        }
+    }
+
+    private func validateResult(
+        state: HelperEventState,
+        request: ASRRequest,
+        terminationStatus: Int32,
+        technicalDetails: String
+    ) throws -> ASRTranscriptionResult {
 
         let snapshot = state.snapshot()
         if snapshot.errorCode == "glossary_not_supported" {
             throw ASRBackendError.glossaryPromptUnsupported
         }
         if let errorCode = snapshot.errorCode {
+            if terminationStatus == 0 {
+                throw ASRBackendError.helperReported(
+                    message: snapshot.errorMessage ?? "ASR Helper 回報錯誤。",
+                    code: errorCode
+                )
+            }
             throw ASRBackendError.helperFailed(
-                status: result.terminationStatus,
+                status: terminationStatus,
                 message: snapshot.errorMessage ?? "ASR Helper 回報錯誤：\(errorCode)",
-                technicalDetails: result.standardErrorText
+                technicalDetails: technicalDetails
             )
         }
-        guard result.terminationStatus == 0 else {
+        guard terminationStatus == 0 else {
             throw ASRBackendError.helperFailed(
-                status: result.terminationStatus,
+                status: terminationStatus,
                 message: snapshot.errorMessage ?? "語音辨識失敗。",
-                technicalDetails: result.standardErrorText
+                technicalDetails: technicalDetails
             )
         }
         guard snapshot.completedCount == 1 else {
@@ -274,10 +644,14 @@ public final class HelperASRBackend {
         {
             throw ASRBackendError.glossaryPromptUnsupported
         }
-        return capability
+        return ASRTranscriptionResult(
+            capability: capability,
+            containsSkippedAudio: snapshot.containsSkippedAudio
+        )
     }
 
     public func cancelCurrentJob() {
+        persistentSession?.cancel()
         runner.cancelCurrent()
     }
 

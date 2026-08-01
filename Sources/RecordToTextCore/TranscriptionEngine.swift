@@ -177,6 +177,18 @@ public final class TranscriptionEngine {
                 sourceDuration: metadata.duration,
                 maximumSegmentDuration: maximumASRSegmentDuration
             )
+            update(
+                .log(
+                    level: "info",
+                    message: String(
+                        format: "分段計畫：來源 %.1f 分鐘，每段最長 %.0f 分鐘（%.0f 秒），共 %d 段。",
+                        metadata.duration / 60.0,
+                        maximumASRSegmentDuration / 60.0,
+                        maximumASRSegmentDuration,
+                        segmentPlan.expectedSegmentCount
+                    )
+                )
+            )
             try probeService.validateDiskSpace(
                 for: metadata,
                 temporaryDirectory: workingDirectory,
@@ -405,7 +417,7 @@ public final class TranscriptionEngine {
                     }
                 }
                 do {
-                    _ = try await backend.transcribe(
+                    let transcriptionResult = try await backend.transcribe(
                         request: request,
                         requestURL: perSegmentRequestURL
                     ) { event in
@@ -473,7 +485,9 @@ public final class TranscriptionEngine {
                     segmentTexts[segment.index] = segmentText
                     try segmentManifest.mark(
                         segmentIndex: segment.index,
-                        status: .completed,
+                        status: transcriptionResult.containsSkippedAudio
+                            ? .completedWithGaps
+                            : .completed,
                         completedEventCount: 1
                     )
                     try writeSegmentManifest(
@@ -587,7 +601,10 @@ public final class TranscriptionEngine {
             return PipelineResult(
                 outputURL: finalOutputURL,
                 rawOutputURL: preservedRawURL,
-                duration: Date().timeIntervalSince(startedAt)
+                duration: Date().timeIntervalSince(startedAt),
+                containsSkippedAudio: segmentManifest.segments.contains {
+                    $0.status == .completedWithGaps
+                }
             )
         } catch is CancellationError {
             runner.cancelCurrent()
@@ -632,6 +649,7 @@ public final class TranscriptionEngine {
         cancellationLock.withLock {
             cancellationRequested = true
         }
+        backend.cancelCurrentJob()
         runner.cancelCurrent()
     }
 
@@ -832,6 +850,12 @@ extension TranscriptionEngine {
             )
         }
 
+        try writePartialTranscript(
+            from: segmentManifestURL,
+            error: error,
+            to: recoveryDirectory
+        )
+
         let metadata = RecoveryMetadata(
             schemaVersion: 1,
             jobID: job.id,
@@ -849,5 +873,70 @@ extension TranscriptionEngine {
         )
 
         return recoveryDirectory
+    }
+
+    private func writePartialTranscript(
+        from manifestURL: URL,
+        error: Error,
+        to recoveryDirectory: URL
+    ) throws {
+        guard
+            let data = try? Data(contentsOf: manifestURL),
+            let manifest = try? JSONDecoder().decode(
+                AudioSegmentManifest.self,
+                from: data
+            )
+        else {
+            return
+        }
+
+        var sections: [String] = []
+        let fileManager = FileManager.default
+        for segment in manifest.segments.sorted(by: {
+            $0.segmentIndex < $1.segmentIndex
+        }) {
+            let outputURL = URL(fileURLWithPath: segment.outputPath)
+            let partialURL = URL(
+                fileURLWithPath: segment.outputPath + ".partial.txt"
+            )
+            let outputText = fileManager.fileExists(atPath: outputURL.path)
+                ? try? TextFileValidator.readNonEmptyUTF8(at: outputURL)
+                : nil
+            let partialText = fileManager.fileExists(atPath: partialURL.path)
+                ? try? TextFileValidator.readNonEmptyUTF8(at: partialURL)
+                : nil
+            let text = outputText ?? partialText
+            guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                continue
+            }
+
+            let label: String
+            switch segment.status {
+            case .completed:
+                label = "已完成"
+            case .completedWithGaps:
+                label = "完成但有缺口"
+            default:
+                label = "未完成草稿"
+            }
+            sections.append(
+                "【第 \(segment.segmentIndex) 段｜\(label)】\n\(text)"
+            )
+        }
+
+        guard !sections.isEmpty else {
+            return
+        }
+
+        let header = """
+        【未完成逐字稿｜可能缺漏】
+        失敗原因：\(error.localizedDescription)
+        此檔僅供救援與人工整理，不代表完整正式逐字稿。
+
+        """
+        try AtomicFileWriter.writeText(
+            header + sections.joined(separator: "\n\n"),
+            to: recoveryDirectory.appendingPathComponent("partial-transcript.txt")
+        )
     }
 }

@@ -53,11 +53,35 @@ struct SettingsView: View {
 
     private var generalSettings: some View {
         Form {
+            Section("關於此 App") {
+                LabeledContent("版本") {
+                    Text(appVersionLabel)
+                        .textSelection(.enabled)
+                }
+                LabeledContent("建置") {
+                    Text(appBuildLabel)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                LabeledContent("長音預切") {
+                    Text(segmentPolicyLabel)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                LabeledContent("每段 token 上限") {
+                    Text("\(defaultMaximumTokens)")
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                Text("若「長音預切」不是 20 分鐘，代表你開的不是含此改動的建置。請關閉所有視窗後改開專案 dist/record-to-text.app。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("工作流程") {
-                Toggle(
-                    "加入檔案後自動開始",
-                    isOn: setting(\.autoStartAfterSelection)
-                )
+                Text("加入的檔案會先進入佇列，需按「開始轉文字」才會執行。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Toggle(
                     "完成後在 Finder 顯示",
                     isOn: setting(\.revealInFinderWhenCompleted)
@@ -86,6 +110,29 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    private var appVersionLabel: String {
+        let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? "—"
+        return short
+    }
+
+    private var appBuildLabel: String {
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
+        let path = Bundle.main.bundlePath
+        return "\(build) · \(path)"
+    }
+
+    private var segmentPolicyLabel: String {
+        let seconds = Int(AudioSegmentPlanner.productionMaximumDuration)
+        let minutes = seconds / 60
+        return "每段最長 \(minutes) 分鐘（\(seconds) 秒）"
+    }
+
+    private var defaultMaximumTokens: Int {
+        // Keep in sync with ASRRequest default.
+        16_384
     }
 
     private var outputSettings: some View {

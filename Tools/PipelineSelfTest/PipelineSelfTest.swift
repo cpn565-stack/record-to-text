@@ -15,15 +15,15 @@ private struct PipelineSelfTest {
             case "segmented":
                 print("PASS coordinator split → ordered ASR merge → tail phrase")
             case "segmented-failure":
-                print("PASS final segment failure → no partial final TXT")
+                print("PASS final segment failure → recovery draft, no partial final TXT")
             case "segmented-middle-failure":
-                print("PASS middle segment failure → no partial final TXT")
+                print("PASS middle segment failure → recovery draft, no partial final TXT")
             case "segmented-blank":
-                print("PASS blank final segment → no partial final TXT")
+                print("PASS blank final segment → recovery draft, no partial final TXT")
             case "segmented-token-limit":
-                print("PASS final segment token limit → no partial final TXT")
+                print("PASS irreducible 30-second token limit → explicit gap, continued output")
             case "segmented-no-completed":
-                print("PASS final segment without completed → no partial final TXT")
+                print("PASS final segment without completed → recovery draft, no partial final TXT")
             default:
                 print("PASS ffprobe → ffmpeg → mock ASR → OpenCC → atomic TXT")
             }
@@ -146,7 +146,8 @@ private struct PipelineSelfTest {
         var observedStages: [TranscriptionStage] = []
         var observedOverallProgress: [(current: Double, total: Double, unit: String)] = []
         let expectsFailure = scenario == "failure"
-            || scenario?.hasPrefix("segmented-") == true
+            || (scenario?.hasPrefix("segmented-") == true
+                && scenario != "segmented-token-limit")
         let expectsCancellation = scenario == "slow"
 
         if expectsCancellation {
@@ -241,6 +242,20 @@ private struct PipelineSelfTest {
                 else {
                     throw SelfTestError.unexpectedSegmentManifest(manifest)
                 }
+                let partialTranscriptURL = recovery.appendingPathComponent(
+                    "partial-transcript.txt"
+                )
+                guard
+                    fileManager.fileExists(atPath: partialTranscriptURL.path),
+                    let partialTranscript = try? String(
+                        contentsOf: partialTranscriptURL,
+                        encoding: .utf8
+                    ),
+                    partialTranscript.contains("未完成逐字稿"),
+                    partialTranscript.contains("这是第 1 段。")
+                else {
+                    throw SelfTestError.partialRecoveryTranscriptMissing
+                }
                 if fileManager.fileExists(atPath: outputDirectory.path) {
                     let partialOutputs = try fileManager.contentsOfDirectory(
                         at: outputDirectory,
@@ -289,19 +304,29 @@ private struct PipelineSelfTest {
             let sawNearComplete = observedOverallProgress.contains {
                 $0.current >= 95 && $0.total == 100
             }
+            let expectedLineCount = scenario == "segmented-token-limit" ? 4 : 3
             guard
                 let first,
                 let second,
                 let third,
                 first.lowerBound < second.lowerBound,
                 second.lowerBound < third.lowerBound,
-                lines.count == 3,
+                lines.count == expectedLineCount,
                 tailPhraseCount == 1,
                 sawSegmentedProgressUnits,
                 sawContinuousGrowth,
                 sawNearComplete
             else {
                 throw SelfTestError.unexpectedSegmentedOutput(output)
+            }
+            if scenario == "segmented-token-limit" {
+                guard
+                    result.containsSkippedAudio,
+                    output.contains("缺少 30 秒"),
+                    output.contains("已跳過此片段")
+                else {
+                    throw SelfTestError.missingSkippedAudioMarker
+                }
             }
         } else {
             guard output.contains("這是 mock 逐字稿"), output.contains("OGSTM") else {
@@ -340,6 +365,7 @@ private enum SelfTestError: LocalizedError {
     case missingMockHelper(String)
     case unexpectedOutput(String)
     case unexpectedSegmentedOutput(String)
+    case missingSkippedAudioMarker
     case unexpectedName(String)
     case sourceChanged
     case temporaryFilesRemain
@@ -352,6 +378,7 @@ private enum SelfTestError: LocalizedError {
     case segmentManifestMissing
     case unexpectedSegmentManifest(AudioSegmentManifest)
     case partialFinalOutputExists([String])
+    case partialRecoveryTranscriptMissing
 
     var errorDescription: String? {
         switch self {
@@ -363,6 +390,8 @@ private enum SelfTestError: LocalizedError {
             return "Unexpected OpenCC output: \(output)"
         case let .unexpectedSegmentedOutput(output):
             return "Segmented output is incomplete or out of order: \(output)"
+        case .missingSkippedAudioMarker:
+            return "Token-limit recovery output did not include an explicit skipped-audio marker"
         case let .unexpectedName(name):
             return "Unexpected output name: \(name)"
         case .sourceChanged:
@@ -387,6 +416,8 @@ private enum SelfTestError: LocalizedError {
             return "Unexpected segment manifest after failure: \(manifest)"
         case let .partialFinalOutputExists(paths):
             return "Failed segmented job committed partial final output: \(paths)"
+        case .partialRecoveryTranscriptMissing:
+            return "Failed segmented job did not preserve a usable recovery transcript"
         }
     }
 }

@@ -22,9 +22,18 @@
 - 31／65／120 分鐘 planner fixture，以及中段／尾段失敗、空白、token limit、未 completed 的 fail-closed 管線測試。
 - Durable Job retention policy 與 limit 0、長佇列、terminal history、日誌裁切及 JSON round-trip 測試。
 
+### Fixed
+
+- 長駐 ASR helper 的 stdin 改送 compact 單行 JSON（JSONL），避免 pretty-printed JSON 造成 helper `JSONDecodeError` 與早期 `asr_failed`。
+- MLX helper 輸出尾端若回吐 system prompt 開頭，以 `remove_prompt_echo()` 清除，避免污染正式逐字稿。
+
 ### Changed
 
-- 長音檔 coordinator 預切由 30 分鐘改為 **20 分鐘**；ASR 預設 `maximumTokens` 由 8192 提高到 **16384**（helper 上限），降低密語段撞 token 上限的機率。
+- 長音檔 coordinator 預切由 30 分鐘改為 **20 分鐘**；ASR 預設 `maximumTokens` 由 8192 提高到 **16384**（helper 上限）；helper 內部 generate 窗口由 1200 秒改為 **120 秒**，避免單段 20 分鐘密語仍撞 token 上限。
+- MLX helper 的一般錯誤仍維持 fail-closed；不可再切的 token-limit leaf 則改以明確缺口標記處理，不保留可能截斷的文字。
+- MLX helper 的最小約 30 秒片段若仍達 token 上限，會插入明確缺口標記、跳過該片段並繼續後續音訊；App 日誌會提示輸出含缺口。
+- 轉錄失敗時仍保留已完成段落／chunk 的 `partial-transcript.txt` 救援草稿；正式逐字稿完整性 gate 不變，App 失敗卡片可直接打開未完成稿。
+- 同一 job 內優先重用長駐 Python／MLX helper 與 model cache，減少每個 coordinator 分段整模重載。
 - 最低系統由原始規格的 macOS 13 修正為 macOS 14。
 - 正式產品名稱改為 `record-to-text`。
 - Intel 支援由既定功能修正為 Blocked / Experimental，需實機 Spike。
@@ -39,7 +48,8 @@
 
 ### Known limitations
 
-- 尚未在可使用 Metal 的 App 執行環境完成真實 Qwen3-ASR 驗證。
+- 已在本機 Apple Silicon + 真實 Qwen3-ASR（MLX）路徑驗證長音訊流程；仍非正式公證／可分發 Stable 版。
+- 極密語或異常音訊可能使最短約 30 秒葉節仍達 token 上限：會以明確缺口標記處理，不保證該區間文字完整。
+- 每個 coordinator 分段仍可能重複確認／載入模型（日誌可見 `Fetching 11 files`）；模型生命週期優化待辦。
 - 正式 Runtime、Universal 2、Developer ID、公證與 DMG 尚需外部條件。
-- Coordinator 分段邏輯已完成，但真實 Metal 模型搭配 31／65／120 分鐘音檔的 soak test 尚未執行。
 - 尚無 App 自動檢查更新。

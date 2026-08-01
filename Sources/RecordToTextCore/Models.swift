@@ -164,7 +164,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
             CPUArchitecture.arm64.rawValue: ASRModelDescriptor.appleSiliconDefault.id,
             CPUArchitecture.x86_64.rawValue: ASRModelDescriptor.intelDefault.id
         ],
-        autoStartAfterSelection: Bool = true,
+        autoStartAfterSelection: Bool = false,
         revealInFinderWhenCompleted: Bool = true,
         openTextWhenCompleted: Bool = false,
         showNotificationWhenCompleted: Bool = true,
@@ -409,19 +409,22 @@ public struct JobFailure: Codable, Equatable, Sendable {
     public let technicalDetails: String
     public let recoverable: Bool
     public let recoveryDirectory: String?
+    public let partialTranscriptPath: String?
 
     public init(
         stage: TranscriptionStage,
         userMessage: String,
         technicalDetails: String,
         recoverable: Bool,
-        recoveryDirectory: String? = nil
+        recoveryDirectory: String? = nil,
+        partialTranscriptPath: String? = nil
     ) {
         self.stage = stage
         self.userMessage = userMessage
         self.technicalDetails = technicalDetails
         self.recoverable = recoverable
         self.recoveryDirectory = recoveryDirectory
+        self.partialTranscriptPath = partialTranscriptPath
     }
 }
 
@@ -619,11 +622,18 @@ public struct PipelineResult: Equatable, Sendable {
     public let outputURL: URL
     public let rawOutputURL: URL?
     public let duration: TimeInterval
+    public let containsSkippedAudio: Bool
 
-    public init(outputURL: URL, rawOutputURL: URL?, duration: TimeInterval) {
+    public init(
+        outputURL: URL,
+        rawOutputURL: URL?,
+        duration: TimeInterval,
+        containsSkippedAudio: Bool = false
+    ) {
         self.outputURL = outputURL
         self.rawOutputURL = rawOutputURL
         self.duration = duration
+        self.containsSkippedAudio = containsSkippedAudio
     }
 }
 

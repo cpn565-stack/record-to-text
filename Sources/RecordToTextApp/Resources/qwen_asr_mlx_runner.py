@@ -22,6 +22,11 @@ import threading
 import time
 from typing import Any
 
+from qwen_asr_chunking import (
+    TokenLimitReached,
+    generate_span_with_token_guard,
+)
+
 
 # Preserve one private descriptor for JSONL, then redirect fd 1 itself to
 # stderr. This prevents native MLX/Metal output from corrupting the event stream.
@@ -51,8 +56,13 @@ def emit(event_type: str, **payload: Any) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="record-to-text MLX ASR helper")
-    parser.add_argument("--request-json", required=True)
+    parser.add_argument("--request-json")
     parser.add_argument("--events-jsonl", default="-")
+    parser.add_argument(
+        "--server",
+        action="store_true",
+        help="Keep one Python/MLX process alive and accept request JSON on stdin.",
+    )
     return parser.parse_args()
 
 
@@ -104,7 +114,7 @@ def validate_request(request: dict[str, Any]) -> None:
     if maximum_tokens < 1 or maximum_tokens > 16_384:
         raise ValueError("maximumTokens must be between 1 and 16384")
 
-    chunk_duration = request.get("chunkDurationSeconds", 1200)
+    chunk_duration = request.get("chunkDurationSeconds", 120)
     if isinstance(chunk_duration, bool) or not isinstance(chunk_duration, (int, float)):
         raise ValueError("chunkDurationSeconds must be numeric")
     if chunk_duration < 1 or chunk_duration > 1200:
@@ -197,6 +207,42 @@ def heartbeat(message: str):
         thread.join(timeout=1)
 
 
+_MODEL_CACHE: tuple[str, str | None, Any, bool, bool] | None = None
+
+
+def load_model_once(request: dict[str, Any]) -> tuple[Any, bool, bool]:
+    global _MODEL_CACHE
+
+    cache_key = (request["modelID"], request.get("modelRevision"))
+    if _MODEL_CACHE is not None:
+        cached_id, cached_revision, model, supports_system_prompt, supports_context = _MODEL_CACHE
+        if (cached_id, cached_revision) == cache_key:
+            return model, supports_system_prompt, supports_context
+
+    emit("stage", value="loading_model")
+
+    # MLX can terminate at the native layer when Metal is unavailable. Keep this
+    # import inside the helper process so such a failure cannot crash the Swift app.
+    with heartbeat("正在載入 Qwen3-ASR 模型"):
+        with contextlib.redirect_stdout(sys.stderr):
+            from mlx_audio.stt.utils import load_model
+
+            model_reference = resolve_model_reference(request)
+            model = load_model(model_reference)
+
+    signature = inspect.signature(model.generate)
+    supports_system_prompt = "system_prompt" in signature.parameters
+    supports_context = "context" in signature.parameters
+    _MODEL_CACHE = (
+        request["modelID"],
+        request.get("modelRevision"),
+        model,
+        supports_system_prompt,
+        supports_context,
+    )
+    return model, supports_system_prompt, supports_context
+
+
 def transcribe(request: dict[str, Any]) -> None:
     validate_request(request)
     configure_environment(request)
@@ -218,20 +264,10 @@ def transcribe(request: dict[str, Any]) -> None:
         )
         raise SystemExit(2)
 
-    emit("stage", value="loading_model")
+    with contextlib.redirect_stdout(sys.stderr):
+        from mlx_audio.stt.utils import load_audio
 
-    # MLX can terminate at the native layer when Metal is unavailable. Keep this
-    # import inside the helper process so such a failure cannot crash the Swift app.
-    with heartbeat("正在載入 Qwen3-ASR 模型"):
-        with contextlib.redirect_stdout(sys.stderr):
-            from mlx_audio.stt.utils import load_audio, load_model
-
-            model_reference = resolve_model_reference(request)
-            model = load_model(model_reference)
-
-    signature = inspect.signature(model.generate)
-    supports_system_prompt = "system_prompt" in signature.parameters
-    supports_context = "context" in signature.parameters
+    model, supports_system_prompt, supports_context = load_model_once(request)
     emit(
         "capability",
         supportsSystemPrompt=supports_system_prompt,
@@ -266,59 +302,113 @@ def transcribe(request: dict[str, Any]) -> None:
 
     emit("stage", value="transcribing")
     started = time.monotonic()
-    chunk_duration = float(request.get("chunkDurationSeconds", 1200))
+    # Default 120s: dense Chinese meetings can fill 16k tokens even in 5 minutes.
+    chunk_duration = float(request.get("chunkDurationSeconds", 120))
     sample_rate = int(getattr(model, "sample_rate", 16000))
     maximum_tokens = int(generation_arguments["max_tokens"])
+    # Do not split below this when retrying after token-limit hits.
+    min_split_seconds = 30.0
 
     with contextlib.redirect_stdout(sys.stderr):
         audio = load_audio(request["audioPath"])
     samples_per_chunk = max(int(chunk_duration * sample_rate), sample_rate)
     audio_length = len(audio)
     total_chunks = max(1, (audio_length + samples_per_chunk - 1) // samples_per_chunk)
-    texts: list[str] = []
-
-    for index in range(total_chunks):
-        start = index * samples_per_chunk
-        end = min((index + 1) * samples_per_chunk, audio_length)
-        chunk = audio[start:end]
-        emit(
-            "progress",
-            current=index,
-            total=total_chunks,
-            unit="chunks",
-        )
-        with heartbeat(f"正在處理第 {index + 1} / {total_chunks} 個音訊分段"):
-            with contextlib.redirect_stdout(sys.stderr):
-                result = model.generate(chunk, **generation_arguments)
-
-        text = getattr(result, "text", None)
-        if not isinstance(text, str):
-            raise RuntimeError("MLX-Audio did not return a text transcript")
-        generation_tokens = int(getattr(result, "generation_tokens", 0) or 0)
-        if generation_tokens >= maximum_tokens:
-            emit(
-                "error",
-                code="chunk_token_limit_reached",
-                message=f"第 {index + 1} 個音訊分段達到 token 上限，為避免靜默截斷，工作已停止。",
-                recoverable=True,
-            )
-            raise SystemExit(3)
-        texts.append(text)
-        emit(
-            "progress",
-            current=index + 1,
-            total=total_chunks,
-            unit="chunks",
-        )
-
-    text = " ".join(part for part in texts if part)
-
     output = Path(request["outputPath"])
+    output_parts: list[str] = []
+
+    def record_completed_text(text: str) -> None:
+        cleaned = remove_prompt_echo(text, prompt)
+        if cleaned:
+            output_parts.append(cleaned)
+
+    def record_skipped_span(error: TokenLimitReached) -> str:
+        emit(
+            "warning",
+            code="chunk_skipped_token_limit",
+            message=(
+                f"{error.label} 約 {error.span_seconds:.0f} 秒仍達到 token 上限，"
+                "已跳過此片段並繼續後續轉錄。"
+            ),
+        )
+        marker = (
+            f"【此處約缺少 {error.span_seconds:.0f} 秒：模型達到 token 上限，"
+            "已跳過此片段】"
+        )
+        output_parts.append(marker)
+        return marker
+
+    emit(
+        "log",
+        level="info",
+        message=(
+            f"本段音訊約 {audio_length / sample_rate:.0f} 秒，"
+            f"內部以 {chunk_duration:.0f} 秒切成 {total_chunks} 塊，"
+            f"每塊 max_tokens={maximum_tokens}；"
+            f"若頂滿 token 會自動對半再切（最短約 {min_split_seconds:.0f} 秒）；"
+            "最短片段仍頂滿時會標記缺口並繼續。"
+        ),
+    )
+
+    def generate_with_redirect(span: Any) -> Any:
+        # Keep MLX/native stdout away from the JSONL event stream.
+        with contextlib.redirect_stdout(sys.stderr):
+            return model.generate(span, **generation_arguments)
+
+    try:
+        for index in range(total_chunks):
+            start = index * samples_per_chunk
+            end = min((index + 1) * samples_per_chunk, audio_length)
+            chunk = audio[start:end]
+            emit(
+                "progress",
+                current=index,
+                total=total_chunks,
+                unit="chunks",
+            )
+            generate_span_with_token_guard(
+                model,
+                chunk,
+                generation_arguments=generation_arguments,
+                sample_rate=sample_rate,
+                maximum_tokens=maximum_tokens,
+                label=f"第 {index + 1}/{total_chunks} 內部塊",
+                emit=emit,
+                heartbeat_factory=heartbeat,
+                generate=generate_with_redirect,
+                on_leaf_complete=record_completed_text,
+                on_leaf_skipped=record_skipped_span,
+                min_split_seconds=min_split_seconds,
+                max_depth=6,
+            )
+            emit(
+                "progress",
+                current=index + 1,
+                total=total_chunks,
+                unit="chunks",
+            )
+    except TokenLimitReached:
+        partial_text = " ".join(output_parts).strip()
+        if partial_text:
+            partial_output = output.with_name(f"{output.name}.partial.txt")
+            atomic_write_text(partial_text, partial_output)
+            emit(
+                "log",
+                level="warning",
+                message=f"已保留本段未完成草稿：{partial_output}",
+            )
+        raise
+
+    text = " ".join(part for part in output_parts if part)
+
     atomic_write_text(text, output)
     emit(
         "completed",
         outputPath=str(output),
         durationSeconds=time.monotonic() - started,
+        containsSkippedAudio=any(
+            part.startswith("【此處約缺少 ") for part in output_parts
+        ),
     )
 
 
@@ -330,6 +420,16 @@ def main() -> int:
             "error",
             code="invalid_request",
             message="MLX helper 目前只支援 --events-jsonl -。",
+            recoverable=False,
+        )
+        return 2
+    if args.server:
+        return serve()
+    if not args.request_json:
+        emit(
+            "error",
+            code="invalid_request",
+            message="MLX helper 單次模式需要 --request-json。",
             recoverable=False,
         )
         return 2
@@ -347,19 +447,112 @@ def main() -> int:
         return 130
     except SystemExit as error:
         return int(error.code or 1)
+    except TokenLimitReached as error:
+        emit(
+            "error",
+            code="chunk_token_limit_reached",
+            message=str(error),
+            recoverable=True,
+        )
+        return 3
     except Exception as error:
+        details = exception_details(error)
         emit(
             "error",
             code="asr_failed",
-            message="Qwen3-ASR 轉錄失敗。",
+            message=f"Qwen3-ASR 轉錄失敗：{details}",
             recoverable=True,
         )
-        print(f"{type(error).__name__}: {error}", file=sys.stderr, flush=True)
+        print(details, file=sys.stderr, flush=True)
         return 1
+
+
+def serve() -> int:
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        try:
+            request = json.loads(line)
+            if not isinstance(request, dict):
+                raise ValueError("server request must be a JSON object")
+            transcribe(request)
+        except KeyboardInterrupt:
+            emit(
+                "error",
+                code="cancelled",
+                message="轉錄已取消。",
+                recoverable=True,
+            )
+            return 130
+        except SystemExit:
+            # transcribe() already emitted the contract error. Keep the
+            # long-lived process available for a later retry in this job.
+            continue
+        except TokenLimitReached as error:
+            emit(
+                "error",
+                code="chunk_token_limit_reached",
+                message=str(error),
+                recoverable=True,
+            )
+        except Exception as error:
+            details = exception_details(error)
+            emit(
+                "error",
+                code="asr_failed",
+                message=f"Qwen3-ASR 轉錄失敗：{details}",
+                recoverable=True,
+            )
+            print(details, file=sys.stderr, flush=True)
+    return 0
 
 
 def raise_keyboard_interrupt() -> None:
     raise KeyboardInterrupt
+
+
+def exception_details(error: Exception) -> str:
+    return f"{type(error).__name__}: {error}".strip()
+
+
+def remove_prompt_echo(text: str, prompt: str) -> str:
+    """Remove only a prompt fragment repeated at the end of model output.
+
+    Qwen3-ASR can occasionally echo the complete system prompt after an
+    otherwise valid transcript. In some versions it stops before the final
+    glossary line, so compare complete prompt-line prefixes while requiring a
+    suffix match. This guard does not try to clean up approximate matches or
+    words occurring in the actual recording.
+    """
+    cleaned = text.rstrip()
+    prompt = prompt.strip()
+    if not prompt:
+        return text
+
+    prompt_lines = [line.strip() for line in prompt.splitlines() if line.strip()]
+    candidates = [prompt]
+    for line_count in range(len(prompt_lines) - 1, 0, -1):
+        candidate = " ".join(prompt_lines[:line_count])
+        if len(candidate) >= 40:
+            candidates.append(candidate)
+
+    match = None
+    for candidate in candidates:
+        pattern = r"\s*".join(re.escape(part) for part in candidate.split())
+        candidate_match = re.search(pattern + r"\s*$", cleaned)
+        if candidate_match is not None:
+            match = candidate_match
+            break
+    if match is None:
+        return text
+
+    transcript = cleaned[: match.start()].rstrip()
+    emit(
+        "warning",
+        code="prompt_echo_removed",
+        message="模型輸出末尾重複了送入的 Prompt，已移除重複內容。",
+    )
+    return transcript
 
 
 if __name__ == "__main__":
