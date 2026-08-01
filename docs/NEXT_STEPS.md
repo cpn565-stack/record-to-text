@@ -1,75 +1,106 @@
 # 下一次接續
 
-目前 checkpoint 是 Phase 0 / Apple Silicon Developer Mode MVP，不是可交付一般使用者的 Stable DMG。
+更新日期：2026-08-02  
+基準 commit：`38de33b`（main）  
+目前 checkpoint：**Phase 0 / Apple Silicon Developer Mode MVP** — 不是可交付一般使用者的 Stable DMG。
 
-## 已完成：長錄音完整性
+---
 
-PD-013 的 coordinator-level 實作已完成：
+## 已完成（已合併進 main）
 
-1. ffprobe 取得總時長，`AudioSegmentPlanner` 以 **1,200 秒（20 分鐘）** 建立分段計畫；每段 ASR 預設 token 預算 **16384**。
-2. Swift coordinator／ffmpeg 產生依序編號的 WAV。
-3. 每段使用獨立 ASR 呼叫與 token budget。
-4. Segment manifest 要求編號連續、順序正確、非空白 UTF-8 且 completed 恰好一次。
-5. 全部片段通過後才以 LF 合併、OpenCC、原子提交正式 TXT。
-6. 31／65／120 分鐘規劃 fixture，以及縮時真實 ffmpeg／OpenCC mock E2E 已通過。
-7. 中段／尾段失敗、空白、token limit 或未 completed 時，皆不提交部分正式 TXT。
+### 長錄音與 token 防護
 
-尚待真實 Metal 模型與 31／65／120 分鐘音檔 soak test；完成前不宣稱正式支援任意長度。
+- PD-013：coordinator 以 **1,200 秒（20 分鐘）** 預切；每段 ASR **`maximumTokens=16384`**。
+- Helper 內部預設 **120 秒** chunk；滿 token 遞迴對半切，最短約 **30 秒**。
+- 不可再切的 leaf 達上限：明確**缺口標記**，不把截斷文字當成功；一般錯誤仍 fail-closed。
+- 失敗時保留 `partial-transcript.txt` 救援草稿；正式 TXT 仍須全段通過 gate。
+- Segment manifest、31／65／120 分鐘 planner fixture、mock 管線 fail-closed 測試通過。
+- 本機真實 Metal／Qwen3-ASR：短檔、約 26 分整檔、長會手動切兩段等路徑已跑通（見 `docs/real-metal-verification-2026-08-01.md`、`docs/handoff-sol-2026-08-02.md`）。
 
-## 已完成：Job ledger 保存
+### 長駐 helper 與輸出品質
 
-- Job ledger 保存上限不再套用到 queued／active／interrupted 工作。
-- `recentJobLimit=0` 與超長佇列都會完整保存 durable jobs。
-- completed 不進 ledger；failed／cancelled 只保留最新 terminal history。
-- 已加入 JSON round-trip、restart retention、terminal 裁切與 log cap 測試。
+- 長駐 session 使用 **compact 單行 JSON（JSONL）**，修正 pretty JSON 造成的早期 `JSONDecodeError`。
+- 同一 job 內重用 Python／MLX helper 與 model cache。
+- 輸出尾端 **Prompt echo** 以 `remove_prompt_echo()` 清除。
+- Chunk 規劃抽成 `qwen_asr_chunking.py` + 單元測試。
 
-## 已完成：啟動復原掃描（唯讀 + 操作 UI）
+### Job ledger、復原、取消
 
-- `RecoveryScanner` 盤點 system temp `record-to-text/<UUID>` 與 App `Temp-Recovery/<UUID>`。
-- 只接受 UUID 目錄；非 UUID 計入 ignored，不掃管線外路徑。
-- 分類：可復原（有效 recovery.json + WAV）、孤立暫存、損壞／schema 不符。
-- 啟動有發現時顯示 sheet；工具列「復原掃描」可重跑。
-- **刪除／批次清除孤立與損壞**：二次確認；`validatedManagedJobDirectory` 拒絕範圍外路徑。
-- **可復原**：可「重新加入來源」音檔到佇列（來源仍存在時）；Finder 顯示復原目錄。
-- **不自動刪除**；不刪原始錄音或正式 TXT。
+- PD-014：durable work 不受 `recentJobLimit` 裁切；completed 不進 ledger。
+- `RecoveryScanner`：啟動／手動掃描；刪孤立／損壞；可復原可重新加入來源（不自動刪、不刪原文／正式 TXT）。
+- `ProcessRunner`：launch 前取消 race；`setpgid` + process group 終止。
 
-## 已完成：ProcessRunner 取消 race 與程序樹
+### 產品 UX（Phase 0）
 
-- `cancelRequested`：launch 前取消也能中止，不再只在 `isRunning` 時送訊號。
-- 啟動後 `setpgid`；取消時對 **process group** 送 SIGINT → SIGTERM → SIGKILL，涵蓋 helper 子程序。
+- 模型選擇含 BF16；下載／匯入本機模型。
+- 預設輸出後綴 `_逐字稿`；手動「開始轉文字」（無自動開始）。
+- 連續進度列、刪除已完成工作、About（版本／build／分段與 token 政策）。
+- 圓形 App 圖示；README 環境需求說明。
 
-## 第一優先（下一輪）
+### 驗證門檻（自動化）
 
-- 為 ffprobe、ffmpeg、OpenCC 加入合理 timeout／inactivity watchdog。
-- 同時檢查暫存磁碟與實際輸出 volume 的可用空間。
-- 最近工作顯示來源／輸出已移動或刪除；決定完成工作日誌的保留策略。
+- `scripts/run-checks.sh`：Python tests、executable self-tests、pipeline self-tests。
+- 完整 XCTest 需本機／CI 完整 Xcode（CLTs 環境會 SKIP）。
 
-## 規劃中：自動檢查更新（約每週一次）
+---
 
-產品要做 **App 自動檢查更新**，不要做成每次開 App 都打網路。
+## 待修改／尚未做（優先序）
 
-### 行為目標
+### P1 — 下一輪工程（正確性與操作韌性）
 
-- **預設間隔**：約 **7 天** 檢查一次（可設定，例如關閉／每天／每週）。
-- **觸發時機**：App 啟動後、且距上次成功檢查已超過間隔；背景安靜檢查，不擋轉錄佇列。
-- **有新版本時**：非阻斷提示（通知或設定內 banner），顯示目前版號、新版版號與 Release 說明摘要；使用者決定是否開啟下載頁。
-- **無新版本／離線／檢查失敗**：安靜失敗或僅在設定顯示「上次檢查時間」，不要一直跳錯誤。
-- **手動**：設定內提供「立即檢查更新」。
+| # | 項目 | 說明 |
+|---|------|------|
+| 1 | **Timeout／inactivity watchdog** | 為 ffprobe、ffmpeg、OpenCC（與必要時 helper 無事件）設合理超時，避免無限卡住。 |
+| 2 | **磁碟空間檢查** | 同時檢查暫存磁碟與實際輸出 volume 可用空間，不足時提前失敗並提示。 |
+| 3 | **最近工作檔案狀態** | 來源／輸出已移動或刪除時在 UI 標示；決定完成工作日誌的保留策略。 |
+| 4 | **模型載入生命週期** | 降低每段 `Fetching 11 files` 重複確認／載入成本；優化前保留長音完整性驗證與耗時對照。 |
 
-### 技術方向（實作時再定稿）
+### P2 — 產品規劃已定、程式未做
 
-- 來源優先 **GitHub Releases**（例如 `cpn565-stack/record-to-text` 的 latest / 已標記 prerelease 策略要分開：Stable 只看正式 release）。
-- 比對 `CFBundleShortVersionString`／`CFBundleVersion` 與遠端 tag 或 manifest。
-- 只做 **檢查 + 引導下載**；自動下載安裝可第二階段（需簽署 DMG／公證後再談 Sparkle 或自管 installer）。
-- 記錄 `lastUpdateCheckAt` 於 `settings.json`；遵守「不把 token 寫進 repo」；公開 API 即可，不需使用者 HF token。
-- 與 Runtime／模型更新分開：App 更新 ≠ 模型重下；模型更新仍走既有 Models 流程。
+| # | 項目 | 說明 |
+|---|------|------|
+| 5 | **PD-015 自動檢查更新** | 預設約每 7 天查 GitHub Releases；有新版再提示；設定內手動檢查；只檢查＋引導下載。細節見下方。 |
+| 6 | **輸出契約再驗證** | 評估 Prompt echo／缺口標記是否在 TextFileValidator 或 merge 再做一層；是否保留 raw 供診斷。 |
+| 7 | **手動切開檔的合併** | 使用者自行切兩段時 App 不自動合併 TXT（目前需手動接檔）；是否做「合併已完成逐字稿」另議。 |
 
-### 依賴
+### P3 — 外部／發佈條件（Blocked 或需資源）
 
-- 較適合在 **有正式 Release 發佈流程** 後上線；Phase 0 可先做 stub／設定項與週期邏輯，遠端 URL 對準 GitHub Releases。
+| # | 項目 | 說明 |
+|---|------|------|
+| 8 | **App 管理 Runtime installer** | 免 Homebrew／自架 Python；簽章信任鏈、digest；乾淨 Mac 一鍵可用。 |
+| 9 | **模型 installer 與 digest 驗證** | 正式 installer；固定 revision＋digest（PD-010 完整落地）。 |
+| 10 | **Intel 實機** | PD-005：Experimental／Blocked；x86_64 Runtime + 真機轉錄前不得宣稱支援。 |
+| 11 | **Universal 2** | arm64 + x86_64 正式建置與驗收。 |
+| 12 | **Developer ID、公證、Stable DMG** | 簽署、notarization、乾淨帳號首次啟動、正式發佈流程。 |
+| 13 | **長音 soak 與品質** | 31／65／120 分鐘系統性 soak；極密語 30s 葉節仍可能缺口；辨識品質／人工評分非 OpenCC 能解。 |
+| 14 | **品牌／商標** | PD-012：公開名稱不以 Qwen 暗示官方關係；發佈前品牌檢視。 |
 
-## 尚待外部驗證
+---
 
-- 可使用 Metal 的真實 Qwen3-ASR：1、30、65、120 分鐘。
-- App 管理且簽署的 Runtime／Model installer、Intel 實機、Universal 2。
-- Developer ID、notarization、乾淨帳號與正式 DMG。
+## 規劃細節：自動檢查更新（PD-015）
+
+- **間隔**：約 7 天（可關／每天／每週）。
+- **時機**：啟動後且超過間隔；背景安靜、不擋佇列。
+- **有新版**：非阻斷提示；顯示版號與 Release 摘要；使用者決定是否開下載頁。
+- **失敗／離線**：安靜失敗或只在設定顯示上次檢查時間。
+- **手動**：「立即檢查更新」。
+- **來源**：GitHub Releases；Stable 與 prerelease 策略分開。
+- **範圍**：App 更新 ≠ 模型重下；模型仍走 Models 流程。
+- **依賴**：較適合有正式 Release 流程後上線；Phase 0 可先 stub／週期邏輯。
+
+---
+
+## 明確不做或暫緩
+
+- **Intel 當一等公民**：完成前保持 Blocked／Experimental 標示。
+- **把 Developer Mode 偷偷當正式 Runtime**：未就緒須 fail-closed 提示。
+- **未確認就 reset／重寫** 大量已驗證的 ASR 正確性路徑。
+
+---
+
+## 建議下一輪開工順序
+
+1. Timeout／watchdog + 磁碟空間（P1-1、P1-2）  
+2. 模型載入生命週期或最近工作檔案狀態（P1-3／P1-4，擇一痛點）  
+3. PD-015 stub + settings（有 Release 再接真 API）  
+4. Runtime installer／簽署／公證（P3，與產品發佈時程綁定）  

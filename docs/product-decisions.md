@@ -342,12 +342,20 @@ Phase 0 完成時必須回答：
 
 ## 5. 明確尚未完成
 
-- 完整 Xcode build/test。
-- Apple Silicon 真實 ASR 端到端。
-- Universal 2。
-- Intel CPU 推論。
-- 正式 Runtime artifact。
-- Developer ID、notarization 與 DMG。
-- 乾淨帳號首次啟動。
-- 自動檢查更新（PD-015，約每週一次）。
-- 首次 GitHub Actions 完整 XCTest 執行。
+接續總表見 `docs/NEXT_STEPS.md`（2026-08-02 已與 main `38de33b` 對齊）。摘要：
+
+**仍未完成**
+
+- ffprobe／ffmpeg／OpenCC timeout 與磁碟空間檢查。
+- 每段模型重複載入優化；最近工作檔案遺失標示。
+- 自動檢查更新（PD-015，約每週一次）— **程式尚未實作**。
+- 正式 Runtime artifact、模型 installer 完整 digest 流程。
+- Universal 2；Intel CPU 推論（Blocked／Experimental）。
+- Developer ID、notarization、Stable DMG、乾淨帳號首次啟動。
+- 31／65／120 分鐘系統性 Metal soak 與正式「任意長度」產品承諾。
+- 完整 Xcode XCTest 需在有完整 Xcode 的環境／CI 執行（CLTs 僅 self-test）。
+
+**已不再列為「尚未做」的（本機／main 已具備）**
+
+- Apple Silicon 真實 ASR 端到端（Developer Mode + 本機 MLX；非正式公證路徑）。
+- Coordinator 20 分預切、120 秒內切、16384 tokens、缺口標記、長駐 JSONL、Prompt echo 清除。
