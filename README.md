@@ -12,7 +12,98 @@
 | **不是** | v1.0 Stable、已公證 DMG、或已驗證的真實長會議產品 |
 
 適合：開發者本機試用、管線驗證、後續加 Runtime／簽署前的工程基底。  
-不適合：直接發給一般使用者當正式軟體。
+不適合：直接發給一般使用者當正式軟體（**乾淨 Mac 雙擊 DMG 還不能轉錄**）。
+
+## 使用前需要的環境（必讀）
+
+目前 **沒有** 把 Python／ffmpeg／模型打進 App。要在本機真正轉出文字，請先準備下列項目。
+
+### 硬體與系統
+
+| 項目 | 要求 |
+| --- | --- |
+| CPU | **Apple Silicon**（M1／M2／M3…） |
+| 系統 | **macOS 14** 或更新 |
+| 記憶體 | 建議 **16 GB+**（1.7B 8-bit）；BF16 需要更多 |
+| 磁碟 | 模型約 **2.3 GB**（8-bit）或 **3.8 GB**（BF16），另留暫存空間 |
+| Intel Mac | **不支援正式使用**（僅 Experimental 骨架，未驗證） |
+
+### 本機必須安裝的工具
+
+用 [Homebrew](https://brew.sh)（Apple Silicon 預設在 `/opt/homebrew`）：
+
+```bash
+brew install ffmpeg opencc
+```
+
+確認路徑存在：
+
+```bash
+which ffmpeg ffprobe opencc
+# 預期類似：
+# /opt/homebrew/bin/ffmpeg
+# /opt/homebrew/bin/ffprobe
+# /opt/homebrew/bin/opencc
+```
+
+### Python 與 MLX-Audio（ASR）
+
+App Developer Mode 預設使用：
+
+```text
+~/mlx-audio-env/bin/python
+```
+
+請自行建立虛擬環境並安裝 **mlx-audio**（含 MLX、可跑 Qwen3-ASR 的依賴）。版本需與本機 Metal／mlx 相容；安裝完成後確認：
+
+```bash
+~/mlx-audio-env/bin/python -c "import mlx_audio; print('ok')"
+```
+
+也可用設定 → Runtime 指定自訂 Python／Helper 路徑。
+
+### 模型（首次轉錄會下載）
+
+| 模型（設定可選） | 約略大小 | 說明 |
+| --- | --- | --- |
+| `mlx-community/Qwen3-ASR-1.7B-8bit` | ~2.3 GB | 預設，較省空間 |
+| `mlx-community/Qwen3-ASR-1.7B-bf16` | ~3.8 GB | 較吃記憶體 |
+| `mlx-community/Qwen3-ASR-0.6B-8bit` | 較小 | 較快、品質通常較差 |
+
+- 下載來源：Hugging Face；權重存於  
+  `~/Library/Application Support/record-to-text/Models/`  
+  （與預設 `~/.cache/huggingface` **不是同一個目錄**，App 可能會再下一份）
+- 建議設定環境變數加速／提高額度（可選）：
+
+```bash
+export HF_TOKEN="你的_Hugging_Face_Read_Token"
+# 若用終端機開 App，可：
+open /path/to/record-to-text.app
+```
+
+從 Dock 雙擊開啟時，有時吃不到 shell 的 `HF_TOKEN`；可先 `huggingface-cli login` 或從已 export 的終端 `open` App。
+
+### 體積心理預期
+
+| 項目 | 約略大小 |
+| --- | --- |
+| 目前開發用 `.app`／DMG | 數 MB |
+| 本機 Python + mlx-audio 環境 | 約 **0.5 GB** |
+| ffmpeg + OpenCC（Homebrew） | 約 **數十 MB** |
+| 預設 8-bit 模型 | 約 **2.3 GB** |
+| **首次跑通合計** | 多半要準備 **約 3 GB+** 磁碟 |
+
+### 快速自檢清單
+
+在 App 內：**環境檢查**（右上角盾牌 icon），確認 Python、ffmpeg、ffprobe、OpenCC、helper 皆就緒後，再按「開始轉文字」。
+
+1. Apple Silicon + macOS 14+  
+2. `ffmpeg` / `ffprobe` / `opencc` 在 PATH（Homebrew）  
+3. `~/mlx-audio-env/bin/python` 可 `import mlx_audio`  
+4. 能連線 Hugging Face（或模型已在 App Models 目錄）  
+5. 輸出資料夾可寫入  
+
+若以上任一項沒有，**不要預期**「下載 Release 就能在同事電腦直接用」。正式「免環境 Runtime」尚未完成，見下方「目前未完成」。
 
 ## 現在已經有什麼
 
@@ -111,14 +202,16 @@ swift test
 
 ## 執行
 
-第一次啟動時：
+請先完成上方 **「使用前需要的環境」**，再：
 
-1. 確認本機處理與網路使用範圍。
-2. 選擇輸出資料夾。
-3. 在「進階」開啟 Developer Mode，確認 Python、ffmpeg、ffprobe、OpenCC 與 helper 路徑。
-4. 選擇詞庫、加入本次詞彙，再拖入音檔。
+1. 開啟 App（開發建置：`scripts/build-app.sh` → `dist/record-to-text.app`；或 Release 上的 unsigned DMG）。
+2. **設定 → 一般**：確認版本；完成 onboarding（輸出資料夾等）。
+3. **設定 → Runtime**：開啟 **Developer Mode**，確認 Python／helper；用「環境檢查」全部打勾。
+4. 選模型（預設 1.7B 8-bit）、整理詞庫。
+5. 拖入音檔 → 檔案會進佇列 → 按 **「開始轉文字」**（不會一丟就跑）。
+6. 首次使用會下載模型，時間依網路而定。
 
-正式 Runtime 尚未完成前，Release Mode 會正確顯示環境未準備，而不是偷偷使用 Homebrew。
+正式 Runtime 尚未完成前，未開 Developer Mode 時會正確顯示環境未準備，而不是偷偷使用 Homebrew。
 
 ## 資料位置
 
@@ -140,16 +233,13 @@ swift test
 
 ## 目前未完成
 
-- 真實 MLX 模型端到端驗證：Codex 的受限執行環境沒有 Metal，不能把 native abort 當成 App 實測。
-- 1 分鐘、30 分鐘與 2 小時真實音檔 benchmark。
-- 31、65、120 分鐘真實音檔與真實模型的長時間驗收；coordinator 邏輯與縮時 mock 管線已完成。
-- App 管理的 arm64 Runtime artifact、簽章信任鏈、下載與 rollback。
-- 模型檔案完整 digest manifest 與下載 UI。
-- Intel 實機推論。
-- Universal 2 `.app` 實機矩陣。
-- Developer ID 簽署、公證與正式 DMG。
+- **免安裝 Homebrew／自架 Python 的 App 管理 Runtime**（乾淨 Mac 一鍵可用）。
+- 真實 MLX 長時間 soak：31／65／120 分鐘與正式「任意長度會議」承諾。
+- 模型 digest 完整性與正式 installer。
+- Intel 實機、Universal 2。
+- Developer ID 簽署、公證、Stable DMG。
+- 自動檢查更新（PD-015，規劃中，約每週一次）。
 - 乾淨帳號首次啟動驗收。
-- 互動式 UI 驗收；63 個 XCTest 由 GitHub Actions 作為完整 gate。
 
 ## 發佈
 
