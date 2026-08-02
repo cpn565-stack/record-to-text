@@ -24,6 +24,7 @@ public struct RecoveryScanItem: Equatable, Identifiable, Sendable {
     public let summary: String
     public let detail: String
     public let sourcePath: String?
+    public let sourceSlice: TranscriptionSourceSlice?
     public let failureStage: String?
     public let hasNormalizedWAV: Bool
     public let hasRecoveryJSON: Bool
@@ -39,6 +40,7 @@ public struct RecoveryScanItem: Equatable, Identifiable, Sendable {
         summary: String,
         detail: String,
         sourcePath: String? = nil,
+        sourceSlice: TranscriptionSourceSlice? = nil,
         failureStage: String? = nil,
         hasNormalizedWAV: Bool,
         hasRecoveryJSON: Bool,
@@ -53,6 +55,7 @@ public struct RecoveryScanItem: Equatable, Identifiable, Sendable {
         self.summary = summary
         self.detail = detail
         self.sourcePath = sourcePath
+        self.sourceSlice = sourceSlice
         self.failureStage = failureStage
         self.hasNormalizedWAV = hasNormalizedWAV
         self.hasRecoveryJSON = hasRecoveryJSON
@@ -128,6 +131,7 @@ public enum RecoveryScanner {
         public let schemaVersion: Int
         public let jobID: UUID
         public let sourcePath: String
+        public let sourceSlice: TranscriptionSourceSlice?
         public let failureStage: String
         public let createdAt: Date
         public let technicalError: String
@@ -136,6 +140,7 @@ public enum RecoveryScanner {
             schemaVersion: Int,
             jobID: UUID,
             sourcePath: String,
+            sourceSlice: TranscriptionSourceSlice? = nil,
             failureStage: String,
             createdAt: Date,
             technicalError: String
@@ -143,6 +148,7 @@ public enum RecoveryScanner {
             self.schemaVersion = schemaVersion
             self.jobID = jobID
             self.sourcePath = sourcePath
+            self.sourceSlice = sourceSlice
             self.failureStage = failureStage
             self.createdAt = createdAt
             self.technicalError = technicalError
@@ -459,6 +465,7 @@ public enum RecoveryScanner {
                         summary: "復原 metadata 版本不支援",
                         detail: "schemaVersion=\(metadata.schemaVersion)",
                         sourcePath: metadata.sourcePath,
+                        sourceSlice: metadata.sourceSlice,
                         failureStage: metadata.failureStage,
                         hasWAV: hasWAV,
                         hasRecoveryJSON: true,
@@ -476,6 +483,7 @@ public enum RecoveryScanner {
                         summary: "recovery.json 的 jobID 與資料夾名稱不符",
                         detail: "資料夾 \(expectedJobID.uuidString)，metadata \(metadata.jobID.uuidString)",
                         sourcePath: metadata.sourcePath,
+                        sourceSlice: metadata.sourceSlice,
                         failureStage: metadata.failureStage,
                         hasWAV: hasWAV,
                         hasRecoveryJSON: true,
@@ -493,6 +501,7 @@ public enum RecoveryScanner {
                         summary: "可復原的失敗工作資料",
                         detail: metadata.technicalError,
                         sourcePath: metadata.sourcePath,
+                        sourceSlice: metadata.sourceSlice,
                         failureStage: metadata.failureStage,
                         hasWAV: true,
                         hasRecoveryJSON: true,
@@ -509,6 +518,7 @@ public enum RecoveryScanner {
                     summary: "有 recovery.json 但缺少 normalized.wav",
                     detail: metadata.technicalError,
                     sourcePath: metadata.sourcePath,
+                    sourceSlice: metadata.sourceSlice,
                     failureStage: metadata.failureStage,
                     hasWAV: false,
                     hasRecoveryJSON: true,
@@ -689,6 +699,7 @@ public enum RecoveryScanner {
         summary: String,
         detail: String,
         sourcePath: String? = nil,
+        sourceSlice: TranscriptionSourceSlice? = nil,
         failureStage: String? = nil,
         hasWAV: Bool,
         hasRecoveryJSON: Bool,
@@ -704,6 +715,7 @@ public enum RecoveryScanner {
             summary: summary,
             detail: detail,
             sourcePath: sourcePath,
+            sourceSlice: sourceSlice,
             failureStage: failureStage,
             hasNormalizedWAV: hasWAV,
             hasRecoveryJSON: hasRecoveryJSON,

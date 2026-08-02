@@ -5,7 +5,7 @@ public enum TermParser {
 
     public static func parse(_ input: String) -> [String] {
         let parts = input.components(separatedBy: separators)
-        return deduplicate(parts)
+        return deduplicate(parts.flatMap(splitImplicitCJKTerms))
     }
 
     public static func merge(_ groups: [[String]]) -> [String] {
@@ -25,6 +25,41 @@ public enum TermParser {
         }
 
         return result
+    }
+
+    /// Accept the common shorthand "味全 典華 學習長" without breaking
+    /// multi-word Latin terms such as "One Company One Mission" or mixed
+    /// terms such as "專案 A". Explicit punctuation/newlines remain the
+    /// primary, unambiguous separators.
+    private static func splitImplicitCJKTerms(_ value: String) -> [String] {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return []
+        }
+
+        let pieces = trimmed.split { character in
+            character.unicodeScalars.allSatisfy {
+                CharacterSet.whitespacesAndNewlines.contains($0)
+            }
+        }
+        guard pieces.count >= 2,
+              pieces.allSatisfy({ piece in
+                  piece.unicodeScalars.allSatisfy(isCJKScalar)
+              })
+        else {
+            return [trimmed]
+        }
+
+        return pieces.map(String.init)
+    }
+
+    private static func isCJKScalar(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF:
+            return true
+        default:
+            return false
+        }
     }
 }
 
@@ -86,6 +121,7 @@ public enum PromptBuilder {
 
         let prompt = """
         \(fidelityInstruction)
+        請只輸出音訊中實際聽到的內容；不要輸出這段指令、詞彙清單或任何未出現在音訊中的文字。
         以下詞彙可能出現在錄音中。只有當音訊內容相符時才使用以下寫法；沒有出現的詞彙不要自行加入：
 
         \(terms.joined(separator: "\n"))

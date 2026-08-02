@@ -403,6 +403,90 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
     }
 }
 
+public struct TranscriptionSourceSlice: Codable, Equatable, Sendable {
+    public let startSeconds: Double
+    public let durationSeconds: Double
+    public let partIndex: Int
+    public let partCount: Int
+
+    public init(
+        startSeconds: Double,
+        durationSeconds: Double,
+        partIndex: Int,
+        partCount: Int
+    ) {
+        self.startSeconds = startSeconds
+        self.durationSeconds = durationSeconds
+        self.partIndex = partIndex
+        self.partCount = partCount
+    }
+
+    public var endSeconds: Double {
+        startSeconds + durationSeconds
+    }
+
+    public var displayName: String {
+        "第 \(partIndex)／\(partCount) 段"
+    }
+
+    public static func splitInHalf(
+        durationSeconds: Double
+    ) -> [TranscriptionSourceSlice] {
+        let midpoint = durationSeconds / 2
+        return [
+            TranscriptionSourceSlice(
+                startSeconds: 0,
+                durationSeconds: midpoint,
+                partIndex: 1,
+                partCount: 2
+            ),
+            TranscriptionSourceSlice(
+                startSeconds: midpoint,
+                durationSeconds: durationSeconds - midpoint,
+                partIndex: 2,
+                partCount: 2
+            )
+        ]
+    }
+
+    public func validate(sourceDuration: Double) throws {
+        guard
+            sourceDuration.isFinite,
+            sourceDuration > 0,
+            startSeconds.isFinite,
+            durationSeconds.isFinite,
+            startSeconds >= 0,
+            durationSeconds > 0,
+            partCount >= 2,
+            partIndex >= 1,
+            partIndex <= partCount,
+            endSeconds <= sourceDuration + 0.5
+        else {
+            throw TranscriptionSourceSliceError.invalid(
+                startSeconds: startSeconds,
+                durationSeconds: durationSeconds,
+                sourceDuration: sourceDuration
+            )
+        }
+    }
+}
+
+public enum TranscriptionSourceSliceError: LocalizedError, Equatable {
+    case invalid(startSeconds: Double, durationSeconds: Double, sourceDuration: Double)
+
+    public var errorDescription: String? {
+        switch self {
+        case let .invalid(startSeconds, durationSeconds, sourceDuration):
+            return String(
+                format: "來源切片無效：起點 %.3f 秒、長度 %.3f 秒，音檔長度 %.3f 秒。",
+                startSeconds,
+                durationSeconds,
+                sourceDuration
+            )
+        }
+    }
+}
+
 public struct JobFailure: Codable, Equatable, Sendable {
     public let stage: TranscriptionStage
     public let userMessage: String
@@ -432,6 +516,7 @@ public struct TranscriptionJob: Codable, Equatable, Identifiable, Sendable {
     public let id: UUID
     public let sourcePath: String
     public let snapshot: JobSnapshot
+    public let sourceSlice: TranscriptionSourceSlice?
     public var stage: TranscriptionStage
     public var progressCurrent: Double?
     public var progressTotal: Double?
@@ -448,12 +533,14 @@ public struct TranscriptionJob: Codable, Equatable, Identifiable, Sendable {
         id: UUID = UUID(),
         sourcePath: String,
         snapshot: JobSnapshot,
+        sourceSlice: TranscriptionSourceSlice? = nil,
         stage: TranscriptionStage = .queued,
         createdAt: Date = Date()
     ) {
         self.id = id
         self.sourcePath = sourcePath
         self.snapshot = snapshot
+        self.sourceSlice = sourceSlice
         self.stage = stage
         self.progressCurrent = nil
         self.progressTotal = nil
@@ -472,13 +559,17 @@ public struct TranscriptionJob: Codable, Equatable, Identifiable, Sendable {
     }
 
     public var displayName: String {
-        sourceURL.lastPathComponent
+        guard let sourceSlice else {
+            return sourceURL.lastPathComponent
+        }
+        return "\(sourceURL.lastPathComponent) · \(sourceSlice.displayName)"
     }
 }
 
 public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
     public let id: UUID
     public let sourcePath: String
+    public let sourceSlice: TranscriptionSourceSlice?
     public let outputPath: String?
     public let stage: TranscriptionStage
     public let startedAt: Date?
@@ -489,6 +580,7 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
     public init(
         id: UUID,
         sourcePath: String,
+        sourceSlice: TranscriptionSourceSlice? = nil,
         outputPath: String?,
         stage: TranscriptionStage,
         startedAt: Date?,
@@ -498,6 +590,7 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
     ) {
         self.id = id
         self.sourcePath = sourcePath
+        self.sourceSlice = sourceSlice
         self.outputPath = outputPath
         self.stage = stage
         self.startedAt = startedAt
@@ -510,6 +603,7 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
         self.init(
             id: job.id,
             sourcePath: job.sourcePath,
+            sourceSlice: job.sourceSlice,
             outputPath: job.outputPath,
             stage: job.stage,
             startedAt: job.startedAt,
@@ -520,7 +614,11 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
     }
 
     public var displayName: String {
-        URL(fileURLWithPath: sourcePath).lastPathComponent
+        let name = URL(fileURLWithPath: sourcePath).lastPathComponent
+        guard let sourceSlice else {
+            return name
+        }
+        return "\(name) · \(sourceSlice.displayName)"
     }
 
     public func fileStatus(

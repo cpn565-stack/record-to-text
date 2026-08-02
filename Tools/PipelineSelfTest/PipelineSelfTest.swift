@@ -24,6 +24,8 @@ private struct PipelineSelfTest {
                 print("PASS irreducible 30-second token limit → explicit gap, continued output")
             case "segmented-no-completed":
                 print("PASS final segment without completed → recovery draft, no partial final TXT")
+            case "sliced":
+                print("PASS source time slice → first half transcript with ordered output name")
             default:
                 print("PASS ffprobe → ffmpeg → mock ASR → OpenCC → atomic TXT")
             }
@@ -67,6 +69,7 @@ private struct PipelineSelfTest {
             "RECORD_TO_TEXT_MOCK_SCENARIO"
         ]
         let isSegmentedScenario = scenario?.hasPrefix("segmented") == true
+        let isSlicedScenario = scenario == "sliced"
         let generator = ProcessRunner()
         _ = try await generator.run(
             executableURL: ffmpeg,
@@ -74,7 +77,7 @@ private struct PipelineSelfTest {
                 "-hide_banner", "-loglevel", "error", "-y",
                 "-f", "lavfi",
                 "-i", "sine=frequency=440:sample_rate=44100",
-                "-t", isSegmentedScenario ? "2.2" : "0.5",
+                "-t", isSegmentedScenario || isSlicedScenario ? "2.2" : "0.5",
                 "-c:a", "aac",
                 sourceURL.path
             ]
@@ -134,7 +137,19 @@ private struct PipelineSelfTest {
             outputDirectory: outputDirectory.path,
             keepRawTranscript: false
         )
-        let job = TranscriptionJob(sourcePath: sourceURL.path, snapshot: snapshot)
+        let sourceSlice = isSlicedScenario
+            ? TranscriptionSourceSlice(
+                startSeconds: 0,
+                durationSeconds: 1.1,
+                partIndex: 1,
+                partCount: 2
+            )
+            : nil
+        let job = TranscriptionJob(
+            sourcePath: sourceURL.path,
+            snapshot: snapshot,
+            sourceSlice: sourceSlice
+        )
         let engine = TranscriptionEngine(
             runtime: runtime,
             paths: supportPaths,
@@ -333,7 +348,10 @@ private struct PipelineSelfTest {
                 throw SelfTestError.unexpectedOutput(output)
             }
         }
-        guard result.outputURL.lastPathComponent == "會議 音檔（第一場）_逐字稿.txt" else {
+        let expectedOutputName = isSlicedScenario
+            ? "會議 音檔（第一場）_逐字稿_第1-2段.txt"
+            : "會議 音檔（第一場）_逐字稿.txt"
+        guard result.outputURL.lastPathComponent == expectedOutputName else {
             throw SelfTestError.unexpectedName(result.outputURL.lastPathComponent)
         }
         guard try FileIntegrity.sha256(of: sourceURL) == sourceHash else {

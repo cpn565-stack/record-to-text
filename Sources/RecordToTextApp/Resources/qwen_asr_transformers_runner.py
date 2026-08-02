@@ -27,6 +27,8 @@ import threading
 import time
 from typing import Any, Iterator
 
+from qwen_asr_chunking import remove_prompt_echo
+
 
 BACKEND_NAME = "qwen-asr-transformers-intel"
 EXPECTED_MODEL_ID = "Qwen/Qwen3-ASR-0.6B"
@@ -473,6 +475,20 @@ def transcribe(request: dict[str, Any]) -> None:
     text = getattr(results[0], "text", None)
     if not isinstance(text, str):
         raise RuntimeError("qwen-asr returned a transcription without text")
+    original_text = text.strip()
+    text = remove_prompt_echo(
+        text,
+        request.get("prompt") or "",
+        request.get("terms") or [],
+        emit=emit,
+    )
+    if original_text and not text:
+        raise HelperContractError(
+            "prompt_echo_only",
+            "模型只回吐了送入的 Prompt／詞庫，沒有產生可用逐字稿。",
+            recoverable=True,
+            exit_code=2,
+        )
 
     output = Path(request["outputPath"])
     atomic_write_text(text, output)

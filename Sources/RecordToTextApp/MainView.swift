@@ -201,7 +201,7 @@ struct MainView: View {
                     }
                     .accessibilityLabel("本次補充專有名詞")
 
-                    Text("可用逗號、頓號、分號或換行分隔。加入檔案時會鎖定為該工作的 Snapshot。")
+                    Text("可用逗號、頓號、分號、空格（中文詞彙）或換行分隔。加入檔案時會鎖定為該工作的 Snapshot。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -225,15 +225,30 @@ struct MainView: View {
     private var intakeCard: some View {
         AppCard {
             VStack(spacing: 14) {
-                DropZoneView(isTargeted: isDropTargeted) {
-                    viewModel.chooseAudioFiles()
-                }
+                DropZoneView(
+                    isTargeted: isDropTargeted,
+                    chooseFiles: { viewModel.chooseAudioFiles() }
+                )
                 // Finder supplies dropped files as `public.file-url` item
                 // providers. Resolve that representation explicitly instead
                 // of relying on SwiftUI's URL Transferable conversion, which
                 // can return an empty URL array on macOS.
                 .onDrop(of: [UTType.fileURL], isTargeted: $isDropTargeted) { providers in
                     handleFileDrop(providers)
+                }
+
+                HStack(spacing: 10) {
+                    Button {
+                        viewModel.chooseAndMergeTranscriptFiles()
+                    } label: {
+                        Label("合併文字稿…", systemImage: "arrow.triangle.merge")
+                    }
+                    .buttonStyle(.bordered)
+                    .help("選取兩份以上 TXT，依分段編號排序後合併成新檔")
+
+                    Text("可直接選取切半後的多份 TXT；原檔不會被覆寫。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 HStack(alignment: .top, spacing: 12) {
@@ -256,15 +271,19 @@ struct MainView: View {
                 }
 
                 if viewModel.hasQueuedJobs {
-                    Button {
-                        viewModel.startQueuedJobs()
-                    } label: {
-                        Label("開始轉文字", systemImage: "play.fill")
-                            .frame(maxWidth: .infinity)
+                    HStack(spacing: 10) {
+                        Button {
+                            viewModel.startQueuedJobs()
+                        } label: {
+                            Label("開始轉文字", systemImage: "play.fill")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .help("開始處理佇列中等待的錄音（一次一個）")
+
+                        splitQueuedAction
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .help("開始處理佇列中等待的錄音（一次一個）")
                 }
             }
         }
@@ -352,6 +371,8 @@ struct MainView: View {
                         }
                         .buttonStyle(.borderedProminent)
                         .help("開始處理佇列中等待的錄音")
+
+                        splitQueuedAction
                     }
 
                     if viewModel.hasActiveJob {
@@ -432,6 +453,37 @@ struct MainView: View {
                     > ($1.completedAt ?? $1.startedAt ?? .distantPast)
             }
     }
+
+    @ViewBuilder
+    private var splitQueuedAction: some View {
+        if let job = viewModel.splittableQueuedJobs.first,
+           viewModel.splittableQueuedJobs.count == 1
+        {
+            Button {
+                viewModel.splitQueuedAudioFileInHalf(job.id)
+            } label: {
+                Label("切分再依序轉", systemImage: "scissors")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .help("把已加入佇列的錄音切成前後兩段；第一段先處理，第二段排在後面")
+        } else if viewModel.hasSplittableQueuedJobs {
+            Menu {
+                ForEach(viewModel.splittableQueuedJobs) { job in
+                    Button {
+                        viewModel.splitQueuedAudioFileInHalf(job.id)
+                    } label: {
+                        Label(job.displayName, systemImage: "scissors")
+                    }
+                }
+            } label: {
+                Label("切分再依序轉", systemImage: "scissors")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .help("選擇已加入佇列的錄音，切成前後兩段並依序處理")
+        }
+    }
 }
 
 private struct DropZoneView: View {
@@ -453,9 +505,15 @@ private struct DropZoneView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Button("選擇錄音檔…", action: chooseFiles)
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
+            HStack(spacing: 10) {
+                Button("選擇錄音檔…", action: chooseFiles)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+            }
+
+            Text("加入後可在「開始轉文字」旁切分，再依序處理。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 28)

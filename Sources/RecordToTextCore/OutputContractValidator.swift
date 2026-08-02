@@ -12,7 +12,7 @@ public enum OutputContractValidationError: LocalizedError, Equatable {
         case let .nulByte(path):
             return "文字輸出含有 NUL 控制字元：\(path)"
         case let .promptEcho(path):
-            return "文字輸出末尾疑似回吐了送入模型的 Prompt：\(path)"
+            return "文字輸出開頭或末尾疑似回吐了送入模型的 Prompt／詞庫：\(path)"
         }
     }
 }
@@ -70,11 +70,91 @@ public enum OutputContractValidator {
         }
 
         let normalizedText = removingWhitespace(from: text)
-        return candidates.contains { candidate in
+        if candidates.enumerated().contains(where: { index, candidate in
             let normalizedCandidate = removingWhitespace(from: candidate)
-            return normalizedCandidate.count >= 40
-                && normalizedText.hasSuffix(normalizedCandidate)
+            let minimumLength = index == 0 ? 1 : 40
+            return normalizedCandidate.count >= minimumLength
+                && (
+                    normalizedText.hasPrefix(normalizedCandidate)
+                        || normalizedText.hasSuffix(normalizedCandidate)
+                )
+        }) {
+            return true
         }
+
+        let glossaryTerms = linesAfterGlossaryMarker(in: promptLines)
+        guard glossaryTerms.count >= 2 else {
+            return false
+        }
+        return hasLeadingGlossaryEcho(text: text, terms: glossaryTerms)
+    }
+
+    private static func linesAfterGlossaryMarker(in lines: [String]) -> [String] {
+        guard let markerIndex = lines.firstIndex(where: {
+            $0.contains("以下詞彙可能出現在錄音中")
+        }) else {
+            return []
+        }
+
+        return lines.dropFirst(markerIndex + 1)
+            .filter { !$0.isEmpty }
+            .flatMap(splitImplicitCJKTerms)
+    }
+
+    private static func splitImplicitCJKTerms(_ value: String) -> [String] {
+        let pieces = value.split { character in
+            character.unicodeScalars.allSatisfy {
+                CharacterSet.whitespacesAndNewlines.contains($0)
+            }
+        }
+        guard pieces.count >= 2,
+              pieces.allSatisfy({ piece in
+                  piece.unicodeScalars.allSatisfy(isCJKScalar)
+              })
+        else {
+            return [value]
+        }
+        return pieces.map(String.init)
+    }
+
+    private static func isCJKScalar(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func hasLeadingGlossaryEcho(
+        text: String,
+        terms: [String]
+    ) -> Bool {
+        var remainder = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        var consumedSeparatorAfterTerm = false
+
+        for term in terms {
+            while let first = remainder.first,
+                  isGlossarySeparator(first)
+            {
+                remainder.removeFirst()
+                consumedSeparatorAfterTerm = true
+            }
+            guard remainder.hasPrefix(term) else {
+                return false
+            }
+            remainder.removeFirst(term.count)
+            consumedSeparatorAfterTerm = false
+        }
+
+        while let first = remainder.first,
+              isGlossarySeparator(first)
+        {
+            remainder.removeFirst()
+            consumedSeparatorAfterTerm = true
+        }
+
+        return remainder.isEmpty || consumedSeparatorAfterTerm
     }
 
     private static func removingWhitespace(from value: String) -> String {
@@ -83,5 +163,12 @@ public enum OutputContractValidator {
                 !CharacterSet.whitespacesAndNewlines.contains($0)
             }
         )
+    }
+
+    private static func isGlossarySeparator(_ character: Character) -> Bool {
+        character.unicodeScalars.allSatisfy { scalar in
+            CharacterSet.whitespacesAndNewlines.contains(scalar)
+                || "。．.!！?？；;,:：,，、|/".unicodeScalars.contains(scalar)
+        }
     }
 }

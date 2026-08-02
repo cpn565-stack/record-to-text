@@ -109,7 +109,10 @@ open /path/to/record-to-text.app
 
 - 原生 SwiftUI macOS App。
 - 專有名詞解析、去重、Prompt 預覽與工作 Snapshot。
+- 專有名詞可用逗號、頓號、分號、換行分隔；連續的中文詞彙也可用空格分隔，英文多詞名稱會保留為一個詞。
 - 拖放、多選、單工佇列、取消、錯誤與最近工作。
+- 先加入錄音，再在「開始轉文字」旁選「切分再依序轉」：前半段先處理，後半段排隊，兩段各自輸出有順序的文字稿；App 不自動合併。
+- 可用「合併文字稿」選取多份 TXT，依分段編號排序產生新檔；原始 TXT 不會被覆寫。
 - `ffprobe → ffmpeg → ASR helper → OpenCC → 原子寫入 TXT`。
 - 超過 **20 分鐘**：coordinator 切成編號 WAV、逐段獨立 ASR（預設 token 預算 16384）；全部通過 manifest gate 後才合併，中段／尾段失敗不交部分結果。
 - Apple Silicon：MLX-Audio helper；Prompt 走 `system_prompt`，不支援則 fail closed。

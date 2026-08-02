@@ -30,6 +30,8 @@ RECORD_TO_TEXT_MOCK_SCENARIO=slow \
   "${BUILD_DIR}/debug/record-to-text-pipeline-self-test"
 RECORD_TO_TEXT_MOCK_SCENARIO=segmented \
   "${BUILD_DIR}/debug/record-to-text-pipeline-self-test"
+RECORD_TO_TEXT_MOCK_SCENARIO=sliced \
+  "${BUILD_DIR}/debug/record-to-text-pipeline-self-test"
 RECORD_TO_TEXT_MOCK_SCENARIO=segmented-failure \
   "${BUILD_DIR}/debug/record-to-text-pipeline-self-test"
 RECORD_TO_TEXT_MOCK_SCENARIO=segmented-middle-failure \

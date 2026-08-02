@@ -29,6 +29,17 @@ final class TermParserTests: XCTestCase {
         )
     }
 
+    func testParseAcceptsSpaceSeparatedCJKTermsWithoutBreakingMixedTerms() {
+        XCTAssertEqual(
+            TermParser.parse("味全 典華 學習長"),
+            ["味全", "典華", "學習長"]
+        )
+        XCTAssertEqual(
+            TermParser.parse("One Company One Mission, 專案 A"),
+            ["One Company One Mission", "專案 A"]
+        )
+    }
+
     func testParseUsesExactCaseSensitiveDeduplicationAndFirstOccurrenceOrder() {
         let input = "OGSTM,ogstm,OGSTM, Ogstm ,ogstm"
 

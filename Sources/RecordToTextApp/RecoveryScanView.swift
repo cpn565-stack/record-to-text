@@ -210,6 +210,12 @@ private struct RecoveryScanRow: View {
                     .textSelection(.enabled)
             }
 
+            if let sourceSlice = item.sourceSlice {
+                Text("來源切片：\(sourceSlice.displayName)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Text(item.directoryPath)
                 .font(.caption2.monospaced())
                 .foregroundStyle(.secondary)

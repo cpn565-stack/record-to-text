@@ -15,6 +15,7 @@ sys.path.insert(0, str(RESOURCE_DIRECTORY))
 from qwen_asr_chunking import (  # noqa: E402
     TokenLimitReached,
     generate_span_with_token_guard,
+    remove_prompt_echo,
 )
 
 
@@ -197,6 +198,78 @@ class TokenGuardTests(unittest.TestCase):
 
         self.assertEqual(result, "wrapped")
         self.assertEqual(calls, [20])
+
+
+class PromptEchoTests(unittest.TestCase):
+    def test_removes_complete_glossary_list_echoed_at_the_beginning(self) -> None:
+        prompt = (
+            "這是一段中文會議錄音。請忠實轉錄音訊內容，不要摘要、改寫、刪除或補充。\n"
+            "以下詞彙可能出現在錄音中。只有當音訊內容相符時才使用以下寫法；沒有出現的詞彙不要自行加入：\n\n"
+            "味全\n典華\n學習長"
+        )
+
+        self.assertEqual(
+            remove_prompt_echo(
+                "味全 典華 學習長。 嗯，真正的會議內容。",
+                prompt,
+                ["味全", "典華", "學習長"],
+            ),
+            "嗯，真正的會議內容。",
+        )
+
+    def test_expands_space_separated_cjk_term_snapshot_before_echo_cleanup(self) -> None:
+        prompt = (
+            "這是一段中文會議錄音。請忠實轉錄音訊內容，不要摘要、改寫、刪除或補充。\n"
+            "以下詞彙可能出現在錄音中。只有當音訊內容相符時才使用以下寫法；沒有出現的詞彙不要自行加入：\n\n"
+            "味全 典華 學習長"
+        )
+
+        self.assertEqual(
+            remove_prompt_echo(
+                "味全 典華 學習長。 嗯，真正的會議內容。",
+                prompt,
+                ["味全 典華 學習長"],
+            ),
+            "嗯，真正的會議內容。",
+        )
+
+    def test_removes_glossary_echo_when_model_puts_sentence_punctuation_between_terms(self) -> None:
+        prompt = (
+            "這是一段中文會議錄音。請忠實轉錄音訊內容，不要摘要、改寫、刪除或補充。\n"
+            "以下詞彙可能出現在錄音中。只有當音訊內容相符時才使用以下寫法；沒有出現的詞彙不要自行加入：\n\n"
+            "味全\n典華\n學習長"
+        )
+
+        self.assertEqual(
+            remove_prompt_echo(
+                "味全。典華。學習長。 嗯，真正的會議內容。",
+                prompt,
+                ["味全", "典華", "學習長"],
+            ),
+            "嗯，真正的會議內容。",
+        )
+
+    def test_does_not_remove_a_single_term_at_the_beginning(self) -> None:
+        self.assertEqual(
+            remove_prompt_echo(
+                "OGSTM。 這是實際錄音內容。",
+                "請忠實轉錄。\nOGSTM",
+                ["OGSTM"],
+            ),
+            "OGSTM。 這是實際錄音內容。",
+        )
+
+    def test_removes_prompt_echo_at_either_edge(self) -> None:
+        prompt = "這是一段中文會議錄音。請忠實轉錄音訊內容，不要摘要、改寫、刪除或補充。"
+
+        self.assertEqual(
+            remove_prompt_echo(f"{prompt} 真正內容。", prompt),
+            "真正內容。",
+        )
+        self.assertEqual(
+            remove_prompt_echo(f"真正內容。\n{prompt}", prompt),
+            "真正內容。",
+        )
 
 
 if __name__ == "__main__":

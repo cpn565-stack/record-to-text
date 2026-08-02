@@ -445,6 +445,76 @@ tests.check(
 
 tests.check(
     try {
+        let prompt = """
+        這是一段中文會議錄音。請忠實轉錄音訊內容，不要摘要、改寫、刪除或補充。
+        以下詞彙可能出現在錄音中。只有當音訊內容相符時才使用以下寫法；沒有出現的詞彙不要自行加入：
+
+        味全
+        典華
+        學習長
+        """
+        do {
+            _ = try OutputContractValidator.validate(
+                text: "味全 典華 學習長。 嗯，真正的會議內容。",
+                path: "/tmp/leading-glossary-echo.txt",
+                prompt: prompt
+            )
+            return false
+        } catch OutputContractValidationError.promptEcho {
+            return true
+        }
+    }(),
+    "OutputContractValidator rejects leading glossary echo"
+)
+
+tests.check(
+    try {
+        let prompt = """
+        這是一段中文會議錄音。請忠實轉錄音訊內容，不要摘要、改寫、刪除或補充。
+        以下詞彙可能出現在錄音中。只有當音訊內容相符時才使用以下寫法；沒有出現的詞彙不要自行加入：
+
+        味全 典華 學習長
+        """
+        do {
+            _ = try OutputContractValidator.validate(
+                text: "味全 典華 學習長。",
+                path: "/tmp/space-separated-glossary-echo.txt",
+                prompt: prompt
+            )
+            return false
+        } catch OutputContractValidationError.promptEcho {
+            return true
+        }
+    }(),
+    "OutputContractValidator rejects space-separated CJK glossary echo"
+)
+
+tests.check(
+    try {
+        let prompt = """
+        這是一段中文會議錄音。請忠實轉錄音訊內容，不要摘要、改寫、刪除或補充。
+        以下詞彙可能出現在錄音中。只有當音訊內容相符時才使用以下寫法；沒有出現的詞彙不要自行加入：
+
+        味全
+        典華
+        學習長
+        """
+        do {
+            _ = try OutputContractValidator.validate(
+                text: "味全。典華。學習長。",
+                path: "/tmp/punctuated-glossary-echo.txt",
+                prompt: prompt
+            )
+            return false
+        } catch OutputContractValidationError.promptEcho {
+            return true
+        }
+    }(),
+    "OutputContractValidator rejects punctuated glossary echo"
+)
+
+tests.check(
+    try {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("record-to-text-runtime-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -506,6 +576,28 @@ tests.check(
         }
     }(),
     "AtomicFileWriter exclusive mode never replaces an existing output"
+)
+
+tests.check(
+    try {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("record-to-text-transcript-merge-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let first = root.appendingPathComponent("會議_逐字稿_第1-2段.txt")
+        let second = root.appendingPathComponent("會議_逐字稿_第2-2段.txt")
+        try AtomicFileWriter.writeText("第一段內容。", to: first)
+        try AtomicFileWriter.writeText("第二段內容。", to: second)
+
+        let result = try TranscriptMerger.merge([second, first], directory: root)
+        let merged = try String(contentsOf: result.outputURL, encoding: .utf8)
+        let secondResult = try TranscriptMerger.merge([first, second], directory: root)
+
+        return result.inputURLs == [first, second]
+            && result.outputURL.lastPathComponent == "會議_逐字稿_合併.txt"
+            && merged == "第一段內容。\n\n第二段內容。"
+            && secondResult.outputURL.lastPathComponent == "會議_逐字稿_合併_2.txt"
+    }(),
+    "TranscriptMerger sorts split TXT files and never overwrites output"
 )
 
 tests.check(
@@ -647,6 +739,36 @@ tests.check(
             == .outputMissing
     }(),
     "RecentJobSummary marks a missing completed output"
+)
+
+tests.check(
+    {
+        let slices = TranscriptionSourceSlice.splitInHalf(durationSeconds: 7_200)
+        return slices.count == 2
+            && slices[0].startSeconds == 0
+            && slices[0].durationSeconds == 3_600
+            && slices[1].startSeconds == 3_600
+            && slices[1].durationSeconds == 3_600
+            && slices[0].endSeconds == slices[1].startSeconds
+    }(),
+    "TranscriptionSourceSlice splits a recording into ordered halves"
+)
+
+tests.check(
+    {
+        let slice = TranscriptionSourceSlice(
+            startSeconds: 3_600,
+            durationSeconds: 3_600,
+            partIndex: 2,
+            partCount: 2
+        )
+        let data = try? JSONEncoder().encode(slice)
+        let decoded = data.flatMap {
+            try? JSONDecoder().decode(TranscriptionSourceSlice.self, from: $0)
+        }
+        return decoded == slice && slice.displayName == "第 2／2 段"
+    }(),
+    "TranscriptionSourceSlice persists through JSON and keeps its label"
 )
 
 tests.finish()

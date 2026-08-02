@@ -25,6 +25,7 @@ from typing import Any
 from qwen_asr_chunking import (
     TokenLimitReached,
     generate_span_with_token_guard,
+    remove_prompt_echo,
 )
 
 
@@ -331,9 +332,19 @@ def transcribe(request: dict[str, Any]) -> None:
     total_chunks = max(1, (audio_length + samples_per_chunk - 1) // samples_per_chunk)
     output = Path(request["outputPath"])
     output_parts: list[str] = []
+    prompt_echo_only = False
 
     def record_completed_text(text: str) -> None:
-        cleaned = remove_prompt_echo(text, prompt)
+        nonlocal prompt_echo_only
+        original = text.strip()
+        cleaned = remove_prompt_echo(
+            text,
+            prompt,
+            terms,
+            emit=emit,
+        )
+        if original and not cleaned:
+            prompt_echo_only = True
         if cleaned:
             output_parts.append(cleaned)
 
@@ -413,6 +424,15 @@ def transcribe(request: dict[str, Any]) -> None:
                 message=f"已保留本段未完成草稿：{partial_output}",
             )
         raise
+
+    if prompt_echo_only and not output_parts:
+        emit(
+            "error",
+            code="prompt_echo_only",
+            message="模型只回吐了送入的 Prompt／詞庫，沒有產生可用逐字稿。",
+            recoverable=True,
+        )
+        raise SystemExit(2)
 
     text = " ".join(part for part in output_parts if part)
 
@@ -528,46 +548,6 @@ def raise_keyboard_interrupt() -> None:
 
 def exception_details(error: Exception) -> str:
     return f"{type(error).__name__}: {error}".strip()
-
-
-def remove_prompt_echo(text: str, prompt: str) -> str:
-    """Remove only a prompt fragment repeated at the end of model output.
-
-    Qwen3-ASR can occasionally echo the complete system prompt after an
-    otherwise valid transcript. In some versions it stops before the final
-    glossary line, so compare complete prompt-line prefixes while requiring a
-    suffix match. This guard does not try to clean up approximate matches or
-    words occurring in the actual recording.
-    """
-    cleaned = text.rstrip()
-    prompt = prompt.strip()
-    if not prompt:
-        return text
-
-    prompt_lines = [line.strip() for line in prompt.splitlines() if line.strip()]
-    candidates = [prompt]
-    for line_count in range(len(prompt_lines) - 1, 0, -1):
-        candidate = " ".join(prompt_lines[:line_count])
-        if len(candidate) >= 40:
-            candidates.append(candidate)
-
-    match = None
-    for candidate in candidates:
-        pattern = r"\s*".join(re.escape(part) for part in candidate.split())
-        candidate_match = re.search(pattern + r"\s*$", cleaned)
-        if candidate_match is not None:
-            match = candidate_match
-            break
-    if match is None:
-        return text
-
-    transcript = cleaned[: match.start()].rstrip()
-    emit(
-        "warning",
-        code="prompt_echo_removed",
-        message="模型輸出末尾重複了送入的 Prompt，已移除重複內容。",
-    )
-    return transcript
 
 
 if __name__ == "__main__":

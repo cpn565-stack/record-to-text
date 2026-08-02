@@ -7,7 +7,8 @@ policy here makes the safety boundary testable on machines without Metal.
 from __future__ import annotations
 
 from contextlib import AbstractContextManager, nullcontext
-from typing import Any, Callable
+import re
+from typing import Any, Callable, Sequence
 
 
 Emit = Callable[..., Any]
@@ -38,6 +39,122 @@ class TokenLimitReached(RuntimeError):
 
 
 OnLeafSkipped = Callable[[TokenLimitReached], str]
+
+
+def _flexible_fragment(value: str) -> str:
+    """Build a whitespace-tolerant regex fragment for model text."""
+
+    parts = [part for part in re.split(r"\s+", value.strip()) if part]
+    return r"\s+".join(re.escape(part) for part in parts)
+
+
+def _prompt_candidates(prompt: str) -> list[str]:
+    lines = [line.strip() for line in prompt.splitlines() if line.strip()]
+    if not lines:
+        return []
+
+    candidates = [prompt.strip()]
+    for line_count in range(len(lines) - 1, 0, -1):
+        candidate = " ".join(lines[:line_count])
+        if len(candidate) >= 40:
+            candidates.append(candidate)
+    return candidates
+
+
+def _is_cjk_token(value: str) -> bool:
+    return bool(value) and all(
+        (0x3400 <= ord(char) <= 0x4DBF)
+        or (0x4E00 <= ord(char) <= 0x9FFF)
+        or (0xF900 <= ord(char) <= 0xFAFF)
+        for char in value
+    )
+
+
+def _expand_implicit_cjk_terms(terms: Sequence[str]) -> list[str]:
+    """Match the Swift parser's shorthand for space-separated CJK terms."""
+
+    expanded: list[str] = []
+    for term in terms:
+        pieces = [piece for piece in re.split(r"\s+", term.strip()) if piece]
+        if len(pieces) >= 2 and all(_is_cjk_token(piece) for piece in pieces):
+            expanded.extend(pieces)
+        elif term.strip():
+            expanded.append(term.strip())
+    return expanded
+
+
+def remove_prompt_echo(
+    text: str,
+    prompt: str,
+    terms: Sequence[str] | None = None,
+    *,
+    emit: Emit | None = None,
+) -> str:
+    """Remove model-repeated prompt text without changing real transcript text.
+
+    Qwen3-ASR may repeat the system prompt either at the beginning or at the
+    end of a chunk.  With glossary hints it can also emit the complete ordered
+    term list followed by punctuation at the beginning, e.g. ``A B C。``.
+    Only an exact full-list match is removed; a single term or an approximate
+    match is left untouched to avoid deleting words actually spoken in the
+    recording.
+    """
+
+    cleaned = text.strip()
+    prompt = prompt.strip()
+    if not cleaned:
+        return cleaned
+
+    def report(code: str, message: str) -> None:
+        if emit is not None:
+            emit("warning", code=code, message=message)
+
+    for index, candidate in enumerate(_prompt_candidates(prompt)):
+        if index > 0 and len(candidate) < 40:
+            continue
+        pattern = _flexible_fragment(candidate)
+        leading_match = re.match(rf"^{pattern}\s*", cleaned)
+        if leading_match is not None:
+            cleaned = cleaned[leading_match.end():].lstrip()
+            report(
+                "prompt_echo_removed",
+                "模型輸出開頭重複了送入的 Prompt，已移除重複內容。",
+            )
+            break
+
+    normalized_terms = _expand_implicit_cjk_terms(
+        [term for term in (terms or []) if term.strip()]
+    )
+    if len(normalized_terms) >= 2:
+        term_sequence = r"(?:[\s,，、;；:：|/。．.!！?？]+)".join(
+            _flexible_fragment(term) for term in normalized_terms
+        )
+        leading_terms = re.match(
+            rf"^\s*{term_sequence}"
+            r"\s*[。．.!！?？；;,:：,，、]+\s*",
+            cleaned,
+        )
+        if leading_terms is not None:
+            cleaned = cleaned[leading_terms.end():].lstrip()
+            report(
+                "leading_glossary_echo_removed",
+                "模型輸出開頭重複了完整詞庫清單，已移除重複內容。",
+            )
+
+    for index, candidate in enumerate(_prompt_candidates(prompt)):
+        if index > 0 and len(candidate) < 40:
+            continue
+        pattern = _flexible_fragment(candidate)
+        trailing_match = re.search(rf"\s*{pattern}\s*$", cleaned)
+        if trailing_match is not None:
+            cleaned = cleaned[:trailing_match.start()].rstrip()
+            report(
+                "prompt_echo_removed",
+                "模型輸出末尾重複了送入的 Prompt，已移除重複內容。",
+            )
+            break
+
+    return cleaned
 
 
 def _default_emit(_event_type: str, **_payload: Any) -> None:

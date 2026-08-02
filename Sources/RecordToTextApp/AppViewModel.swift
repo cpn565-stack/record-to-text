@@ -232,6 +232,14 @@ final class AppViewModel: ObservableObject {
         jobs.contains(where: { $0.stage == .queued })
     }
 
+    var splittableQueuedJobs: [TranscriptionJob] {
+        jobs.filter { $0.stage == .queued && $0.sourceSlice == nil }
+    }
+
+    var hasSplittableQueuedJobs: Bool {
+        !splittableQueuedJobs.isEmpty
+    }
+
     var hasActiveJob: Bool {
         activeJobID != nil
     }
@@ -487,6 +495,107 @@ final class AppViewModel: ObservableObject {
         addFiles(panel.urls)
     }
 
+    func splitQueuedAudioFileInHalf(_ id: UUID) {
+        guard let job = jobs.first(where: { $0.id == id }),
+              job.stage == .queued,
+              job.sourceSlice == nil
+        else {
+            return
+        }
+
+        Task { @MainActor [weak self] in
+            await self?.prepareAndSplitQueuedJob(id)
+        }
+    }
+
+    private func prepareAndSplitQueuedJob(_ id: UUID) async {
+        do {
+            guard let job = jobs.first(where: { $0.id == id }),
+                  job.stage == .queued,
+                  job.sourceSlice == nil
+            else {
+                return
+            }
+
+            let runtime = runtimeCandidate()
+            let metadata = try await AudioProbeService(
+                executableURL: runtime.ffprobe
+            ).probe(job.sourceURL)
+            guard metadata.duration >= 2 else {
+                alert = UserFacingAlert(
+                    title: "音檔太短，無法切半",
+                    message: "音檔長度需要至少 2 秒。"
+                )
+                return
+            }
+
+            let slices = TranscriptionSourceSlice
+                .splitInHalf(durationSeconds: metadata.duration)
+            guard let index = jobs.firstIndex(where: { $0.id == id }),
+                  jobs[index].stage == .queued,
+                  jobs[index].sourceSlice == nil
+            else {
+                return
+            }
+
+            let splitJobs = slices.map { slice in
+                var splitJob = TranscriptionJob(
+                    sourcePath: job.sourcePath,
+                    snapshot: job.snapshot,
+                    sourceSlice: slice
+                )
+                splitJob.logLines.append(
+                    "由已加入佇列的來源切分，將依序處理：\(slice.displayName)。"
+                )
+                return splitJob
+            }
+            jobs.replaceSubrange(index...index, with: splitJobs)
+            persistJobs()
+            // This action is intentionally the one-click variant of the
+            // manual start button: the first slice begins immediately and
+            // the second remains ordered behind it in the queue.
+            startQueuedJobs()
+        } catch {
+            alert = UserFacingAlert(
+                title: "無法切分音檔",
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    func chooseAndMergeTranscriptFiles() {
+        let panel = NSOpenPanel()
+        panel.title = "選擇要合併的文字稿"
+        panel.prompt = "合併文字稿"
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = true
+        panel.resolvesAliases = true
+        panel.allowedContentTypes = [.plainText]
+
+        if let lastInputDirectory = settings.lastInputDirectory {
+            panel.directoryURL = URL(fileURLWithPath: lastInputDirectory, isDirectory: true)
+        }
+
+        guard panel.runModal() == .OK else {
+            return
+        }
+
+        do {
+            let result = try TranscriptMerger.merge(panel.urls)
+            NSWorkspace.shared.activateFileViewerSelecting([result.outputURL])
+            alert = UserFacingAlert(
+                title: "文字稿已合併",
+                message: "已依分段編號排序並產生新檔：\n\(result.outputURL.path)\n\n原始 TXT 未被覆寫。"
+            )
+        } catch {
+            alert = UserFacingAlert(
+                title: "無法合併文字稿",
+                message: error.localizedDescription
+            )
+        }
+    }
+
     func addFiles(_ urls: [URL], allowingDuplicates: Bool = false) {
         guard !urls.isEmpty else {
             return
@@ -592,13 +701,16 @@ final class AppViewModel: ObservableObject {
         }
 
         if usingCurrentSettings {
-            addFiles([oldJob.sourceURL], allowingDuplicates: true)
+            enqueueValidatedJobs([
+                (url: oldJob.sourceURL, sourceSlice: oldJob.sourceSlice)
+            ])
             return
         }
 
         var retry = TranscriptionJob(
             sourcePath: oldJob.sourcePath,
-            snapshot: oldJob.snapshot
+            snapshot: oldJob.snapshot,
+            sourceSlice: oldJob.sourceSlice
         )
         retry.logLines.append("沿用工作 \(oldJob.id.uuidString) 的 Snapshot 重試。")
         jobs.insert(retry, at: min(index + 1, jobs.count))
@@ -723,10 +835,12 @@ final class AppViewModel: ObservableObject {
     }
 
     func retryRecentJob(_ summary: RecentJobSummary) {
-        addFiles(
-            [URL(fileURLWithPath: summary.sourcePath)],
-            allowingDuplicates: true
-        )
+        enqueueValidatedJobs([
+            (
+                url: URL(fileURLWithPath: summary.sourcePath),
+                sourceSlice: summary.sourceSlice
+            )
+        ])
     }
 
     func stopAllForTermination() async {
@@ -888,7 +1002,7 @@ final class AppViewModel: ObservableObject {
             return
         }
         isRecoveryScanPresented = false
-        addFiles([url], allowingDuplicates: true)
+        enqueueValidatedJobs([(url: url, sourceSlice: item.sourceSlice)])
     }
 
     private func runRecoveryScan(presentIfNonEmpty: Bool) {
@@ -917,7 +1031,15 @@ final class AppViewModel: ObservableObject {
     // MARK: - Queue implementation
 
     private func enqueueValidatedFiles(_ urls: [URL]) {
-        guard !urls.isEmpty else {
+        enqueueValidatedJobs(
+            urls.map { (url: $0, sourceSlice: Optional<TranscriptionSourceSlice>.none) }
+        )
+    }
+
+    private func enqueueValidatedJobs(
+        _ entries: [(url: URL, sourceSlice: TranscriptionSourceSlice?)]
+    ) {
+        guard !entries.isEmpty else {
             return
         }
 
@@ -946,7 +1068,9 @@ final class AppViewModel: ObservableObject {
             outputDirectory = settings.defaultOutputDirectory
         }
 
-        for url in urls {
+        for entry in entries {
+            let url = entry.url
+            let sourceSlice = entry.sourceSlice
             let snapshot = JobSnapshot(
                 modelID: settings.selectedModelID,
                 modelRevision: selectedModelRevision,
@@ -960,12 +1084,17 @@ final class AppViewModel: ObservableObject {
                 outputFilenameSuffix: settings.resolvedOutputFilenameSuffix,
                 rawFilenameSuffix: settings.resolvedRawFilenameSuffix
             )
-            jobs.append(
-                TranscriptionJob(
-                    sourcePath: url.standardizedFileURL.path,
-                    snapshot: snapshot
-                )
+            var job = TranscriptionJob(
+                sourcePath: url.standardizedFileURL.path,
+                snapshot: snapshot,
+                sourceSlice: sourceSlice
             )
+            if let sourceSlice {
+                job.logLines.append(
+                    "來源切片：\(sourceSlice.displayName)，將依佇列順序逐段處理。"
+                )
+            }
+            jobs.append(job)
         }
 
         pruneHistoryIfNeeded()

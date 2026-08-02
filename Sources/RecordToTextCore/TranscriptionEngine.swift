@@ -172,7 +172,30 @@ public final class TranscriptionEngine {
             )
 
             update(.stage(.validating))
-            let metadata = try await probeService.probe(sourceURL)
+            let sourceMetadata = try await probeService.probe(sourceURL)
+            if let sourceSlice = job.sourceSlice {
+                try sourceSlice.validate(sourceDuration: sourceMetadata.duration)
+                update(
+                    .log(
+                        level: "info",
+                        message: String(
+                            format: "本工作處理來源第 %d／%d 段：%.1f–%.1f 分鐘。",
+                            sourceSlice.partIndex,
+                            sourceSlice.partCount,
+                            sourceSlice.startSeconds / 60.0,
+                            sourceSlice.endSeconds / 60.0
+                        )
+                    )
+                )
+            }
+            let processingDuration = job.sourceSlice?.durationSeconds
+                ?? sourceMetadata.duration
+            let metadata = AudioMetadata(
+                duration: processingDuration,
+                codecName: sourceMetadata.codecName,
+                sampleRate: sourceMetadata.sampleRate,
+                channels: sourceMetadata.channels
+            )
             let segmentPlan = try AudioSegmentPlanner.makePlan(
                 sourceDuration: metadata.duration,
                 maximumSegmentDuration: maximumASRSegmentDuration
@@ -207,20 +230,30 @@ public final class TranscriptionEngine {
             try Task.checkCancellation()
             currentStage.set(.convertingAudio)
             update(.stage(.convertingAudio))
-            try await ffmpegService.normalize(
-                sourceURL: sourceURL,
-                destinationURL: normalizedAudioURL,
-                duration: metadata.duration
-            ) { current, total in
-                // Audio conversion is a small prefix of overall work.
-                let fraction = total > 0 ? min(max(current / total, 0), 1) : 0
-                update(
-                    .progress(
-                        current: fraction * 5,
-                        total: 100,
-                        unit: "percent"
-                    )
+            if let sourceSlice = job.sourceSlice {
+                try await ffmpegService.extractSegment(
+                    sourceURL: sourceURL,
+                    destinationURL: normalizedAudioURL,
+                    startSeconds: sourceSlice.startSeconds,
+                    durationSeconds: sourceSlice.durationSeconds
                 )
+                update(.progress(current: 5, total: 100, unit: "percent"))
+            } else {
+                try await ffmpegService.normalize(
+                    sourceURL: sourceURL,
+                    destinationURL: normalizedAudioURL,
+                    duration: metadata.duration
+                ) { current, total in
+                    // Audio conversion is a small prefix of overall work.
+                    let fraction = total > 0 ? min(max(current / total, 0), 1) : 0
+                    update(
+                        .progress(
+                            current: fraction * 5,
+                            total: 100,
+                            unit: "percent"
+                        )
+                    )
+                }
             }
 
             if segmentPlan.requiresSplitting {
@@ -568,7 +601,10 @@ public final class TranscriptionEngine {
                 convertedText,
                 sourceURL: sourceURL,
                 directory: outputDirectory,
-                suffix: job.snapshot.outputFilenameSuffix
+                suffix: outputSuffix(
+                    job.snapshot.outputFilenameSuffix,
+                    sourceSlice: job.sourceSlice
+                )
             )
             update(.progress(current: 100, total: 100, unit: "percent"))
 
@@ -582,7 +618,10 @@ public final class TranscriptionEngine {
                         rawText,
                         sourceURL: sourceURL,
                         directory: outputDirectory,
-                        suffix: job.snapshot.rawFilenameSuffix
+                        suffix: outputSuffix(
+                            job.snapshot.rawFilenameSuffix,
+                            sourceSlice: job.sourceSlice
+                        )
                     )
                 } catch {
                     update(
@@ -675,6 +714,16 @@ public final class TranscriptionEngine {
             }
             return URL(fileURLWithPath: snapshot.outputDirectory, isDirectory: true)
         }
+    }
+
+    private func outputSuffix(
+        _ base: String,
+        sourceSlice: TranscriptionSourceSlice?
+    ) -> String {
+        guard let sourceSlice else {
+            return base
+        }
+        return "\(base)_第\(sourceSlice.partIndex)-\(sourceSlice.partCount)段"
     }
 
     private func writeUniqueText(
@@ -824,6 +873,7 @@ extension TranscriptionEngine {
             let schemaVersion: Int
             let jobID: UUID
             let sourcePath: String
+            let sourceSlice: TranscriptionSourceSlice?
             let failureStage: String
             let createdAt: Date
             let technicalError: String
@@ -869,6 +919,7 @@ extension TranscriptionEngine {
             schemaVersion: 1,
             jobID: job.id,
             sourcePath: job.sourcePath,
+            sourceSlice: job.sourceSlice,
             failureStage: stage.rawValue,
             createdAt: Date(),
             technicalError: error.localizedDescription

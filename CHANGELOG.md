@@ -25,11 +25,16 @@
 - 轉錄前檢查暫存 volume 與輸出 volume 的可用空間，包含安全餘裕。
 - 輸出契約 final validation：拒收 BOM、NUL 控制字元與 Prompt echo，並在逐段、合併及繁體轉換後驗證。
 - 最近工作標示來源或輸出檔案已移動／刪除；相同 runtime 的佇列工作重用 engine 與長駐 helper。
+- 錄音加入佇列後，可在「開始轉文字」旁將單一錄音切成前後兩個時間範圍工作：前半先處理，後半排隊；兩段各自輸出有順序的 TXT。
+- 可從前端選取多份 TXT，依分段編號排序後合併成新檔；拒絕空白／不合法輸出且不覆寫既有檔案。
 
 ### Fixed
 
 - 長駐 ASR helper 的 stdin 改送 compact 單行 JSON（JSONL），避免 pretty-printed JSON 造成 helper `JSONDecodeError` 與早期 `asr_failed`。
 - MLX helper 輸出尾端若回吐 system prompt 開頭，以 `remove_prompt_echo()` 清除，避免污染正式逐字稿。
+- 修正 MLX／Intel helper 在輸出開頭回吐完整詞庫清單或 Prompt 的問題；最終輸出契約也會拒收前置／尾端 Prompt echo。
+- 修正中文詞庫以空格輸入時被當成單一詞，導致模型回吐整句詞庫仍被誤判為成功逐字稿；現在會拆分中文詞並在舊 Snapshot 上再次擋下相同污染。
+- 模型只回吐詞庫而沒有實際轉錄內容時，helper 現在會回報明確的 `prompt_echo_only` 失敗，不再先寫出空白或誤導性的完成結果。
 
 ### Changed
 
