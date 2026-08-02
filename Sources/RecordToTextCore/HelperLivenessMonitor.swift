@@ -31,4 +31,13 @@ public final class HelperLivenessMonitor: @unchecked Sendable {
             return true
         }
     }
+
+    public func isInactive(
+        now: Date = Date(),
+        timeout: TimeInterval
+    ) -> Bool {
+        lock.withLock {
+            now.timeIntervalSince(lastActivityAt) >= timeout
+        }
+    }
 }

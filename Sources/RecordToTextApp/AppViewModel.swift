@@ -65,6 +65,8 @@ final class AppViewModel: ObservableObject {
     private var queueTask: Task<Void, Never>?
     private var activeExecutionTask: Task<PipelineResult, Error>?
     private var activeEngine: TranscriptionEngine?
+    private var reusableEngine: TranscriptionEngine?
+    private var reusableEngineRuntime: ResolvedRuntime?
     private var modelDownloadTask: Task<Void, Never>?
     private var manualDrainRequested = false
     private var pendingDuplicateURLs: [URL] = []
@@ -165,6 +167,7 @@ final class AppViewModel: ObservableObject {
         queueTask?.cancel()
         activeExecutionTask?.cancel()
         activeEngine?.cancelCurrentJob()
+        reusableEngine?.cancelCurrentJob()
         modelDownloadTask?.cancel()
         modelDownloadRunner.cancelCurrent()
     }
@@ -1018,7 +1021,16 @@ final class AppViewModel: ObservableObject {
                 settings: settings,
                 bundledHelperURL: bundledHelperURL
             )
-            let engine = TranscriptionEngine(runtime: runtime, paths: paths)
+            let engine: TranscriptionEngine
+            if let reusableEngine,
+               reusableEngineRuntime == runtime
+            {
+                engine = reusableEngine
+            } else {
+                engine = TranscriptionEngine(runtime: runtime, paths: paths)
+                reusableEngine = engine
+                reusableEngineRuntime = runtime
+            }
             activeEngine = engine
 
             guard let currentJob = jobs.first(where: { $0.id == id }) else {

@@ -44,23 +44,23 @@
 
 ---
 
-## 待修改／尚未做（優先序）
+## 已完成（2026-08-02）
 
-### P1 — 下一輪工程（正確性與操作韌性）
-
-| # | 項目 | 說明 |
+| # | 項目 | 實作結果 |
 |---|------|------|
-| 1 | **Timeout／inactivity watchdog** | 為 ffprobe、ffmpeg、OpenCC（與必要時 helper 無事件）設合理超時，避免無限卡住。 |
-| 2 | **磁碟空間檢查** | 同時檢查暫存磁碟與實際輸出 volume 可用空間，不足時提前失敗並提示。 |
-| 3 | **最近工作檔案狀態** | 來源／輸出已移動或刪除時在 UI 標示；決定完成工作日誌的保留策略。 |
-| 4 | **模型載入生命週期** | 降低每段 `Fetching 11 files` 重複確認／載入成本；優化前保留長音完整性驗證與耗時對照。 |
+| 1 | **Timeout／inactivity watchdog** | ProcessRunner 支援絕對 timeout 與 inactivity timeout；ffprobe、ffmpeg、OpenCC、ASR helper 已接入。 |
+| 2 | **磁碟空間檢查** | 轉錄前同時檢查暫存 volume 與實際輸出 volume，並保留安全餘裕。 |
+| 3 | **最近工作檔案狀態** | 最近工作會標示來源／輸出檔案已移動或刪除；既有 ledger、terminal history 與日誌裁切策略維持不變。 |
+| 4 | **模型載入生命週期** | 同一 App 佇列重用 engine／長駐 helper；相同 model revision 命中 Python cache 時跳過重載，並新增技術日誌可辨識 cache hit。 |
+| 6 | **輸出契約再驗證** | 新增 final output contract，檢查 BOM、NUL、Prompt echo，並在 segment、merge、OpenCC 後再次驗證。 |
+
+## 待修改／尚未做（優先序）
 
 ### P2 — 產品規劃已定、程式未做
 
 | # | 項目 | 說明 |
 |---|------|------|
 | 5 | **PD-015 自動檢查更新** | 預設約每 7 天查 GitHub Releases；有新版再提示；設定內手動檢查；只檢查＋引導下載。細節見下方。 |
-| 6 | **輸出契約再驗證** | 評估 Prompt echo／缺口標記是否在 TextFileValidator 或 merge 再做一層；是否保留 raw 供診斷。 |
 | 7 | **手動切開檔的合併** | 使用者自行切兩段時 App 不自動合併 TXT（目前需手動接檔）；是否做「合併已完成逐字稿」另議。 |
 
 ### P3 — 外部／發佈條件（Blocked 或需資源）
@@ -100,7 +100,6 @@
 
 ## 建議下一輪開工順序
 
-1. Timeout／watchdog + 磁碟空間（P1-1、P1-2）  
-2. 模型載入生命週期或最近工作檔案狀態（P1-3／P1-4，擇一痛點）  
-3. PD-015 stub + settings（有 Release 再接真 API）  
-4. Runtime installer／簽署／公證（P3，與產品發佈時程綁定）  
+1. PD-015 stub + settings（有 Release 再接真 API）
+2. 手動切開檔的合併（確認使用頻率後再做）
+3. Runtime installer／簽署／公證（P3，與產品發佈時程綁定）

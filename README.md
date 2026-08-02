@@ -236,7 +236,6 @@ swift test
 完整分級清單見 **`docs/NEXT_STEPS.md`**。摘要：
 
 - **免安裝 Homebrew／自架 Python 的 App 管理 Runtime**（乾淨 Mac 一鍵可用）。
-- Timeout／磁碟空間檢查；模型每段重複載入優化。
 - 系統性 MLX soak（31／65／120 分鐘）與正式「任意長度會議」產品承諾。
 - 模型 digest 完整性與正式 installer。
 - Intel 實機、Universal 2。

@@ -1,10 +1,26 @@
 import Foundation
 
+private enum AudioProcessTimeouts {
+    static let minimumTemporaryReserve: Int64 = 64 * 1_024 * 1_024
+    static let minimumOutputReserve: Int64 = 32 * 1_024 * 1_024
+    static let probe: TimeInterval = 30
+    static let probeInactivity: TimeInterval = 15
+    static let ffmpegInactivity: TimeInterval = 5 * 60
+    static let openCC: TimeInterval = 10 * 60
+
+    static func ffmpeg(for duration: Double) -> TimeInterval {
+        // A generous upper bound for slow disks or very long recordings,
+        // while still preventing a wedged ffmpeg from living forever.
+        max(2 * 60, duration * 10 + 2 * 60)
+    }
+}
+
 public enum AudioServiceError: LocalizedError {
     case unsupportedExtension(String)
     case noAudioStream
     case invalidProbeResponse
     case insufficientDiskSpace(required: Int64, available: Int64)
+    case insufficientDiskSpaceAt(path: String, required: Int64, available: Int64)
     case outputMissing(String)
     case outputEmpty(String)
     case outputInvalidUTF8(String)
@@ -19,6 +35,8 @@ public enum AudioServiceError: LocalizedError {
             return "ffprobe 回傳的音檔資訊無法解讀。"
         case let .insufficientDiskSpace(required, available):
             return "磁碟空間不足。需要約 \(required) bytes，目前可用 \(available) bytes。"
+        case let .insufficientDiskSpaceAt(path, required, available):
+            return "磁碟空間不足：\(path)。至少需要約 \(required) bytes，目前可用 \(available) bytes。"
         case let .outputMissing(path):
             return "外部程序結束後找不到預期輸出：\(path)"
         case let .outputEmpty(path):
@@ -56,7 +74,9 @@ public final class AudioProbeService {
                 "-show_entries", "stream=codec_name,sample_rate,channels:format=duration",
                 "-of", "json",
                 sourceURL.path
-            ]
+            ],
+            timeout: AudioProcessTimeouts.probe,
+            inactivityTimeout: AudioProcessTimeouts.probeInactivity
         )
 
         struct Probe: Decodable {
@@ -104,40 +124,60 @@ public final class AudioProbeService {
     public func validateDiskSpace(
         for metadata: AudioMetadata,
         temporaryDirectory: URL,
+        outputDirectory: URL,
         pcmWorkingCopies: Int = 1
     ) throws {
-        let values = try temporaryDirectory.resourceValues(
+        let copyCount = Int64(max(pcmWorkingCopies, 1))
+        let multiplication = metadata.estimatedPCMBytes.multipliedReportingOverflow(
+            by: copyCount
+        )
+        let pcmBytes = multiplication.overflow
+            ? Int64.max
+            : multiplication.partialValue
+        let temporaryRequired = pcmBytes.addingReportingOverflow(
+            AudioProcessTimeouts.minimumTemporaryReserve
+        )
+        let requiredTemporary = temporaryRequired.overflow
+            ? Int64.max
+            : temporaryRequired.partialValue
+
+        if let available = try availableCapacity(at: temporaryDirectory),
+           available < requiredTemporary
+        {
+            throw AudioServiceError.insufficientDiskSpace(
+                required: requiredTemporary,
+                available: available
+            )
+        }
+
+        guard let outputAvailable = try availableCapacity(at: outputDirectory) else {
+            // Some File Provider and sandboxed volumes do not report capacity.
+            // The write itself remains the authoritative failure boundary.
+            return
+        }
+        guard outputAvailable >= AudioProcessTimeouts.minimumOutputReserve else {
+            throw AudioServiceError.insufficientDiskSpaceAt(
+                path: outputDirectory.path,
+                required: AudioProcessTimeouts.minimumOutputReserve,
+                available: outputAvailable
+            )
+        }
+    }
+
+    private func availableCapacity(at directory: URL) throws -> Int64? {
+        let values = try directory.resourceValues(
             forKeys: [
                 .volumeAvailableCapacityForImportantUsageKey,
                 .volumeAvailableCapacityKey
             ]
         )
-        let available: Int64?
         if let important = values.volumeAvailableCapacityForImportantUsage {
-            available = important
-        } else if let standard = values.volumeAvailableCapacity {
-            available = Int64(standard)
-        } else {
-            available = nil
+            return important
         }
-        guard let available, available > 0 else {
-            // Some File Provider and sandboxed volumes do not report capacity.
-            // The write itself remains the authoritative failure boundary.
-            return
+        if let standard = values.volumeAvailableCapacity {
+            return Int64(standard)
         }
-        let copyCount = Int64(max(pcmWorkingCopies, 1))
-        let multiplication = metadata.estimatedPCMBytes.multipliedReportingOverflow(
-            by: copyCount
-        )
-        let required = multiplication.overflow
-            ? Int64.max
-            : multiplication.partialValue
-        guard available >= required else {
-            throw AudioServiceError.insufficientDiskSpace(
-                required: required,
-                available: available
-            )
-        }
+        return nil
     }
 }
 
@@ -176,6 +216,8 @@ public final class FFmpegService {
                 "-nostats",
                 destinationURL.path
             ],
+            timeout: AudioProcessTimeouts.ffmpeg(for: duration),
+            inactivityTimeout: AudioProcessTimeouts.ffmpegInactivity,
             stdoutLineHandler: { line in
                 let parts = line.split(separator: "=", maxSplits: 1).map(String.init)
                 guard parts.count == 2 else {
@@ -229,7 +271,9 @@ public final class FFmpegService {
                 "-ac", "1",
                 "-c:a", "pcm_s16le",
                 destinationURL.path
-            ]
+            ],
+            timeout: AudioProcessTimeouts.ffmpeg(for: durationSeconds),
+            inactivityTimeout: AudioProcessTimeouts.ffmpegInactivity
         )
 
         guard FileManager.default.fileExists(atPath: destinationURL.path) else {
@@ -268,7 +312,8 @@ public final class OpenCCService {
                 "-i", sourceURL.path,
                 "-o", destinationURL.path,
                 "-c", "s2twp.json"
-            ]
+            ],
+            timeout: AudioProcessTimeouts.openCC
         )
 
         do {

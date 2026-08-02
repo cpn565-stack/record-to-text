@@ -789,6 +789,11 @@ private struct RecentJobRow: View {
                     Text(summary.stage.displayName)
                         .font(.caption)
                         .foregroundStyle(statusColor)
+                    if let fileStatus = summary.fileStatus().displayName {
+                        Text("・\(fileStatus)")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
                     if let glossaryName = summary.glossaryName {
                         Text("・\(glossaryName)")
                             .font(.caption)
@@ -799,7 +804,7 @@ private struct RecentJobRow: View {
 
             Spacer()
 
-            if summary.stage == .completed, summary.outputPath != nil {
+            if outputIsAvailable {
                 Button {
                     viewModel.revealOutput(for: summary)
                 } label: {
@@ -817,13 +822,15 @@ private struct RecentJobRow: View {
                 .help("打開文字檔")
             }
 
-            Button {
-                viewModel.retryRecentJob(summary)
-            } label: {
-                Image(systemName: "arrow.clockwise")
+            if sourceIsAvailable {
+                Button {
+                    viewModel.retryRecentJob(summary)
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .help("用目前設定建立新工作")
             }
-            .buttonStyle(.borderless)
-            .help("用目前設定建立新工作")
 
             Button(role: .destructive) {
                 isDeletePresented = true
@@ -849,7 +856,7 @@ private struct RecentJobRow: View {
             Text("只會從最近工作移除紀錄，不會刪除原始錄音或已輸出的文字檔。")
         }
         .contextMenu {
-            if summary.stage == .completed, summary.outputPath != nil {
+            if outputIsAvailable {
                 Button("打開文字檔") {
                     viewModel.openOutput(for: summary)
                 }
@@ -857,8 +864,10 @@ private struct RecentJobRow: View {
                     viewModel.revealOutput(for: summary)
                 }
             }
-            Button("用目前設定建立新工作") {
-                viewModel.retryRecentJob(summary)
+            if sourceIsAvailable {
+                Button("用目前設定建立新工作") {
+                    viewModel.retryRecentJob(summary)
+                }
             }
             Divider()
             Button("從列表刪除", role: .destructive) {
@@ -868,6 +877,9 @@ private struct RecentJobRow: View {
     }
 
     private var statusSymbol: String {
+        if summary.fileStatus() != .available {
+            return "exclamationmark.triangle.fill"
+        }
         switch summary.stage {
         case .completed:
             return "checkmark.circle.fill"
@@ -881,6 +893,9 @@ private struct RecentJobRow: View {
     }
 
     private var statusColor: Color {
+        if summary.fileStatus() != .available {
+            return .orange
+        }
         switch summary.stage {
         case .completed:
             return .green
@@ -889,6 +904,17 @@ private struct RecentJobRow: View {
         default:
             return .secondary
         }
+    }
+
+    private var sourceIsAvailable: Bool {
+        FileManager.default.fileExists(atPath: summary.sourcePath)
+    }
+
+    private var outputIsAvailable: Bool {
+        guard summary.stage == .completed, let outputPath = summary.outputPath else {
+            return false
+        }
+        return FileManager.default.fileExists(atPath: outputPath)
     }
 }
 

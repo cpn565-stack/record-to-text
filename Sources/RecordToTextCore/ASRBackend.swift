@@ -1,5 +1,7 @@
 import Foundation
 
+private let asrHelperInactivityTimeout: TimeInterval = 3 * 60
+
 public struct ASRRequest: Codable, Equatable, Sendable {
     public let jobID: String
     public let audioPath: String
@@ -80,6 +82,7 @@ public enum ASRBackendError: LocalizedError {
     case outputEmpty(String)
     case outputInvalidUTF8(String)
     case glossaryPromptUnsupported
+    case helperTimedOut(timeout: TimeInterval)
 
     public var errorDescription: String? {
         switch self {
@@ -104,6 +107,8 @@ public enum ASRBackendError: LocalizedError {
             return "ASR Helper 產生的逐字稿不是有效的 UTF-8：\(path)"
         case .glossaryPromptUnsupported:
             return "目前後端不支援專有名詞提示。"
+        case let .helperTimedOut(timeout):
+            return "ASR Helper 已超過 \(String(format: "%.0f 分鐘", timeout / 60)) 沒有回報活動，已停止以避免工作無限卡住。"
         }
     }
 }
@@ -199,6 +204,27 @@ private final class PersistentASRHelperSession: @unchecked Sendable {
     ) async throws {
         try startIfNeeded()
 
+        let activity = HelperLivenessMonitor()
+        let watchdogTask = Task { [weak self, weak activity] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: 10 * 1_000_000_000)
+                } catch {
+                    return
+                }
+                guard let self, let activity else {
+                    return
+                }
+                if activity.isInactive(timeout: asrHelperInactivityTimeout) {
+                    self.failActiveRequest()
+                    return
+                }
+            }
+        }
+        defer {
+            watchdogTask.cancel()
+        }
+
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation {
                 (continuation: CheckedContinuation<Void, Error>) in
@@ -207,8 +233,14 @@ private final class PersistentASRHelperSession: @unchecked Sendable {
                         return nil
                     }
                     requestContinuation = continuation
-                    self.stdoutLineHandler = stdoutLineHandler
-                    self.stderrLineHandler = stderrLineHandler
+                    self.stdoutLineHandler = { line in
+                        activity.recordActivity()
+                        return stdoutLineHandler(line)
+                    }
+                    self.stderrLineHandler = { line in
+                        activity.recordActivity()
+                        stderrLineHandler(line)
+                    }
                     return inputPipe?.fileHandleForWriting
                 }
 
@@ -389,6 +421,24 @@ private final class PersistentASRHelperSession: @unchecked Sendable {
         }
     }
 
+    private func failActiveRequest() {
+        let currentProcess = lock.withLock { () -> Process? in
+            guard requestContinuation != nil else {
+                return nil
+            }
+            return process
+        }
+        guard let currentProcess else {
+            return
+        }
+        finishRequest(
+            with: ASRBackendError.helperTimedOut(
+                timeout: asrHelperInactivityTimeout
+            )
+        )
+        terminate(currentProcess)
+    }
+
     private func handleTermination(_ terminated: Process) {
         let isCurrent = lock.withLock { process === terminated }
         guard isCurrent else {
@@ -539,6 +589,7 @@ public final class HelperASRBackend {
                 ],
                 environment: helperEnvironment(request: request),
                 requireSuccess: false,
+                inactivityTimeout: asrHelperInactivityTimeout,
                 stdoutLineHandler: { line in
                     _ = stdoutLineHandler(line)
                 },

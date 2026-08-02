@@ -33,6 +33,43 @@ private final class SelfTestRunner {
     }
 }
 
+private final class AsyncResultBox<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: Result<Value, Error>?
+
+    func store(_ result: Result<Value, Error>) {
+        lock.withLock {
+            self.result = result
+        }
+    }
+
+    func load() throws -> Value {
+        try lock.withLock {
+            guard let result else {
+                throw SelfTestFailure(description: "async operation did not return")
+            }
+            return try result.get()
+        }
+    }
+}
+
+private func blockingAwait<Value>(
+    _ operation: @escaping @Sendable () async throws -> Value
+) throws -> Value {
+    let box = AsyncResultBox<Value>()
+    let semaphore = DispatchSemaphore(value: 0)
+    Task {
+        do {
+            box.store(.success(try await operation()))
+        } catch {
+            box.store(.failure(error))
+        }
+        semaphore.signal()
+    }
+    semaphore.wait()
+    return try box.load()
+}
+
 private let tests = SelfTestRunner()
 
 tests.check(
@@ -305,6 +342,27 @@ tests.check(
 
 tests.check(
     {
+        let runner = ProcessRunner()
+        do {
+            _ = try blockingAwait {
+                try await runner.run(
+                    executableURL: URL(fileURLWithPath: "/bin/sleep"),
+                    arguments: ["5"],
+                    timeout: 0.5
+                )
+            }
+            return false
+        } catch ProcessRunnerError.timedOut {
+            return true
+        } catch {
+            return false
+        }
+    }(),
+    "ProcessRunner terminates a process that exceeds its timeout"
+)
+
+tests.check(
+    {
         do {
             let modelID = "mlx-community/Qwen3-ASR-1.7B-bf16"
             let revision = "e1f6c266914abc5a46e8756e02580f834a6cf8a7"
@@ -357,6 +415,32 @@ tests.check(
         }
     }(),
     "TextFileValidator rejects blank transcript output"
+)
+
+tests.check(
+    try {
+        let prompt = "這是一段中文會議錄音。請忠實轉錄音訊內容，不要摘要、改寫、刪除或補充。以下詞彙只在音訊出現時使用。"
+        let clean = "前面的會議內容。"
+        let echoed = "\(clean)\n\(prompt)"
+        guard try OutputContractValidator.validate(
+            text: clean,
+            path: "/tmp/clean.txt",
+            prompt: prompt
+        ) == clean else {
+            return false
+        }
+        do {
+            _ = try OutputContractValidator.validate(
+                text: echoed,
+                path: "/tmp/echoed.txt",
+                prompt: prompt
+            )
+            return false
+        } catch OutputContractValidationError.promptEcho {
+            return true
+        }
+    }(),
+    "OutputContractValidator rejects prompt echo while keeping clean transcript"
 )
 
 tests.check(
@@ -544,6 +628,25 @@ tests.check(
         ).map(\.id) == queued.map(\.id)
     }(),
     "JobRetentionPolicy never truncates a queue longer than history limit"
+)
+
+tests.check(
+    {
+        let summary = RecentJobSummary(
+            id: UUID(),
+            sourcePath: "/tmp/source.m4a",
+            outputPath: "/tmp/output.txt",
+            stage: .completed,
+            startedAt: nil,
+            completedAt: nil,
+            modelID: "mock/model",
+            glossaryName: nil
+        )
+        let existing: Set<String> = ["/tmp/source.m4a"]
+        return summary.fileStatus(fileExists: { existing.contains($0) })
+            == .outputMissing
+    }(),
+    "RecentJobSummary marks a missing completed output"
 )
 
 tests.finish()

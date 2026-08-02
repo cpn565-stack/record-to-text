@@ -217,9 +217,19 @@ def load_model_once(request: dict[str, Any]) -> tuple[Any, bool, bool]:
     if _MODEL_CACHE is not None:
         cached_id, cached_revision, model, supports_system_prompt, supports_context = _MODEL_CACHE
         if (cached_id, cached_revision) == cache_key:
+            emit(
+                "log",
+                level="technical",
+                message="模型快取命中：略過模型重新下載與載入。",
+            )
             return model, supports_system_prompt, supports_context
 
     emit("stage", value="loading_model")
+    emit(
+        "log",
+        level="technical",
+        message="模型快取未命中：本次 helper session 只載入一次模型。",
+    )
 
     # MLX can terminate at the native layer when Metal is unavailable. Keep this
     # import inside the helper process so such a failure cannot crash the Swift app.
@@ -239,6 +249,11 @@ def load_model_once(request: dict[str, Any]) -> tuple[Any, bool, bool]:
         model,
         supports_system_prompt,
         supports_context,
+    )
+    emit(
+        "log",
+        level="technical",
+        message="模型已載入並保留在長駐 helper；後續工作會重用。",
     )
     return model, supports_system_prompt, supports_context
 

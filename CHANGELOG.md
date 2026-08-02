@@ -21,6 +21,10 @@
 - Coordinator-level 30 分鐘預切、segment manifest、逐段獨立 ASR 與全段完整性 gate。
 - 31／65／120 分鐘 planner fixture，以及中段／尾段失敗、空白、token limit、未 completed 的 fail-closed 管線測試。
 - Durable Job retention policy 與 limit 0、長佇列、terminal history、日誌裁切及 JSON round-trip 測試。
+- 外部程序 timeout／inactivity watchdog：ffprobe、ffmpeg、OpenCC 與 ASR helper 卡住時會自動停止並保留可診斷錯誤。
+- 轉錄前檢查暫存 volume 與輸出 volume 的可用空間，包含安全餘裕。
+- 輸出契約 final validation：拒收 BOM、NUL 控制字元與 Prompt echo，並在逐段、合併及繁體轉換後驗證。
+- 最近工作標示來源或輸出檔案已移動／刪除；相同 runtime 的佇列工作重用 engine 與長駐 helper。
 
 ### Fixed
 
@@ -50,6 +54,6 @@
 
 - 已在本機 Apple Silicon + 真實 Qwen3-ASR（MLX）路徑驗證長音訊流程；仍非正式公證／可分發 Stable 版。
 - 極密語或異常音訊可能使最短約 30 秒葉節仍達 token 上限：會以明確缺口標記處理，不保證該區間文字完整。
-- 每個 coordinator 分段仍可能重複確認／載入模型（日誌可見 `Fetching 11 files`）；模型生命週期優化待辦。
+- 模型 cache reuse 已加入；實際耗時、記憶體與 Fetching 11 files 改善仍需在真實 Metal 長音檔上做前後測量。
 - 正式 Runtime、Universal 2、Developer ID、公證與 DMG 尚需外部條件。
 - 尚無 App 自動檢查更新。

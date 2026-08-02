@@ -522,6 +522,45 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
     public var displayName: String {
         URL(fileURLWithPath: sourcePath).lastPathComponent
     }
+
+    public func fileStatus(
+        fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+    ) -> RecentJobFileStatus {
+        let sourceExists = fileExists(sourcePath)
+        let outputRequired = stage == .completed
+        let outputExists = outputPath.map(fileExists) ?? false
+
+        switch (sourceExists, outputRequired, outputExists) {
+        case (false, true, false):
+            return .sourceAndOutputMissing
+        case (false, _, _):
+            return .sourceMissing
+        case (true, true, false):
+            return .outputMissing
+        default:
+            return .available
+        }
+    }
+}
+
+public enum RecentJobFileStatus: String, Codable, Equatable, Sendable {
+    case available
+    case sourceMissing
+    case outputMissing
+    case sourceAndOutputMissing
+
+    public var displayName: String? {
+        switch self {
+        case .available:
+            return nil
+        case .sourceMissing:
+            return "來源音檔已移動或刪除"
+        case .outputMissing:
+            return "輸出文字檔已移動或刪除"
+        case .sourceAndOutputMissing:
+            return "來源與輸出檔都找不到"
+        }
+    }
 }
 
 public struct RecentJobCollection: Codable, Equatable, Sendable {

@@ -189,12 +189,6 @@ public final class TranscriptionEngine {
                     )
                 )
             )
-            try probeService.validateDiskSpace(
-                for: metadata,
-                temporaryDirectory: workingDirectory,
-                pcmWorkingCopies: segmentPlan.requiresSplitting ? 2 : 1
-            )
-
             let outputDirectory = try resolvedOutputDirectory(
                 for: sourceURL,
                 snapshot: job.snapshot
@@ -202,6 +196,12 @@ public final class TranscriptionEngine {
             try FileManager.default.createDirectory(
                 at: outputDirectory,
                 withIntermediateDirectories: true
+            )
+            try probeService.validateDiskSpace(
+                for: metadata,
+                temporaryDirectory: workingDirectory,
+                outputDirectory: outputDirectory,
+                pcmWorkingCopies: segmentPlan.requiresSplitting ? 2 : 1
             )
 
             try Task.checkCancellation()
@@ -479,8 +479,9 @@ public final class TranscriptionEngine {
                     }
                     livenessTask.cancel()
 
-                    let segmentText = try TextFileValidator.readNonEmptyUTF8(
-                        at: URL(fileURLWithPath: record.outputPath)
+                    let segmentText = try OutputContractValidator.readTranscript(
+                        at: URL(fileURLWithPath: record.outputPath),
+                        prompt: job.snapshot.prompt
                     ).trimmingCharacters(in: .whitespacesAndNewlines)
                     segmentTexts[segment.index] = segmentText
                     try segmentManifest.mark(
@@ -537,7 +538,15 @@ public final class TranscriptionEngine {
                 }
                 return text
             }.joined(separator: "\n")
-            try AtomicFileWriter.writeText(mergedRawText, to: rawTranscriptURL)
+            let validatedMergedRawText = try OutputContractValidator.validate(
+                text: mergedRawText,
+                path: rawTranscriptURL.path,
+                prompt: job.snapshot.prompt
+            )
+            try AtomicFileWriter.writeText(
+                validatedMergedRawText,
+                to: rawTranscriptURL
+            )
             update(.progress(current: 95, total: 100, unit: "percent"))
 
             try Task.checkCancellation()
@@ -552,7 +561,7 @@ public final class TranscriptionEngine {
             try Task.checkCancellation()
             currentStage.set(.writingOutput)
             update(.stage(.writingOutput))
-            let convertedText = try TextFileValidator.readNonEmptyUTF8(
+            let convertedText = try OutputContractValidator.readTranscript(
                 at: convertedTranscriptURL
             )
             let finalOutputURL = try writeUniqueText(
@@ -566,7 +575,7 @@ public final class TranscriptionEngine {
             var preservedRawURL: URL?
             if job.snapshot.keepRawTranscript {
                 do {
-                    let rawText = try TextFileValidator.readNonEmptyUTF8(
+                    let rawText = try OutputContractValidator.readTranscript(
                         at: rawTranscriptURL
                     )
                     preservedRawURL = try writeUniqueText(
