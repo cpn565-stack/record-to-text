@@ -4,6 +4,9 @@ import SwiftUI
 struct SettingsView: View {
     @ObservedObject var viewModel: AppViewModel
     @State private var resetChoice: ResetChoice?
+    @State private var isTestingAPIKey = false
+    @State private var apiKeyTestResult: String?
+    @State private var apiKeyTestSucceeded: Bool?
 
     var body: some View {
         TabView {
@@ -167,7 +170,7 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Section("檔案") {
+            Section("檔名格式") {
                 TextField(
                     "檔名後綴",
                     text: Binding(
@@ -199,43 +202,14 @@ struct SettingsView: View {
                     .textSelection(.enabled)
                 }
 
-                if viewModel.settings.keepRawTranscript {
-                    TextField(
-                        "原始稿後綴",
-                        text: Binding(
-                            get: {
-                                viewModel.settings.rawFilenameSuffix
-                                    ?? OutputNameBuilder.defaultRawSuffix
-                            },
-                            set: { newValue in
-                                viewModel.setSetting(
-                                    \.rawFilenameSuffix,
-                                    to: OutputNameBuilder.sanitizedSuffix(
-                                        newValue,
-                                        fallback: OutputNameBuilder.defaultRawSuffix
-                                    )
-                                )
-                            }
-                        )
-                    )
-                    .textFieldStyle(.roundedBorder)
+                Text(
+                    "例：錄音.m4a → 錄音\(viewModel.settings.resolvedOutputFilenameSuffix).txt"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
 
-                    LabeledContent("原始稿預覽") {
-                        Text(
-                            OutputNameBuilder.previewFileName(
-                                suffix: viewModel.settings.resolvedRawFilenameSuffix
-                            )
-                        )
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                    }
-                }
-
-                Text("規則：原檔名 + 後綴 + .txt。若檔名已存在，自動加上 _2、_3…")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
+            Section("檔案編碼") {
                 LabeledContent("格式") {
                     Text("UTF-8・LF・無 BOM")
                         .foregroundStyle(.secondary)
@@ -247,141 +221,177 @@ struct SettingsView: View {
 
     private var runtimeSettings: some View {
         Form {
-            Section("目前架構") {
-                LabeledContent("電腦") {
-                    Text(CPUArchitecture.current == .x86_64 ? "Intel" : "Apple Silicon")
-                }
-
+            Section("轉錄引擎管道 (ASR Backend)") {
                 Picker(
-                    "模型",
+                    "管道模式",
                     selection: Binding(
-                        get: { viewModel.settings.selectedModelID },
-                        set: { viewModel.setSelectedModelID($0) }
-                    )
-                ) {
-                    ForEach(viewModel.availableModels) { model in
-                        Text(model.displayName).tag(model.id)
-                    }
-                    if !viewModel.availableModels.contains(where: {
-                        $0.id == viewModel.settings.selectedModelID
-                    }) {
-                        Text(viewModel.settings.selectedModelID)
-                            .tag(viewModel.settings.selectedModelID)
-                    }
-                }
-                .disabled(viewModel.modelDownloadPhase.isBusy)
-
-                HStack(spacing: 10) {
-                    Button(viewModel.modelDownloadButtonTitle) {
-                        viewModel.downloadSelectedModel()
-                    }
-                    .disabled(!viewModel.canDownloadSelectedModel)
-
-                    if viewModel.modelDownloadPhase.isBusy {
-                        ProgressView()
-                            .controlSize(.small)
-                        Button("取消") {
-                            viewModel.cancelModelDownload()
-                        }
-                    } else if viewModel.isSelectedModelCached {
-                        Label("App 模型目錄已就緒", systemImage: "checkmark.circle.fill")
-                            .font(.caption)
-                            .foregroundStyle(.green)
-                    } else if viewModel.isSelectedModelInDefaultHFCache {
-                        Label("本機 Hugging Face cache 可匯入", systemImage: "externaldrive.fill.badge.checkmark")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                LabeledContent("模型 ID") {
-                    Text(viewModel.settings.selectedModelID)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                        .multilineTextAlignment(.trailing)
-                }
-
-                if let detail = viewModel.selectedModelDetail {
-                    Text(detail)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                if !viewModel.modelDownloadProgressLine.isEmpty {
-                    Text(viewModel.modelDownloadProgressLine)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                        .lineLimit(4)
-                }
-
-                switch viewModel.modelDownloadPhase {
-                case let .succeeded(message):
-                    Text(message)
-                        .font(.caption)
-                        .foregroundStyle(.green)
-                case let .failed(message):
-                    Text(message)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                        .textSelection(.enabled)
-                case .idle, .importingLocal, .downloading:
-                    EmptyView()
-                }
-
-                Text("下載位置：App 的 Models 目錄。若 ~/.cache/huggingface 已有同模型，會優先本機匯入，避免重複下載。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                if CPUArchitecture.current == .x86_64 {
-                    Label(
-                        "Intel CPU backend 尚未完成實機驗證，目前為 Experimental。",
-                        systemImage: "exclamationmark.triangle.fill"
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                } else if viewModel.settings.selectedModelID
-                    == ASRModelDescriptor.appleSiliconBF16.id
-                {
-                    Text("BF16 體積較大，並需要更多統一記憶體。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .onAppear {
-                viewModel.refreshSelectedModelCacheStatus()
-            }
-
-            Section("Developer Mode") {
-                Toggle(
-                    "使用本機開發環境",
-                    isOn: Binding(
-                        get: { viewModel.settings.developerMode },
+                        get: { viewModel.settings.backendType },
                         set: {
-                            viewModel.setSetting(\.developerMode, to: $0)
+                            viewModel.setSetting(\.backendType, to: $0)
                             viewModel.refreshEnvironment()
                         }
                     )
-                )
+                ) {
+                    ForEach(ASRBackendType.allCases, id: \.self) { backend in
+                        Text(backend.displayName).tag(backend)
+                    }
+                }
+                .pickerStyle(.segmented)
 
-                if viewModel.settings.developerMode {
-                    TextField(
-                        CPUArchitecture.current == .x86_64
-                            ? "Python 路徑（留白使用 ~/record-to-text-intel-env）"
-                            : "Python 路徑（留白使用 ~/mlx-audio-env）",
-                        text: optionalStringSetting(\.customPythonPath)
-                    )
-                    TextField(
-                        "Helper 路徑（留白使用 App 內建 helper）",
-                        text: optionalStringSetting(\.customHelperPath)
-                    )
+                if viewModel.settings.backendType == .googleAIStudio {
+                    VStack(alignment: .leading, spacing: 8) {
+                        SecureField(
+                            "Google AI Studio API Key",
+                            text: Binding(
+                                get: { viewModel.settings.googleAIStudioAPIKey ?? "" },
+                                set: { viewModel.setSetting(\.googleAIStudioAPIKey, to: $0.isEmpty ? nil : $0) }
+                            ),
+                            prompt: Text("請貼上 Gemini API Key (AIza...)")
+                        )
+                        .textFieldStyle(.roundedBorder)
+
+                        HStack {
+                            Button("測試 API Key 連線") {
+                                testGoogleAIStudioAPIKey()
+                            }
+                            .disabled(isTestingAPIKey || (viewModel.settings.googleAIStudioAPIKey ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                            if isTestingAPIKey {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
+
+                            if let result = apiKeyTestResult {
+                                Text(result)
+                                    .font(.caption)
+                                    .foregroundStyle(apiKeyTestSucceeded == true ? .green : .red)
+                            }
+                        }
+                    }
+
+                    Picker(
+                        "模型選擇",
+                        selection: Binding(
+                            get: {
+                                if GeminiModelDescriptor.presetModels.contains(where: { $0.id == viewModel.settings.googleAIStudioModelID }) {
+                                    return viewModel.settings.googleAIStudioModelID
+                                }
+                                return "custom"
+                            },
+                            set: { newValue in
+                                if newValue != "custom" {
+                                    viewModel.setSetting(\.googleAIStudioModelID, to: newValue)
+                                }
+                            }
+                        )
+                    ) {
+                        ForEach(GeminiModelDescriptor.presetModels) { preset in
+                            Text(preset.displayName).tag(preset.id)
+                        }
+                        Text("自訂模型 ID…").tag("custom")
+                    }
+
+                    if !GeminiModelDescriptor.presetModels.contains(where: { $0.id == viewModel.settings.googleAIStudioModelID }) {
+                        TextField(
+                            "自訂模型 ID (Model ID)",
+                            text: Binding(
+                                get: { viewModel.settings.googleAIStudioModelID },
+                                set: { viewModel.setSetting(\.googleAIStudioModelID, to: $0.isEmpty ? "gemini-3.7-flash" : $0) }
+                            )
+                        )
+                        .textFieldStyle(.roundedBorder)
+                    }
+
+                    if let selectedPreset = GeminiModelDescriptor.presetModels.first(where: { $0.id == viewModel.settings.googleAIStudioModelID }) {
+                        Text(selectedPreset.note)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Text("Google AI Studio API 採用標準 Gemini API Key，免裝 gcloud、免設定 GCP 專案。超長錄音自動切片上傳並無縫合併，輸出台灣繁體中文。所有設定即時自動儲存。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
-                Text("Developer Mode 僅供本機驗證；正式版本會使用 App 管理且已驗證的 Runtime。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if viewModel.settings.backendType == .vertexAI {
+                    TextField(
+                        "GCP Project ID",
+                        text: Binding(
+                            get: { viewModel.settings.vertexAIProjectID ?? "" },
+                            set: { viewModel.setSetting(\.vertexAIProjectID, to: $0.isEmpty ? nil : $0) }
+                        ),
+                        prompt: Text("留空則自動讀取 gcloud 當前專案")
+                    )
+                    .textFieldStyle(.roundedBorder)
 
+                    TextField(
+                        "GCP 區域 (Location)",
+                        text: Binding(
+                            get: { viewModel.settings.vertexAILocation },
+                            set: { viewModel.setSetting(\.vertexAILocation, to: $0.isEmpty ? "global" : $0) }
+                        )
+                    )
+                    .textFieldStyle(.roundedBorder)
+
+                    Picker(
+                        "模型選擇",
+                        selection: Binding(
+                            get: {
+                                if GeminiModelDescriptor.presetModels.contains(where: { $0.id == viewModel.settings.vertexAIModelID }) {
+                                    return viewModel.settings.vertexAIModelID
+                                }
+                                return "custom"
+                            },
+                            set: { newValue in
+                                if newValue != "custom" {
+                                    viewModel.setSetting(\.vertexAIModelID, to: newValue)
+                                }
+                            }
+                        )
+                    ) {
+                        ForEach(GeminiModelDescriptor.presetModels) { preset in
+                            Text(preset.displayName).tag(preset.id)
+                        }
+                        Text("自訂模型 ID…").tag("custom")
+                    }
+
+                    if !GeminiModelDescriptor.presetModels.contains(where: { $0.id == viewModel.settings.vertexAIModelID }) {
+                        TextField(
+                            "自訂模型 ID (Model ID)",
+                            text: Binding(
+                                get: { viewModel.settings.vertexAIModelID },
+                                set: { viewModel.setSetting(\.vertexAIModelID, to: $0.isEmpty ? "gemini-3.7-flash" : $0) }
+                            )
+                        )
+                        .textFieldStyle(.roundedBorder)
+                    }
+
+                    if let selectedPreset = GeminiModelDescriptor.presetModels.first(where: { $0.id == viewModel.settings.vertexAIModelID }) {
+                        Text(selectedPreset.note)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    TextField(
+                        "自訂 gcloud 路徑",
+                        text: Binding(
+                            get: { viewModel.settings.customGCloudPath ?? "" },
+                            set: {
+                                viewModel.setSetting(\.customGCloudPath, to: $0.isEmpty ? nil : $0)
+                                viewModel.refreshEnvironment()
+                            }
+                        ),
+                        prompt: Text("留空則自動搜尋 /opt/homebrew/bin/gcloud 等標準路徑")
+                    )
+                    .textFieldStyle(.roundedBorder)
+
+                    Text("Vertex AI 使用本機 `gcloud` 認證與 GCP 專案。所有設定皆會即時自動儲存。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Section {
                 Button("執行環境檢查…") {
                     viewModel.refreshEnvironment()
                     viewModel.isEnvironmentPresented = true
@@ -468,6 +478,36 @@ struct SettingsView: View {
                 viewModel.setSetting(keyPath, to: value.isEmpty ? nil : value)
             }
         )
+    }
+
+    private func testGoogleAIStudioAPIKey() {
+        guard let key = viewModel.settings.googleAIStudioAPIKey?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else {
+            apiKeyTestResult = "請先輸入 API Key"
+            apiKeyTestSucceeded = false
+            return
+        }
+
+        isTestingAPIKey = true
+        apiKeyTestResult = nil
+        apiKeyTestSucceeded = nil
+
+        Task {
+            let backend = GoogleAIStudioBackend()
+            do {
+                _ = try await backend.validateAPIKey(key)
+                await MainActor.run {
+                    isTestingAPIKey = false
+                    apiKeyTestResult = "✅ 連線成功！API Key 有效。"
+                    apiKeyTestSucceeded = true
+                }
+            } catch {
+                await MainActor.run {
+                    isTestingAPIKey = false
+                    apiKeyTestResult = "❌ 驗證失敗：\(error.localizedDescription)"
+                    apiKeyTestSucceeded = false
+                }
+            }
+        }
     }
 }
 

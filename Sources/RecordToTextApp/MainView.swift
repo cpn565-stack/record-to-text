@@ -127,7 +127,7 @@ struct MainView: View {
                 Text("record-to-text")
                     .font(.system(size: 28, weight: .semibold, design: .rounded))
                     .accessibilityAddTraits(.isHeader)
-                Text("把會議錄音留在這台 Mac，產生可繼續整理的台灣繁體文字稿。")
+                Text(viewModel.appSubtitle)
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -136,9 +136,7 @@ struct MainView: View {
 
             Label(
                 viewModel.selectedModelName,
-                systemImage: CPUArchitecture.current == .x86_64
-                    ? "cpu"
-                    : "apple.logo"
+                systemImage: viewModel.selectedModelIcon
             )
             .font(.caption.weight(.medium))
             .foregroundStyle(.secondary)

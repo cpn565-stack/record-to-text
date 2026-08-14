@@ -35,6 +35,7 @@
 - 修正 MLX／Intel helper 在輸出開頭回吐完整詞庫清單或 Prompt 的問題；最終輸出契約也會拒收前置／尾端 Prompt echo。
 - 修正中文詞庫以空格輸入時被當成單一詞，導致模型回吐整句詞庫仍被誤判為成功逐字稿；現在會拆分中文詞並在舊 Snapshot 上再次擋下相同污染。
 - 模型只回吐詞庫而沒有實際轉錄內容時，helper 現在會回報明確的 `prompt_echo_only` 失敗，不再先寫出空白或誤導性的完成結果。
+- MLX helper 任一內部 chunk 只回吐 Prompt 時改為整段 fail-closed；一般 chunk 例外也會保存已完成內容的 partial 草稿，不再讓部分結果被誤判為完整成功或直接遺失。
 
 ### Changed
 

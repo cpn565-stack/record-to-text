@@ -84,6 +84,8 @@ public final class TranscriptionEngine {
     private let ffmpegService: FFmpegService
     private let openCCService: OpenCCService
     private let backend: HelperASRBackend
+    private let googleAIStudioBackend: GoogleAIStudioBackend
+    private let vertexAIBackend: VertexAIGeminiBackend
     private let sleepPrevention: SleepPreventionService
     private let maximumASRSegmentDuration: TimeInterval
     private let cancellationLock = NSLock()
@@ -93,6 +95,8 @@ public final class TranscriptionEngine {
         runtime: ResolvedRuntime,
         paths: ApplicationPaths,
         runner: ProcessRunner = ProcessRunner(),
+        googleAIStudioBackend: GoogleAIStudioBackend? = nil,
+        vertexAIBackend: VertexAIGeminiBackend? = nil,
         sleepPrevention: SleepPreventionService = SleepPreventionService(),
         maximumASRSegmentDuration: TimeInterval =
             AudioSegmentPlanner.productionMaximumDuration
@@ -104,6 +108,8 @@ public final class TranscriptionEngine {
         self.ffmpegService = FFmpegService(executableURL: runtime.ffmpeg, runner: runner)
         self.openCCService = OpenCCService(executableURL: runtime.opencc, runner: runner)
         self.backend = HelperASRBackend(runtime: runtime, paths: paths, runner: runner)
+        self.googleAIStudioBackend = googleAIStudioBackend ?? GoogleAIStudioBackend()
+        self.vertexAIBackend = vertexAIBackend ?? VertexAIGeminiBackend(authService: GCloudAuthService(runner: runner))
         self.sleepPrevention = sleepPrevention
         self.maximumASRSegmentDuration = maximumASRSegmentDuration
     }
@@ -220,6 +226,31 @@ public final class TranscriptionEngine {
                 at: outputDirectory,
                 withIntermediateDirectories: true
             )
+
+            if job.snapshot.backendType == .googleAIStudio {
+                return try await runGoogleAIStudioPipeline(
+                    job: job,
+                    startedAt: startedAt,
+                    sourceURL: sourceURL,
+                    workingDirectory: workingDirectory,
+                    outputDirectory: outputDirectory,
+                    metadata: metadata,
+                    currentStage: currentStage,
+                    update: update
+                )
+            } else if job.snapshot.backendType == .vertexAI {
+                return try await runVertexAIPipeline(
+                    job: job,
+                    startedAt: startedAt,
+                    sourceURL: sourceURL,
+                    workingDirectory: workingDirectory,
+                    outputDirectory: outputDirectory,
+                    metadata: metadata,
+                    currentStage: currentStage,
+                    update: update
+                )
+            }
+
             try probeService.validateDiskSpace(
                 for: metadata,
                 temporaryDirectory: workingDirectory,
@@ -724,6 +755,425 @@ public final class TranscriptionEngine {
             return base
         }
         return "\(base)_第\(sourceSlice.partIndex)-\(sourceSlice.partCount)段"
+    }
+
+    private func runGoogleAIStudioPipeline(
+        job: TranscriptionJob,
+        startedAt: Date,
+        sourceURL: URL,
+        workingDirectory: URL,
+        outputDirectory: URL,
+        metadata: AudioMetadata,
+        currentStage: PipelineStageTracker,
+        update: @escaping (PipelineUpdate) -> Void
+    ) async throws -> PipelineResult {
+        googleAIStudioBackend.updateConfiguration(
+            GoogleAIStudioBackend.Configuration(
+                apiKey: job.snapshot.googleAIStudioAPIKey,
+                modelID: job.snapshot.googleAIStudioModelID
+            )
+        )
+
+        let modelDisplay = (job.snapshot.googleAIStudioModelID.contains("pro")) ? "Gemini 3.1 Pro" : "Gemini 3.7 Flash"
+
+        // 若已有特定 Slice（如使用者手動切半），或音檔 <= 20 分鐘，直接單段執行
+        let segmentPlan = try AudioSegmentPlanner.makePlan(
+            sourceDuration: metadata.duration,
+            maximumSegmentDuration: maximumASRSegmentDuration
+        )
+
+        let finalTranscribedText: String
+
+        if !segmentPlan.requiresSplitting || job.sourceSlice != nil {
+            // 單段處理
+            let compressedAudioURL = workingDirectory.appendingPathComponent("compressed.mp3")
+
+            try Task.checkCancellation()
+            currentStage.set(.convertingAudio)
+            update(.stage(.convertingAudio))
+            update(.log(level: "info", message: "正在壓縮音訊為 16kHz 單聲道 MP3 以進行 Google AI Studio 傳輸..."))
+
+            let timeOffset: Double
+            if let sourceSlice = job.sourceSlice {
+                timeOffset = sourceSlice.startSeconds
+                try await ffmpegService.extractSegmentForCloud(
+                    sourceURL: sourceURL,
+                    destinationURL: compressedAudioURL,
+                    startSeconds: sourceSlice.startSeconds,
+                    durationSeconds: sourceSlice.durationSeconds
+                )
+            } else {
+                timeOffset = 0
+                try await ffmpegService.compressForCloud(
+                    sourceURL: sourceURL,
+                    destinationURL: compressedAudioURL,
+                    duration: metadata.duration
+                ) { current, total in
+                    let fraction = total > 0 ? min(max(current / total, 0), 1) : 0
+                    update(.progress(current: fraction * 15, total: 100, unit: "percent"))
+                }
+            }
+
+            try Task.checkCancellation()
+            currentStage.set(.transcribing)
+            update(.stage(.transcribing))
+            update(.log(level: "info", message: "正在連線 Google AI Studio (\(modelDisplay)) 進行語音轉錄..."))
+            update(.progress(current: 25, total: 100, unit: "percent"))
+
+            let audioData = try Data(contentsOf: compressedAudioURL)
+
+            finalTranscribedText = try await transcribeGoogleAIStudioWithLiveProgress(
+                audioData: audioData,
+                job: job,
+                modelDisplay: modelDisplay,
+                timeOffset: timeOffset,
+                basePercent: 25.0,
+                maxPercent: 88.0,
+                update: update
+            )
+        } else {
+            // 多段自動切片處理（針對超過 20 分鐘之長錄音，避免超出 20MB 上限並維持高精度）
+            var segmentTexts: [String] = []
+            let totalSegments = segmentPlan.expectedSegmentCount
+
+            update(.log(level: "info", message: "音檔時長超過 20 分鐘，自動以 20 分鐘為單位進行 \(totalSegments) 段高精度切片處理..."))
+
+            for (index, segment) in segmentPlan.segments.enumerated() {
+                try Task.checkCancellation()
+                let segmentIndex = index + 1
+                let segmentAudioURL = workingDirectory.appendingPathComponent("segment_\(segmentIndex).mp3")
+
+                currentStage.set(.convertingAudio)
+                update(.stage(.convertingAudio))
+                update(.log(level: "info", message: "［第 \(segmentIndex)/\(totalSegments) 段］正在截取與壓縮音訊..."))
+
+                try await ffmpegService.extractSegmentForCloud(
+                    sourceURL: sourceURL,
+                    destinationURL: segmentAudioURL,
+                    startSeconds: segment.startSeconds,
+                    durationSeconds: segment.durationSeconds
+                )
+
+                let segAudioData = try Data(contentsOf: segmentAudioURL)
+
+                try Task.checkCancellation()
+                currentStage.set(.transcribing)
+                update(.stage(.transcribing))
+                update(.log(level: "info", message: "［第 \(segmentIndex)/\(totalSegments) 段］正在由 \(modelDisplay) 進行轉錄（時間基準：\(Int(segment.startSeconds / 60)) 分鐘起）..."))
+
+                let baseProgress = 10.0 + (Double(index) / Double(totalSegments)) * 75.0
+                let segMaxProgress = 10.0 + (Double(segmentIndex) / Double(totalSegments)) * 75.0
+
+                let segText = try await transcribeGoogleAIStudioWithLiveProgress(
+                    audioData: segAudioData,
+                    job: job,
+                    modelDisplay: "\(modelDisplay) 第 \(segmentIndex)/\(totalSegments) 段",
+                    timeOffset: segment.startSeconds,
+                    basePercent: baseProgress,
+                    maxPercent: segMaxProgress,
+                    update: update
+                )
+
+                let trimmed = segText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    segmentTexts.append(trimmed)
+                } else {
+                    update(.log(level: "info", message: "［第 \(segmentIndex)/\(totalSegments) 段］此時段無可辨識語音或為靜音，已跳過。"))
+                }
+                update(.progress(current: segMaxProgress, total: 100, unit: "percent"))
+            }
+
+            finalTranscribedText = segmentTexts.isEmpty ? "（此錄音檔未辨識到清晰之語音內容）" : segmentTexts.joined(separator: "\n\n")
+        }
+
+        try Task.checkCancellation()
+        update(.progress(current: 92, total: 100, unit: "percent"))
+
+        currentStage.set(.writingOutput)
+        update(.stage(.writingOutput))
+
+        let finalOutputURL = try writeUniqueText(
+            finalTranscribedText,
+            sourceURL: sourceURL,
+            directory: outputDirectory,
+            suffix: outputSuffix(
+                job.snapshot.outputFilenameSuffix,
+                sourceSlice: job.sourceSlice
+            )
+        )
+
+        update(.progress(current: 100, total: 100, unit: "percent"))
+        update(
+            .log(
+                level: "info",
+                message: "轉錄完成！已儲存至：\(finalOutputURL.lastPathComponent)"
+            )
+        )
+        update(.stage(.completed))
+
+        return PipelineResult(
+            outputURL: finalOutputURL,
+            rawOutputURL: nil,
+            duration: Date().timeIntervalSince(startedAt),
+            containsSkippedAudio: false
+        )
+    }
+
+    private func transcribeGoogleAIStudioWithLiveProgress(
+        audioData: Data,
+        job: TranscriptionJob,
+        modelDisplay: String,
+        timeOffset: Double,
+        basePercent: Double,
+        maxPercent: Double,
+        update: @escaping (PipelineUpdate) -> Void
+    ) async throws -> String {
+        let progressUpdater = Task {
+            var currentPercent = basePercent
+            var elapsedSeconds = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                if Task.isCancelled { break }
+                elapsedSeconds += 2
+                currentPercent = min(currentPercent + 3.0, maxPercent)
+                update(.progress(current: currentPercent, total: 100, unit: "percent"))
+                update(
+                    .log(
+                        level: "info",
+                        message: "正在由 \(modelDisplay) 轉錄中... (已耗時 \(elapsedSeconds) 秒)"
+                    )
+                )
+            }
+        }
+
+        do {
+            let text = try await googleAIStudioBackend.transcribe(
+                audioData: audioData,
+                mimeType: "audio/mp3",
+                terms: job.snapshot.terms,
+                customPrompt: job.snapshot.prompt,
+                timeOffsetSeconds: timeOffset
+            )
+            progressUpdater.cancel()
+            return text
+        } catch {
+            progressUpdater.cancel()
+            throw error
+        }
+    }
+
+    private func runVertexAIPipeline(
+        job: TranscriptionJob,
+        startedAt: Date,
+        sourceURL: URL,
+        workingDirectory: URL,
+        outputDirectory: URL,
+        metadata: AudioMetadata,
+        currentStage: PipelineStageTracker,
+        update: @escaping (PipelineUpdate) -> Void
+    ) async throws -> PipelineResult {
+        let resolvedLocation: String
+        if job.snapshot.vertexAILocation.isEmpty || job.snapshot.vertexAILocation == "us-central1" {
+            resolvedLocation = "global"
+        } else {
+            resolvedLocation = job.snapshot.vertexAILocation
+        }
+
+        vertexAIBackend.updateConfiguration(
+            VertexAIGeminiBackend.Configuration(
+                projectID: job.snapshot.vertexAIProjectID,
+                location: resolvedLocation,
+                modelID: job.snapshot.vertexAIModelID,
+                includeSummary: job.snapshot.vertexAIIncludeSummary
+            )
+        )
+
+        let modelDisplay = (job.snapshot.vertexAIModelID.contains("pro")) ? "Gemini 3.1 Pro" : "Gemini 3.7 Flash"
+
+        // 若已有特定 Slice（如使用者手動切半），或音檔 <= 20 分鐘，直接單段執行
+        let segmentPlan = try AudioSegmentPlanner.makePlan(
+            sourceDuration: metadata.duration,
+            maximumSegmentDuration: maximumASRSegmentDuration
+        )
+
+        let finalTranscribedText: String
+
+        if !segmentPlan.requiresSplitting || job.sourceSlice != nil {
+            // 單段處理
+            let compressedAudioURL = workingDirectory.appendingPathComponent("compressed.mp3")
+
+            try Task.checkCancellation()
+            currentStage.set(.convertingAudio)
+            update(.stage(.convertingAudio))
+            update(.log(level: "info", message: "正在壓縮音訊為 16kHz 單聲道 MP3 以進行 Vertex AI 傳輸..."))
+
+            let timeOffset: Double
+            if let sourceSlice = job.sourceSlice {
+                timeOffset = sourceSlice.startSeconds
+                try await ffmpegService.extractSegmentForCloud(
+                    sourceURL: sourceURL,
+                    destinationURL: compressedAudioURL,
+                    startSeconds: sourceSlice.startSeconds,
+                    durationSeconds: sourceSlice.durationSeconds
+                )
+            } else {
+                timeOffset = 0
+                try await ffmpegService.compressForCloud(
+                    sourceURL: sourceURL,
+                    destinationURL: compressedAudioURL,
+                    duration: metadata.duration
+                ) { current, total in
+                    let fraction = total > 0 ? min(max(current / total, 0), 1) : 0
+                    update(.progress(current: fraction * 15, total: 100, unit: "percent"))
+                }
+            }
+
+            try Task.checkCancellation()
+            currentStage.set(.transcribing)
+            update(.stage(.transcribing))
+            update(.log(level: "info", message: "正在連線 Google Cloud Vertex AI (\(modelDisplay)) 進行語音轉錄..."))
+            update(.progress(current: 25, total: 100, unit: "percent"))
+
+            let audioData = try Data(contentsOf: compressedAudioURL)
+
+            finalTranscribedText = try await transcribeWithLiveProgress(
+                audioData: audioData,
+                job: job,
+                modelDisplay: modelDisplay,
+                timeOffset: timeOffset,
+                basePercent: 25.0,
+                maxPercent: 88.0,
+                update: update
+            )
+        } else {
+            // 多段自動切片處理（針對超過 20 分鐘之長錄音，避免超出 20MB 上限並維持高精度）
+            var segmentTexts: [String] = []
+            let totalSegments = segmentPlan.expectedSegmentCount
+
+            update(.log(level: "info", message: "音檔時長超過 20 分鐘，自動以 20 分鐘為單位進行 \(totalSegments) 段高精度平行切片處理..."))
+
+            for (index, segment) in segmentPlan.segments.enumerated() {
+                try Task.checkCancellation()
+                let segmentIndex = index + 1
+                let segmentAudioURL = workingDirectory.appendingPathComponent("segment_\(segmentIndex).mp3")
+
+                currentStage.set(.convertingAudio)
+                update(.stage(.convertingAudio))
+                update(.log(level: "info", message: "［第 \(segmentIndex)/\(totalSegments) 段］正在截取與壓縮音訊..."))
+
+                try await ffmpegService.extractSegmentForCloud(
+                    sourceURL: sourceURL,
+                    destinationURL: segmentAudioURL,
+                    startSeconds: segment.startSeconds,
+                    durationSeconds: segment.durationSeconds
+                )
+
+                let segAudioData = try Data(contentsOf: segmentAudioURL)
+
+                try Task.checkCancellation()
+                currentStage.set(.transcribing)
+                update(.stage(.transcribing))
+                update(.log(level: "info", message: "［第 \(segmentIndex)/\(totalSegments) 段］正在由 \(modelDisplay) 進行轉錄（時間基準：\(Int(segment.startSeconds / 60)) 分鐘起）..."))
+
+                let baseProgress = 10.0 + (Double(index) / Double(totalSegments)) * 75.0
+                let segMaxProgress = 10.0 + (Double(segmentIndex) / Double(totalSegments)) * 75.0
+
+                let segText = try await transcribeWithLiveProgress(
+                    audioData: segAudioData,
+                    job: job,
+                    modelDisplay: "\(modelDisplay) 第 \(segmentIndex)/\(totalSegments) 段",
+                    timeOffset: segment.startSeconds,
+                    basePercent: baseProgress,
+                    maxPercent: segMaxProgress,
+                    update: update
+                )
+
+                let trimmed = segText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    segmentTexts.append(trimmed)
+                } else {
+                    update(.log(level: "info", message: "［第 \(segmentIndex)/\(totalSegments) 段］此時段無可辨識語音或為靜音，已跳過。"))
+                }
+                update(.progress(current: segMaxProgress, total: 100, unit: "percent"))
+            }
+
+            finalTranscribedText = segmentTexts.isEmpty ? "（此錄音檔未辨識到清晰之語音內容）" : segmentTexts.joined(separator: "\n\n")
+        }
+
+        try Task.checkCancellation()
+        update(.progress(current: 92, total: 100, unit: "percent"))
+
+        currentStage.set(.writingOutput)
+        update(.stage(.writingOutput))
+
+        let finalOutputURL = try writeUniqueText(
+            finalTranscribedText,
+            sourceURL: sourceURL,
+            directory: outputDirectory,
+            suffix: outputSuffix(
+                job.snapshot.outputFilenameSuffix,
+                sourceSlice: job.sourceSlice
+            )
+        )
+
+        update(.progress(current: 100, total: 100, unit: "percent"))
+        update(
+            .log(
+                level: "info",
+                message: "轉錄完成！已儲存至：\(finalOutputURL.lastPathComponent)"
+            )
+        )
+        update(.stage(.completed))
+
+        return PipelineResult(
+            outputURL: finalOutputURL,
+            rawOutputURL: nil,
+            duration: Date().timeIntervalSince(startedAt),
+            containsSkippedAudio: false
+        )
+    }
+
+    private func transcribeWithLiveProgress(
+        audioData: Data,
+        job: TranscriptionJob,
+        modelDisplay: String,
+        timeOffset: Double,
+        basePercent: Double,
+        maxPercent: Double,
+        update: @escaping (PipelineUpdate) -> Void
+    ) async throws -> String {
+        let progressUpdater = Task {
+            var currentPercent = basePercent
+            var elapsedSeconds = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                if Task.isCancelled { break }
+                elapsedSeconds += 2
+                currentPercent = min(currentPercent + 3.0, maxPercent)
+                update(.progress(current: currentPercent, total: 100, unit: "percent"))
+                update(
+                    .log(
+                        level: "info",
+                        message: "正在由 \(modelDisplay) 轉錄中... (已耗時 \(elapsedSeconds) 秒)"
+                    )
+                )
+            }
+        }
+
+        do {
+            let text = try await vertexAIBackend.transcribe(
+                audioData: audioData,
+                mimeType: "audio/mp3",
+                terms: job.snapshot.terms,
+                customPrompt: job.snapshot.prompt,
+                timeOffsetSeconds: timeOffset
+            )
+            progressUpdater.cancel()
+            return text
+        } catch {
+            progressUpdater.cancel()
+            throw error
+        }
     }
 
     private func writeUniqueText(

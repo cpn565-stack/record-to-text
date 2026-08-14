@@ -82,15 +82,15 @@ struct OnboardingView: View {
 
     private var privacyStep: some View {
         VStack(spacing: 22) {
-            Image(systemName: "lock.shield.fill")
+            Image(systemName: "sparkles.rectangle.stack.fill")
                 .font(.system(size: 58, weight: .light))
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(Color.accentColor)
 
             VStack(spacing: 8) {
-                Text("錄音留在這台 Mac")
+                Text("雲端高精度 AI 轉錄")
                     .font(.system(size: 27, weight: .semibold, design: .rounded))
-                Text("record-to-text 在本機完成音訊轉換、語音辨識與台灣繁體轉換。")
+                Text("record-to-text 透過 Google AI Studio 與 Vertex AI 提供最高精度的語音轉文字。")
                     .font(.body)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -99,16 +99,16 @@ struct OnboardingView: View {
 
             VStack(alignment: .leading, spacing: 10) {
                 OnboardingFact(
-                    icon: "checkmark.circle",
-                    text: "不會上傳音訊、逐字稿、詞庫、檔名或路徑"
+                    icon: "key.fill",
+                    text: "支援 Google AI Studio API Key 與 Vertex AI 雙管道"
                 )
                 OnboardingFact(
-                    icon: "arrow.down.circle",
-                    text: "網路只用於 Runtime、模型下載與主動檢查更新"
+                    icon: "waveform.badge.magnifyingglass",
+                    text: "長音檔智慧切片無縫合併，保留連續時間標記"
                 )
                 OnboardingFact(
-                    icon: "text.badge.xmark",
-                    text: "不做摘要、改寫、潤稿或說話者辨識"
+                    icon: "character.book.closed.fill",
+                    text: "直接輸出精確台灣繁體中文與專有名詞校正"
                 )
             }
             .padding(16)
@@ -167,23 +167,11 @@ struct OnboardingView: View {
             VStack(spacing: 7) {
                 Text("確認轉錄環境")
                     .font(.system(size: 26, weight: .semibold, design: .rounded))
-                Text("Phase 0 可使用這台 Mac 既有的 Developer Runtime；正式版本將由 App 安全管理 Runtime。")
+                Text("確認本機音訊處理工具 (ffmpeg/ffprobe) 與雲端連線設定。")
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 520)
             }
-
-            Toggle(
-                "Developer Mode：使用本機既有環境",
-                isOn: Binding(
-                    get: { viewModel.settings.developerMode },
-                    set: {
-                        viewModel.setSetting(\.developerMode, to: $0)
-                        viewModel.refreshEnvironment()
-                    }
-                )
-            )
-            .frame(maxWidth: 500, alignment: .leading)
 
             if let report = viewModel.environmentReport {
                 HStack(spacing: 12) {
@@ -195,8 +183,8 @@ struct OnboardingView: View {
                             .font(.headline)
                         Text(
                             report.isReady
-                                ? "可以開始本機轉錄。"
-                                : "你仍可先進入主畫面，稍後從「環境檢查」處理。"
+                                ? "可以開始使用 Gemini 雲端轉錄。"
+                                : "你仍可先進入主畫面，稍後從「設定」或「環境檢查」處理。"
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -215,15 +203,6 @@ struct OnboardingView: View {
             } else {
                 ProgressView("正在檢查…")
                     .controlSize(.small)
-            }
-
-            if CPUArchitecture.current == .x86_64 {
-                Label(
-                    "Intel backend 尚未完成實機驗證，目前為 Experimental。",
-                    systemImage: "exclamationmark.triangle.fill"
-                )
-                .font(.caption)
-                .foregroundStyle(.orange)
             }
         }
         .onAppear {

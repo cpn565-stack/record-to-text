@@ -14,6 +14,7 @@ sys.path.insert(0, str(RESOURCE_DIRECTORY))
 
 from qwen_asr_chunking import (  # noqa: E402
     TokenLimitReached,
+    TranscriptAccumulator,
     generate_span_with_token_guard,
     remove_prompt_echo,
 )
@@ -201,6 +202,18 @@ class TokenGuardTests(unittest.TestCase):
 
 
 class PromptEchoTests(unittest.TestCase):
+    def test_prompt_echo_only_after_real_chunk_is_marked_for_fail_closed(self) -> None:
+        prompt = (
+            "這是一段中文會議錄音。請忠實轉錄音訊內容，不要摘要、改寫、刪除或補充。"
+        )
+        accumulator = TranscriptAccumulator(prompt=prompt)
+
+        accumulator.record_completed_text("前一個 chunk 的正常內容。")
+        accumulator.record_completed_text(prompt)
+
+        self.assertTrue(accumulator.has_prompt_echo_only_chunk)
+        self.assertEqual(accumulator.text, "前一個 chunk 的正常內容。")
+
     def test_removes_complete_glossary_list_echoed_at_the_beginning(self) -> None:
         prompt = (
             "這是一段中文會議錄音。請忠實轉錄音訊內容，不要摘要、改寫、刪除或補充。\n"

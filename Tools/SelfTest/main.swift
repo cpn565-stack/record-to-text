@@ -771,4 +771,87 @@ tests.check(
     "TranscriptionSourceSlice persists through JSON and keeps its label"
 )
 
+tests.check(
+    {
+        let auth = GCloudAuthService(customGCloudPath: "/nonexistent/path/gcloud")
+        return auth.resolveGCloudURL() == nil
+    }(),
+    "GCloudAuthService returns nil for nonexistent custom path"
+)
+
+tests.check(
+    {
+        let settings = AppSettings(
+            defaultOutputDirectory: "/tmp/output",
+            backendType: .vertexAI,
+            vertexAIProjectID: "test-proj",
+            vertexAILocation: "asia-east1",
+            vertexAIModelID: "gemini-2.0-flash-001"
+        )
+        guard let data = try? JSONEncoder().encode(settings),
+              let decoded = try? JSONDecoder().decode(AppSettings.self, from: data) else {
+            return false
+        }
+        return decoded.backendType == .vertexAI
+            && decoded.vertexAIProjectID == "test-proj"
+            && decoded.vertexAILocation == "asia-east1"
+            && decoded.vertexAIModelID == "gemini-2.0-flash-001"
+            && decoded.vertexAIIncludeSummary == false
+    }(),
+    "AppSettings persists Vertex AI configuration"
+)
+
+tests.check(
+    {
+        let settings = AppSettings(
+            defaultOutputDirectory: "/tmp/output",
+            backendType: .googleAIStudio,
+            googleAIStudioAPIKey: "AIzaSyTestKey123",
+            googleAIStudioModelID: "gemini-3.7-flash"
+        )
+        guard let data = try? JSONEncoder().encode(settings),
+              let decoded = try? JSONDecoder().decode(AppSettings.self, from: data) else {
+            return false
+        }
+        return decoded.backendType == .googleAIStudio
+            && decoded.googleAIStudioAPIKey == "AIzaSyTestKey123"
+            && decoded.googleAIStudioModelID == "gemini-3.7-flash"
+    }(),
+    "AppSettings persists Google AI Studio configuration"
+)
+
+tests.check(
+    {
+        let config = GoogleAIStudioBackend.Configuration(
+            apiKey: "AIzaTestKey",
+            modelID: "gemini-3.7-flash"
+        )
+        let backend = GoogleAIStudioBackend(configuration: config)
+        let largeData = Data(count: 25 * 1024 * 1024)
+        do {
+            _ = try blockingAwait {
+                try await backend.transcribe(audioData: largeData)
+            }
+            return false
+        } catch let error as GoogleAIStudioError {
+            if case .audioPayloadTooLarge = error {
+                return true
+            }
+            return false
+        } catch {
+            return false
+        }
+    }(),
+    "GoogleAIStudioBackend rejects audio payload exceeding maximum inline size"
+)
+
+tests.check(
+    {
+        let presets = GeminiModelDescriptor.presetModels
+        return presets.contains(where: { $0.id == "gemini-3.7-flash" })
+            && presets.contains(where: { $0.id == "gemini-3.1-pro-preview" })
+    }(),
+    "GeminiModelDescriptor contains 3.7 Flash and 3.1 Pro presets"
+)
+
 tests.finish()

@@ -288,6 +288,107 @@ public final class FFmpegService {
         }
     }
 
+    /// 將音訊轉為輕量 16kHz 單聲道 MP3 格式（約 24kbps），以供雲端 API 快速上傳
+    public func compressForCloud(
+        sourceURL: URL,
+        destinationURL: URL,
+        duration: Double,
+        progress: @escaping (Double, Double) -> Void
+    ) async throws {
+        try FileManager.default.createDirectory(
+            at: destinationURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+
+        _ = try await runner.run(
+            executableURL: executableURL,
+            arguments: [
+                "-hide_banner",
+                "-loglevel", "error",
+                "-y",
+                "-i", sourceURL.path,
+                "-vn",
+                "-ar", "16000",
+                "-ac", "1",
+                "-b:a", "24k",
+                "-c:a", "libmp3lame",
+                "-progress", "pipe:1",
+                "-nostats",
+                destinationURL.path
+            ],
+            timeout: AudioProcessTimeouts.ffmpeg(for: duration),
+            inactivityTimeout: AudioProcessTimeouts.ffmpegInactivity,
+            stdoutLineHandler: { line in
+                let parts = line.split(separator: "=", maxSplits: 1).map(String.init)
+                guard parts.count == 2 else {
+                    return
+                }
+
+                if parts[0] == "out_time_us", let microseconds = Double(parts[1]) {
+                    progress(min(microseconds / 1_000_000, duration), duration)
+                } else if parts[0] == "out_time_ms", let microseconds = Double(parts[1]) {
+                    progress(min(microseconds / 1_000_000, duration), duration)
+                }
+            }
+        )
+
+        guard FileManager.default.fileExists(atPath: destinationURL.path) else {
+            throw AudioServiceError.outputMissing(destinationURL.path)
+        }
+        let attributes = try FileManager.default.attributesOfItem(
+            atPath: destinationURL.path
+        )
+        let byteCount = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+        guard byteCount > 100 else {
+            throw AudioServiceError.outputEmpty(destinationURL.path)
+        }
+    }
+
+    /// 截取特定時間區段並壓縮為輕量 16kHz 單聲道 MP3 格式（約 24kbps）以供雲端傳輸
+    public func extractSegmentForCloud(
+        sourceURL: URL,
+        destinationURL: URL,
+        startSeconds: Double,
+        durationSeconds: Double
+    ) async throws {
+        try FileManager.default.createDirectory(
+            at: destinationURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+
+        _ = try await runner.run(
+            executableURL: executableURL,
+            arguments: [
+                "-hide_banner",
+                "-loglevel", "error",
+                "-y",
+                "-ss", Self.ffmpegTime(startSeconds),
+                "-i", sourceURL.path,
+                "-t", Self.ffmpegTime(durationSeconds),
+                "-vn",
+                "-ar", "16000",
+                "-ac", "1",
+                "-b:a", "24k",
+                "-c:a", "libmp3lame",
+                destinationURL.path
+            ],
+            timeout: AudioProcessTimeouts.ffmpeg(for: durationSeconds),
+            inactivityTimeout: AudioProcessTimeouts.ffmpegInactivity
+        )
+
+        guard FileManager.default.fileExists(atPath: destinationURL.path) else {
+            throw AudioServiceError.outputMissing(destinationURL.path)
+        }
+        let attributes = try FileManager.default.attributesOfItem(
+            atPath: destinationURL.path
+        )
+        let byteCount = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+        guard byteCount > 100 else {
+            throw AudioServiceError.outputEmpty(destinationURL.path)
+        }
+    }
+
     private static func ffmpegTime(_ seconds: Double) -> String {
         String(format: "%.6f", locale: Locale(identifier: "en_US_POSIX"), seconds)
     }

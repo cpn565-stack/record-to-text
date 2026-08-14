@@ -6,6 +6,7 @@ public enum RuntimeComponent: String, CaseIterable, Codable, Sendable {
     case ffprobe
     case opencc
     case helper
+    case gcloud
 
     public var displayName: String {
         switch self {
@@ -19,6 +20,8 @@ public enum RuntimeComponent: String, CaseIterable, Codable, Sendable {
             return "OpenCC"
         case .helper:
             return "Qwen ASR Helper"
+        case .gcloud:
+            return "Google Cloud CLI (gcloud)"
         }
     }
 }
@@ -72,15 +75,18 @@ public struct EnvironmentReport: Equatable, Sendable {
     public let architecture: CPUArchitecture
     public let components: [EnvironmentComponentReport]
     public let isDeveloperRuntime: Bool
+    public let backendType: ASRBackendType
 
     public init(
         architecture: CPUArchitecture,
         components: [EnvironmentComponentReport],
-        isDeveloperRuntime: Bool
+        isDeveloperRuntime: Bool,
+        backendType: ASRBackendType = .googleAIStudio
     ) {
         self.architecture = architecture
         self.components = components
         self.isDeveloperRuntime = isDeveloperRuntime
+        self.backendType = backendType
     }
 
     public var isReady: Bool {
@@ -168,6 +174,8 @@ public enum RuntimeEnvironment {
         // immediately below by the injected verifier for release runtimes.
         let report = inspect(
             runtime,
+            backendType: settings.backendType,
+            customGCloudPath: settings.customGCloudPath,
             releaseRuntimeVerified: true,
             fileManager: fileManager
         )
@@ -186,23 +194,37 @@ public enum RuntimeEnvironment {
 
     public static func inspect(
         _ runtime: ResolvedRuntime,
+        backendType: ASRBackendType = .googleAIStudio,
+        customGCloudPath: String? = nil,
         releaseRuntimeVerified: Bool = false,
         fileManager: FileManager = .default
     ) -> EnvironmentReport {
-        let pairs: [(RuntimeComponent, URL)] = [
-            (.python, runtime.python),
+        var pairs: [(RuntimeComponent, URL?)] = [
             (.ffmpeg, runtime.ffmpeg),
-            (.ffprobe, runtime.ffprobe),
-            (.opencc, runtime.opencc),
-            (.helper, runtime.helper)
+            (.ffprobe, runtime.ffprobe)
         ]
 
+        if backendType == .vertexAI {
+            let gcloudURL = GCloudAuthService(customGCloudPath: customGCloudPath).resolveGCloudURL(fileManager: fileManager)
+            pairs.append((.gcloud, gcloudURL))
+        } else if backendType == .googleAIStudio {
+            // Google AI Studio API 僅需 ffmpeg/ffprobe 進行音訊壓縮與切片
+        }
+
         let components = pairs.map { component, url in
+            guard let url else {
+                return EnvironmentComponentReport(
+                    component: component,
+                    path: "",
+                    isAvailable: false,
+                    detail: "找不到或無法執行"
+                )
+            }
             let exists = fileManager.fileExists(atPath: url.path)
             let executable = component == .helper
                 ? exists
                 : fileManager.isExecutableFile(atPath: url.path)
-            let trusted = runtime.isDeveloperRuntime || releaseRuntimeVerified
+            let trusted = runtime.isDeveloperRuntime || releaseRuntimeVerified || component == .gcloud
             let available = executable && trusted
             let detail: String
             if !executable {
@@ -223,7 +245,8 @@ public enum RuntimeEnvironment {
         return EnvironmentReport(
             architecture: .current,
             components: components,
-            isDeveloperRuntime: runtime.isDeveloperRuntime
+            isDeveloperRuntime: runtime.isDeveloperRuntime,
+            backendType: backendType
         )
     }
 }

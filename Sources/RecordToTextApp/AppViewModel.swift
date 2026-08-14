@@ -182,12 +182,40 @@ final class AppViewModel: ObservableObject {
     }
 
     var selectedModelName: String {
-        ASRModelDescriptor.descriptor(id: settings.selectedModelID)?.displayName
-            ?? settings.selectedModelID
+        switch settings.backendType {
+        case .googleAIStudio:
+            if let preset = GeminiModelDescriptor.presetModels.first(where: { $0.id == settings.googleAIStudioModelID }) {
+                return "Google AI Studio (\(preset.displayName))"
+            }
+            return "Google AI Studio (\(settings.googleAIStudioModelID))"
+        case .vertexAI:
+            if let preset = GeminiModelDescriptor.presetModels.first(where: { $0.id == settings.vertexAIModelID }) {
+                return "Vertex AI (\(preset.displayName))"
+            }
+            return "Vertex AI (\(settings.vertexAIModelID))"
+        }
+    }
+
+    var selectedModelIcon: String {
+        "cloud.fill"
+    }
+
+    var appSubtitle: String {
+        switch settings.backendType {
+        case .googleAIStudio:
+            return "透過 Google AI Studio (Gemini)，極速產出台灣繁體逐字稿。"
+        case .vertexAI:
+            return "透過 Google Cloud Vertex AI (Gemini)，直接產出台灣繁體逐字稿。"
+        }
     }
 
     var selectedModelDetail: String? {
-        ASRModelDescriptor.descriptor(id: settings.selectedModelID)?.detail
+        switch settings.backendType {
+        case .googleAIStudio:
+            return GeminiModelDescriptor.presetModels.first(where: { $0.id == settings.googleAIStudioModelID })?.note
+        case .vertexAI:
+            return GeminiModelDescriptor.presetModels.first(where: { $0.id == settings.vertexAIModelID })?.note
+        }
     }
 
     var availableModels: [ASRModelDescriptor] {
@@ -707,12 +735,33 @@ final class AppViewModel: ObservableObject {
             return
         }
 
+        let snapshot = JobSnapshot(
+            modelID: oldJob.snapshot.modelID,
+            modelRevision: oldJob.snapshot.modelRevision,
+            glossaryID: oldJob.snapshot.glossaryID,
+            glossaryName: oldJob.snapshot.glossaryName,
+            terms: oldJob.snapshot.terms,
+            prompt: oldJob.snapshot.prompt,
+            outputLocationMode: oldJob.snapshot.outputLocationMode,
+            outputDirectory: oldJob.snapshot.outputDirectory,
+            keepRawTranscript: oldJob.snapshot.keepRawTranscript,
+            outputFilenameSuffix: oldJob.snapshot.outputFilenameSuffix,
+            rawFilenameSuffix: oldJob.snapshot.rawFilenameSuffix,
+            backendType: settings.backendType,
+            googleAIStudioAPIKey: settings.googleAIStudioAPIKey,
+            googleAIStudioModelID: settings.googleAIStudioModelID,
+            vertexAIProjectID: settings.vertexAIProjectID,
+            vertexAILocation: settings.vertexAILocation,
+            vertexAIModelID: settings.vertexAIModelID,
+            vertexAIIncludeSummary: settings.vertexAIIncludeSummary
+        )
+
         var retry = TranscriptionJob(
             sourcePath: oldJob.sourcePath,
-            snapshot: oldJob.snapshot,
+            snapshot: snapshot,
             sourceSlice: oldJob.sourceSlice
         )
-        retry.logLines.append("沿用工作 \(oldJob.id.uuidString) 的 Snapshot 重試。")
+        retry.logLines.append("工作重試。")
         jobs.insert(retry, at: min(index + 1, jobs.count))
         if permittingMissingPrompt {
             allowMissingPrompt.insert(retry.id)
@@ -864,7 +913,11 @@ final class AppViewModel: ObservableObject {
     // MARK: - Environment and onboarding
 
     func refreshEnvironment() {
-        environmentReport = RuntimeEnvironment.inspect(runtimeCandidate())
+        environmentReport = RuntimeEnvironment.inspect(
+            runtimeCandidate(),
+            backendType: settings.backendType,
+            customGCloudPath: settings.customGCloudPath
+        )
         if environmentReport?.isReady == true {
             queuePausedForEnvironment = false
             scheduleQueueIfNeeded()
@@ -1082,7 +1135,14 @@ final class AppViewModel: ObservableObject {
                 outputDirectory: outputDirectory,
                 keepRawTranscript: settings.keepRawTranscript,
                 outputFilenameSuffix: settings.resolvedOutputFilenameSuffix,
-                rawFilenameSuffix: settings.resolvedRawFilenameSuffix
+                rawFilenameSuffix: settings.resolvedRawFilenameSuffix,
+                backendType: settings.backendType,
+                googleAIStudioAPIKey: settings.googleAIStudioAPIKey,
+                googleAIStudioModelID: settings.googleAIStudioModelID,
+                vertexAIProjectID: settings.vertexAIProjectID,
+                vertexAILocation: settings.vertexAILocation,
+                vertexAIModelID: settings.vertexAIModelID,
+                vertexAIIncludeSummary: settings.vertexAIIncludeSummary
             )
             var job = TranscriptionJob(
                 sourcePath: url.standardizedFileURL.path,

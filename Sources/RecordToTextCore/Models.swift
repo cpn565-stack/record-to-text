@@ -128,6 +128,47 @@ public enum OutputLocationMode: String, Codable, CaseIterable, Sendable {
     }
 }
 
+public enum ASRBackendType: String, Codable, CaseIterable, Sendable {
+    case googleAIStudio = "googleAIStudio"
+    case vertexAI = "vertexAI"
+
+    public var displayName: String {
+        switch self {
+        case .googleAIStudio:
+            return "Google AI Studio (Gemini API Key)"
+        case .vertexAI:
+            return "Google Cloud Vertex AI (GCP / ADC)"
+        }
+    }
+}
+
+public struct GeminiModelDescriptor: Identifiable, Hashable, Sendable {
+    public let id: String
+    public let displayName: String
+    public let note: String
+
+    public init(id: String, displayName: String, note: String) {
+        self.id = id
+        self.displayName = displayName
+        self.note = note
+    }
+
+    public static let presetModels: [GeminiModelDescriptor] = [
+        GeminiModelDescriptor(
+            id: "gemini-3.7-flash",
+            displayName: "Gemini 3.7 Flash",
+            note: "極速轉錄、中文語音理解力頂級，適合日常會議與課程（推薦）"
+        ),
+        GeminiModelDescriptor(
+            id: "gemini-3.1-pro-preview",
+            displayName: "Gemini 3.1 Pro",
+            note: "高智能推論能力，適合深度專業術語與複雜中英文混講"
+        )
+    ]
+}
+
+public typealias VertexAIModelDescriptor = GeminiModelDescriptor
+
 public struct AppSettings: Codable, Equatable, Sendable {
     public var schemaVersion: Int
     public var defaultOutputDirectory: String
@@ -152,6 +193,17 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var customHelperPath: String?
     public var hasCompletedOnboarding: Bool
 
+    // MARK: - Cloud Gemini Settings (Google AI Studio & Vertex AI)
+    public var backendType: ASRBackendType
+    public var googleAIStudioAPIKey: String?
+    public var googleAIStudioModelID: String
+    public var vertexAIProjectID: String?
+    public var vertexAILocation: String
+    public var vertexAIModelID: String
+    public var vertexAIGCSBucket: String?
+    public var vertexAIIncludeSummary: Bool
+    public var customGCloudPath: String?
+
     public init(
         schemaVersion: Int = 1,
         defaultOutputDirectory: String,
@@ -175,7 +227,16 @@ public struct AppSettings: Codable, Equatable, Sendable {
         developerMode: Bool = false,
         customPythonPath: String? = nil,
         customHelperPath: String? = nil,
-        hasCompletedOnboarding: Bool = false
+        hasCompletedOnboarding: Bool = false,
+        backendType: ASRBackendType = .googleAIStudio,
+        googleAIStudioAPIKey: String? = nil,
+        googleAIStudioModelID: String = "gemini-3.7-flash",
+        vertexAIProjectID: String? = nil,
+        vertexAILocation: String = "global",
+        vertexAIModelID: String = "gemini-3.7-flash",
+        vertexAIGCSBucket: String? = nil,
+        vertexAIIncludeSummary: Bool = false,
+        customGCloudPath: String? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.defaultOutputDirectory = defaultOutputDirectory
@@ -197,6 +258,52 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.customPythonPath = customPythonPath
         self.customHelperPath = customHelperPath
         self.hasCompletedOnboarding = hasCompletedOnboarding
+        self.backendType = backendType
+        self.googleAIStudioAPIKey = googleAIStudioAPIKey
+        self.googleAIStudioModelID = googleAIStudioModelID
+        self.vertexAIProjectID = vertexAIProjectID
+        self.vertexAILocation = vertexAILocation
+        self.vertexAIModelID = vertexAIModelID
+        self.vertexAIGCSBucket = vertexAIGCSBucket
+        self.vertexAIIncludeSummary = vertexAIIncludeSummary
+        self.customGCloudPath = customGCloudPath
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        defaultOutputDirectory = try container.decode(String.self, forKey: .defaultOutputDirectory)
+        outputLocationMode = try container.decodeIfPresent(OutputLocationMode.self, forKey: .outputLocationMode) ?? .fixedDirectory
+        lastInputDirectory = try container.decodeIfPresent(String.self, forKey: .lastInputDirectory)
+        lastOutputDirectory = try container.decodeIfPresent(String.self, forKey: .lastOutputDirectory)
+        lastSelectedGlossaryID = try container.decodeIfPresent(String.self, forKey: .lastSelectedGlossaryID)
+        lastTemporaryTerms = try container.decodeIfPresent(String.self, forKey: .lastTemporaryTerms) ?? ""
+        selectedModels = try container.decodeIfPresent([String: String].self, forKey: .selectedModels) ?? [
+            CPUArchitecture.arm64.rawValue: ASRModelDescriptor.appleSiliconDefault.id,
+            CPUArchitecture.x86_64.rawValue: ASRModelDescriptor.intelDefault.id
+        ]
+        autoStartAfterSelection = try container.decodeIfPresent(Bool.self, forKey: .autoStartAfterSelection) ?? false
+        revealInFinderWhenCompleted = try container.decodeIfPresent(Bool.self, forKey: .revealInFinderWhenCompleted) ?? true
+        openTextWhenCompleted = try container.decodeIfPresent(Bool.self, forKey: .openTextWhenCompleted) ?? false
+        showNotificationWhenCompleted = try container.decodeIfPresent(Bool.self, forKey: .showNotificationWhenCompleted) ?? true
+        keepRawTranscript = try container.decodeIfPresent(Bool.self, forKey: .keepRawTranscript) ?? false
+        outputFilenameSuffix = try container.decodeIfPresent(String.self, forKey: .outputFilenameSuffix)
+        rawFilenameSuffix = try container.decodeIfPresent(String.self, forKey: .rawFilenameSuffix)
+        recentJobLimit = try container.decodeIfPresent(Int.self, forKey: .recentJobLimit) ?? 10
+        developerMode = try container.decodeIfPresent(Bool.self, forKey: .developerMode) ?? false
+        customPythonPath = try container.decodeIfPresent(String.self, forKey: .customPythonPath)
+        customHelperPath = try container.decodeIfPresent(String.self, forKey: .customHelperPath)
+        hasCompletedOnboarding = try container.decodeIfPresent(Bool.self, forKey: .hasCompletedOnboarding) ?? false
+
+        backendType = try container.decodeIfPresent(ASRBackendType.self, forKey: .backendType) ?? .googleAIStudio
+        googleAIStudioAPIKey = try container.decodeIfPresent(String.self, forKey: .googleAIStudioAPIKey)
+        googleAIStudioModelID = try container.decodeIfPresent(String.self, forKey: .googleAIStudioModelID) ?? "gemini-3.7-flash"
+        vertexAIProjectID = try container.decodeIfPresent(String.self, forKey: .vertexAIProjectID)
+        vertexAILocation = try container.decodeIfPresent(String.self, forKey: .vertexAILocation) ?? "global"
+        vertexAIModelID = try container.decodeIfPresent(String.self, forKey: .vertexAIModelID) ?? "gemini-3.7-flash"
+        vertexAIGCSBucket = try container.decodeIfPresent(String.self, forKey: .vertexAIGCSBucket)
+        vertexAIIncludeSummary = try container.decodeIfPresent(Bool.self, forKey: .vertexAIIncludeSummary) ?? false
+        customGCloudPath = try container.decodeIfPresent(String.self, forKey: .customGCloudPath)
     }
 
     public var resolvedOutputFilenameSuffix: String {
@@ -342,6 +449,13 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
     public let keepRawTranscript: Bool
     public let outputFilenameSuffix: String
     public let rawFilenameSuffix: String
+    public let backendType: ASRBackendType
+    public let googleAIStudioAPIKey: String?
+    public let googleAIStudioModelID: String
+    public let vertexAIProjectID: String?
+    public let vertexAILocation: String
+    public let vertexAIModelID: String
+    public let vertexAIIncludeSummary: Bool
 
     public init(
         modelID: String,
@@ -355,7 +469,14 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
         outputDirectory: String,
         keepRawTranscript: Bool,
         outputFilenameSuffix: String = OutputNameBuilder.defaultFinalSuffix,
-        rawFilenameSuffix: String = OutputNameBuilder.defaultRawSuffix
+        rawFilenameSuffix: String = OutputNameBuilder.defaultRawSuffix,
+        backendType: ASRBackendType = .googleAIStudio,
+        googleAIStudioAPIKey: String? = nil,
+        googleAIStudioModelID: String = "gemini-3.7-flash",
+        vertexAIProjectID: String? = nil,
+        vertexAILocation: String = "global",
+        vertexAIModelID: String = "gemini-3.7-flash",
+        vertexAIIncludeSummary: Bool = false
     ) {
         self.modelID = modelID
         self.modelRevision = modelRevision
@@ -375,6 +496,13 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
             rawFilenameSuffix,
             fallback: OutputNameBuilder.defaultRawSuffix
         )
+        self.backendType = backendType
+        self.googleAIStudioAPIKey = googleAIStudioAPIKey
+        self.googleAIStudioModelID = googleAIStudioModelID
+        self.vertexAIProjectID = vertexAIProjectID
+        self.vertexAILocation = vertexAILocation
+        self.vertexAIModelID = vertexAIModelID
+        self.vertexAIIncludeSummary = vertexAIIncludeSummary
     }
 
     public init(from decoder: Decoder) throws {
@@ -400,6 +528,13 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
             try container.decodeIfPresent(String.self, forKey: .rawFilenameSuffix),
             fallback: OutputNameBuilder.defaultRawSuffix
         )
+        backendType = try container.decodeIfPresent(ASRBackendType.self, forKey: .backendType) ?? .googleAIStudio
+        googleAIStudioAPIKey = try container.decodeIfPresent(String.self, forKey: .googleAIStudioAPIKey)
+        googleAIStudioModelID = try container.decodeIfPresent(String.self, forKey: .googleAIStudioModelID) ?? "gemini-3.7-flash"
+        vertexAIProjectID = try container.decodeIfPresent(String.self, forKey: .vertexAIProjectID)
+        vertexAILocation = try container.decodeIfPresent(String.self, forKey: .vertexAILocation) ?? "global"
+        vertexAIModelID = try container.decodeIfPresent(String.self, forKey: .vertexAIModelID) ?? "gemini-3.7-flash"
+        vertexAIIncludeSummary = try container.decodeIfPresent(Bool.self, forKey: .vertexAIIncludeSummary) ?? false
     }
 }
 

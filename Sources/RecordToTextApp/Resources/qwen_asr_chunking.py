@@ -161,6 +161,66 @@ def _default_emit(_event_type: str, **_payload: Any) -> None:
     return None
 
 
+class TranscriptAccumulator:
+    """Collect cleaned leaf output while retaining failure-quality signals."""
+
+    def __init__(
+        self,
+        *,
+        prompt: str,
+        terms: Sequence[str] | None = None,
+        emit: Emit = _default_emit,
+    ) -> None:
+        self._prompt = prompt
+        self._terms = terms or []
+        self._emit = emit
+        self._parts: list[str] = []
+        self._has_prompt_echo_only_chunk = False
+        self._contains_skipped_audio = False
+
+    def record_completed_text(self, text: str) -> None:
+        original = text.strip()
+        cleaned = remove_prompt_echo(
+            text,
+            self._prompt,
+            self._terms,
+            emit=self._emit,
+        )
+        if original and not cleaned:
+            self._has_prompt_echo_only_chunk = True
+        if cleaned:
+            self._parts.append(cleaned)
+
+    def record_skipped_span(self, error: TokenLimitReached) -> str:
+        self._contains_skipped_audio = True
+        self._emit(
+            "warning",
+            code="chunk_skipped_token_limit",
+            message=(
+                f"{error.label} 約 {error.span_seconds:.0f} 秒仍達到 token 上限，"
+                "已跳過此片段並繼續後續轉錄。"
+            ),
+        )
+        marker = (
+            f"【此處約缺少 {error.span_seconds:.0f} 秒：模型達到 token 上限，"
+            "已跳過此片段】"
+        )
+        self._parts.append(marker)
+        return marker
+
+    @property
+    def text(self) -> str:
+        return " ".join(part for part in self._parts if part).strip()
+
+    @property
+    def has_prompt_echo_only_chunk(self) -> bool:
+        return self._has_prompt_echo_only_chunk
+
+    @property
+    def contains_skipped_audio(self) -> bool:
+        return self._contains_skipped_audio
+
+
 def _default_heartbeat(_message: str) -> AbstractContextManager[Any]:
     return nullcontext()
 

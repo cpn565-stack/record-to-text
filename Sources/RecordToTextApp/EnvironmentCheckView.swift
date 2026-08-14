@@ -24,29 +24,6 @@ struct EnvironmentCheckView: View {
 
             statusSummary
 
-            if CPUArchitecture.current == .x86_64 {
-                Label(
-                    "Intel backend 尚未通過實機驗證，只能視為 Experimental。",
-                    systemImage: "exclamationmark.triangle.fill"
-                )
-                .font(.callout)
-                .foregroundStyle(.orange)
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-            }
-
-            Toggle(
-                "Developer Mode：使用這台 Mac 既有的開發環境",
-                isOn: Binding(
-                    get: { viewModel.settings.developerMode },
-                    set: {
-                        viewModel.setSetting(\.developerMode, to: $0)
-                        viewModel.refreshEnvironment()
-                    }
-                )
-            )
-
             GroupBox {
                 if let report = viewModel.environmentReport {
                     VStack(spacing: 0) {
@@ -71,7 +48,7 @@ struct EnvironmentCheckView: View {
             }
 
             HStack {
-                Text("模式：\(viewModel.runtimeModeDescription)")
+                Text("後端：\(viewModel.settings.backendType.displayName)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -83,7 +60,7 @@ struct EnvironmentCheckView: View {
             }
         }
         .padding(22)
-        .frame(width: 690, height: 520)
+        .frame(width: 690, height: 440)
         .onAppear {
             viewModel.refreshEnvironment()
         }
@@ -102,8 +79,8 @@ struct EnvironmentCheckView: View {
                         .font(.headline)
                     Text(
                         report.isReady
-                            ? "可以開始本機轉錄。"
-                            : "缺少的元件會在下方標示；正式 Runtime 管理仍在 Phase 0。"
+                            ? (report.backendType == .googleAIStudio ? "可以開始使用 Google AI Studio (Gemini) 轉錄。" : "可以開始使用 Google Cloud Vertex AI (Gemini) 轉錄。")
+                            : "缺少的元件會在下方標示。"
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)

@@ -24,8 +24,8 @@ from typing import Any
 
 from qwen_asr_chunking import (
     TokenLimitReached,
+    TranscriptAccumulator,
     generate_span_with_token_guard,
-    remove_prompt_echo,
 )
 
 
@@ -331,38 +331,31 @@ def transcribe(request: dict[str, Any]) -> None:
     audio_length = len(audio)
     total_chunks = max(1, (audio_length + samples_per_chunk - 1) // samples_per_chunk)
     output = Path(request["outputPath"])
-    output_parts: list[str] = []
-    prompt_echo_only = False
+    transcript = TranscriptAccumulator(
+        prompt=prompt,
+        terms=terms,
+        emit=emit,
+    )
 
-    def record_completed_text(text: str) -> None:
-        nonlocal prompt_echo_only
-        original = text.strip()
-        cleaned = remove_prompt_echo(
-            text,
-            prompt,
-            terms,
-            emit=emit,
-        )
-        if original and not cleaned:
-            prompt_echo_only = True
-        if cleaned:
-            output_parts.append(cleaned)
-
-    def record_skipped_span(error: TokenLimitReached) -> str:
+    def preserve_partial_output() -> None:
+        partial_text = transcript.text
+        if not partial_text:
+            return
+        partial_output = output.with_name(f"{output.name}.partial.txt")
+        try:
+            atomic_write_text(partial_text, partial_output)
+        except Exception as error:
+            emit(
+                "warning",
+                code="partial_output_write_failed",
+                message=f"無法保存未完成草稿：{exception_details(error)}",
+            )
+            return
         emit(
-            "warning",
-            code="chunk_skipped_token_limit",
-            message=(
-                f"{error.label} 約 {error.span_seconds:.0f} 秒仍達到 token 上限，"
-                "已跳過此片段並繼續後續轉錄。"
-            ),
+            "log",
+            level="warning",
+            message=f"已保留本段未完成草稿：{partial_output}",
         )
-        marker = (
-            f"【此處約缺少 {error.span_seconds:.0f} 秒：模型達到 token 上限，"
-            "已跳過此片段】"
-        )
-        output_parts.append(marker)
-        return marker
 
     emit(
         "log",
@@ -402,8 +395,8 @@ def transcribe(request: dict[str, Any]) -> None:
                 emit=emit,
                 heartbeat_factory=heartbeat,
                 generate=generate_with_redirect,
-                on_leaf_complete=record_completed_text,
-                on_leaf_skipped=record_skipped_span,
+                on_leaf_complete=transcript.record_completed_text,
+                on_leaf_skipped=transcript.record_skipped_span,
                 min_split_seconds=min_split_seconds,
                 max_depth=6,
             )
@@ -413,19 +406,12 @@ def transcribe(request: dict[str, Any]) -> None:
                 total=total_chunks,
                 unit="chunks",
             )
-    except TokenLimitReached:
-        partial_text = " ".join(output_parts).strip()
-        if partial_text:
-            partial_output = output.with_name(f"{output.name}.partial.txt")
-            atomic_write_text(partial_text, partial_output)
-            emit(
-                "log",
-                level="warning",
-                message=f"已保留本段未完成草稿：{partial_output}",
-            )
+    except Exception:
+        preserve_partial_output()
         raise
 
-    if prompt_echo_only and not output_parts:
+    if transcript.has_prompt_echo_only_chunk:
+        preserve_partial_output()
         emit(
             "error",
             code="prompt_echo_only",
@@ -434,16 +420,14 @@ def transcribe(request: dict[str, Any]) -> None:
         )
         raise SystemExit(2)
 
-    text = " ".join(part for part in output_parts if part)
+    text = transcript.text
 
     atomic_write_text(text, output)
     emit(
         "completed",
         outputPath=str(output),
         durationSeconds=time.monotonic() - started,
-        containsSkippedAudio=any(
-            part.startswith("【此處約缺少 ") for part in output_parts
-        ),
+        containsSkippedAudio=transcript.contains_skipped_audio,
     )
 
 
