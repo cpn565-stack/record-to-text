@@ -160,6 +160,11 @@ public struct GeminiModelDescriptor: Identifiable, Hashable, Sendable {
             note: "極速轉錄、中文語音理解力頂級，適合日常會議與課程（推薦）"
         ),
         GeminiModelDescriptor(
+            id: "gemini-3.6-flash",
+            displayName: "Gemini 3.6 Flash",
+            note: "速度極快且高可用，當 3.7 遇到尖峰負載 (503) 時的絕佳替代選擇"
+        ),
+        GeminiModelDescriptor(
             id: "gemini-3.1-pro-preview",
             displayName: "Gemini 3.1 Pro",
             note: "高智能推論能力，適合深度專業術語與複雜中英文混講"

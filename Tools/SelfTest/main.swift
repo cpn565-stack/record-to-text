@@ -849,9 +849,10 @@ tests.check(
     {
         let presets = GeminiModelDescriptor.presetModels
         return presets.contains(where: { $0.id == "gemini-3.7-flash" })
+            && presets.contains(where: { $0.id == "gemini-3.6-flash" })
             && presets.contains(where: { $0.id == "gemini-3.1-pro-preview" })
     }(),
-    "GeminiModelDescriptor contains 3.7 Flash and 3.1 Pro presets"
+    "GeminiModelDescriptor contains 3.7 Flash, 3.6 Flash and 3.1 Pro presets"
 )
 
 tests.finish()

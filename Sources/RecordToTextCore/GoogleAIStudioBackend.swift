@@ -130,7 +130,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         let currentConfig = getConfiguration()
 
         do {
-            return try await executeGenerateContent(
+            return try await executeWithRetries(
                 modelID: currentConfig.modelID,
                 audioData: audioData,
                 mimeType: mimeType,
@@ -139,9 +139,9 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                 timeOffsetSeconds: timeOffsetSeconds
             )
         } catch GoogleAIStudioError.prohibitedContent {
-            // 若 3.7 Flash 遇到音訊假陽性安全阻擋，自動 Fallback 至 3.1 Pro 重試
-            if currentConfig.modelID.contains("3.7") {
-                return try await executeGenerateContent(
+            // 若遇到音訊假陽性安全阻擋，自動 Fallback 至 3.1 Pro 重試
+            if !currentConfig.modelID.contains("pro") {
+                return try await executeWithRetries(
                     modelID: "gemini-3.1-pro-preview",
                     audioData: audioData,
                     mimeType: mimeType,
@@ -151,7 +151,77 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                 )
             }
             throw GoogleAIStudioError.prohibitedContent("Google 內容安全誤判，建議切換至 Gemini 3.1 Pro。")
+        } catch let error as GoogleAIStudioError {
+            // 若 3.7 Flash 在多次重試後依然遇到 503 High Demand，自動 Fallback 至 3.6 Flash 或 3.1 Pro
+            if case let .requestFailed(statusCode, _) = error, (statusCode == 503 || statusCode == 429) {
+                if currentConfig.modelID.contains("3.7") {
+                    let fallbackModel = "gemini-3.6-flash"
+                    do {
+                        return try await executeWithRetries(
+                            modelID: fallbackModel,
+                            audioData: audioData,
+                            mimeType: mimeType,
+                            terms: terms,
+                            customPrompt: customPrompt,
+                            timeOffsetSeconds: timeOffsetSeconds
+                        )
+                    } catch {
+                        // 若 3.6 也尖峰，再嘗試 3.1 Pro
+                        return try await executeWithRetries(
+                            modelID: "gemini-3.1-pro-preview",
+                            audioData: audioData,
+                            mimeType: mimeType,
+                            terms: terms,
+                            customPrompt: customPrompt,
+                            timeOffsetSeconds: timeOffsetSeconds
+                        )
+                    }
+                }
+            }
+            throw error
         }
+    }
+
+    private func executeWithRetries(
+        modelID: String,
+        audioData: Data,
+        mimeType: String,
+        terms: [String],
+        customPrompt: String,
+        timeOffsetSeconds: Double
+    ) async throws -> String {
+        let maxAttempts = 3
+        var lastError: Error?
+
+        for attempt in 1...maxAttempts {
+            do {
+                return try await executeGenerateContent(
+                    modelID: modelID,
+                    audioData: audioData,
+                    mimeType: mimeType,
+                    terms: terms,
+                    customPrompt: customPrompt,
+                    timeOffsetSeconds: timeOffsetSeconds
+                )
+            } catch let error as GoogleAIStudioError {
+                if case let .requestFailed(statusCode, _) = error, (statusCode == 503 || statusCode == 429 || statusCode == 500) {
+                    lastError = error
+                    if attempt < maxAttempts {
+                        let backoffSeconds = Double(attempt * 2)
+                        try? await Task.sleep(nanoseconds: UInt64(backoffSeconds * 1_000_000_000))
+                        continue
+                    }
+                }
+                throw error
+            } catch {
+                throw error
+            }
+        }
+
+        if let lastError {
+            throw lastError
+        }
+        throw GoogleAIStudioError.requestFailed(statusCode: 503, message: "伺服器忙碌，重試後仍失敗。")
     }
 
     private func executeGenerateContent(
