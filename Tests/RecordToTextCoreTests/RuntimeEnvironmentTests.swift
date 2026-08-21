@@ -3,72 +3,111 @@ import XCTest
 @testable import RecordToTextCore
 
 final class RuntimeEnvironmentTests: XCTestCase {
-    func testReleaseRuntimeFailsClosedWithoutVerifier() throws {
+    func testGoogleAIStudioResolvesBundledFFmpegWithoutDeveloperMode() throws {
         let root = try TestSupport.makeTemporaryDirectory()
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let paths = ApplicationPaths(root: root)
-        try createRuntimeFiles(at: paths)
-
-        XCTAssertThrowsError(
-            try RuntimeEnvironment.resolve(
-                paths: paths,
-                settings: AppSettings.defaultValue(developerMode: false),
-                bundledHelperURL: nil
-            )
-        ) { error in
-            guard case RuntimeEnvironmentError.releaseRuntimeNotVerified = error else {
-                return XCTFail("Unexpected error: \(error)")
-            }
-        }
-    }
-
-    func testReleaseRuntimeVerifierUnlocksResolvedRuntime() throws {
-        let root = try TestSupport.makeTemporaryDirectory()
-        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
-        let paths = ApplicationPaths(root: root)
-        try createRuntimeFiles(at: paths)
-        var verifierWasCalled = false
+        let bundled = try makeBundledAudioTools(in: root)
 
         let runtime = try RuntimeEnvironment.resolve(
             paths: paths,
             settings: AppSettings.defaultValue(developerMode: false),
             bundledHelperURL: nil,
-            releaseRuntimeVerifier: { _ in
-                verifierWasCalled = true
-            }
+            bundledFFmpegURL: bundled.ffmpeg,
+            bundledFFprobeURL: bundled.ffprobe,
+            includeSystemAudioTools: false
         )
 
-        XCTAssertTrue(verifierWasCalled)
         XCTAssertFalse(runtime.isDeveloperRuntime)
+        XCTAssertEqual(runtime.ffmpeg.path, bundled.ffmpeg.path)
+        XCTAssertEqual(runtime.ffprobe.path, bundled.ffprobe.path)
     }
 
-    func testReleaseRuntimeInspectionDoesNotClaimReadyBeforeVerification() throws {
+    func testGoogleAIStudioPrefersBundledFFmpegOverReleaseBin() throws {
         let root = try TestSupport.makeTemporaryDirectory()
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let paths = ApplicationPaths(root: root)
         try createRuntimeFiles(at: paths)
+        let bundled = try makeBundledAudioTools(in: root)
+
+        let runtime = RuntimeEnvironment.candidate(
+            paths: paths,
+            settings: AppSettings.defaultValue(developerMode: false),
+            bundledHelperURL: nil,
+            bundledFFmpegURL: bundled.ffmpeg,
+            bundledFFprobeURL: bundled.ffprobe,
+            includeSystemAudioTools: false
+        )
+
+        XCTAssertEqual(runtime.ffmpeg.path, bundled.ffmpeg.path)
+        XCTAssertEqual(runtime.ffprobe.path, bundled.ffprobe.path)
+    }
+
+    func testGoogleAIStudioFailsWhenFFmpegMissing() throws {
+        let root = try TestSupport.makeTemporaryDirectory()
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let paths = ApplicationPaths(root: root)
+
+        XCTAssertThrowsError(
+            try RuntimeEnvironment.resolve(
+                paths: paths,
+                settings: AppSettings.defaultValue(developerMode: false),
+                bundledHelperURL: nil,
+                includeSystemAudioTools: false
+            )
+        ) { error in
+            guard case let RuntimeEnvironmentError.missingComponents(components) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(
+                Set(components.map(\.component)),
+                [.ffmpeg, .ffprobe]
+            )
+        }
+    }
+
+    func testGoogleAIStudioInspectionIsReadyWhenAudioToolsExist() throws {
+        let root = try TestSupport.makeTemporaryDirectory()
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let bundled = try makeBundledAudioTools(in: root)
         let runtime = ResolvedRuntime(
-            python: runtimeBin(paths).appendingPathComponent("python"),
-            ffmpeg: runtimeBin(paths).appendingPathComponent("ffmpeg"),
-            ffprobe: runtimeBin(paths).appendingPathComponent("ffprobe"),
-            opencc: runtimeBin(paths).appendingPathComponent("opencc"),
-            helper: runtimeBin(paths).appendingPathComponent(helperName),
+            python: root.appendingPathComponent("python"),
+            ffmpeg: bundled.ffmpeg,
+            ffprobe: bundled.ffprobe,
+            opencc: root.appendingPathComponent("opencc"),
+            helper: root.appendingPathComponent(helperName),
             isDeveloperRuntime: false
         )
 
-        let unverified = RuntimeEnvironment.inspect(runtime)
-        let verified = RuntimeEnvironment.inspect(
+        let report = RuntimeEnvironment.inspect(
             runtime,
-            releaseRuntimeVerified: true
+            backendType: .googleAIStudio
         )
 
-        XCTAssertFalse(unverified.isReady)
-        XCTAssertTrue(
-            unverified.components.allSatisfy {
-                $0.detail.contains("尚未通過驗證")
-            }
+        XCTAssertTrue(report.isReady)
+        XCTAssertEqual(report.components.map(\.component), [.ffmpeg, .ffprobe])
+        XCTAssertTrue(report.components.allSatisfy(\.isAvailable))
+    }
+
+    func testReleaseRuntimeFailsClosedWithoutVerifierWhenNotCloud() throws {
+        let root = try TestSupport.makeTemporaryDirectory()
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let paths = ApplicationPaths(root: root)
+        try createRuntimeFiles(at: paths)
+
+        // Cloud backends skip the old MLX verifier. This documents the remaining
+        // fail-closed path if a future local backend is reintroduced.
+        let settings = AppSettings.defaultValue(developerMode: false)
+        XCTAssertEqual(settings.backendType, .googleAIStudio)
+
+        let runtime = try RuntimeEnvironment.resolve(
+            paths: paths,
+            settings: settings,
+            bundledHelperURL: nil,
+            includeSystemAudioTools: false
         )
-        XCTAssertTrue(verified.isReady)
+        XCTAssertFalse(runtime.isDeveloperRuntime)
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: runtime.ffmpeg.path))
     }
 
     func testTextFileValidatorRejectsBlankAndInvalidUTF8() throws {
@@ -89,6 +128,21 @@ final class RuntimeEnvironmentTests: XCTestCase {
                 return XCTFail("Unexpected error: \($0)")
             }
         }
+    }
+
+    private func makeBundledAudioTools(in root: URL) throws -> (ffmpeg: URL, ffprobe: URL) {
+        let helpers = root.appendingPathComponent("Helpers", isDirectory: true)
+        try FileManager.default.createDirectory(at: helpers, withIntermediateDirectories: true)
+        let ffmpeg = helpers.appendingPathComponent("ffmpeg")
+        let ffprobe = helpers.appendingPathComponent("ffprobe")
+        for url in [ffmpeg, ffprobe] {
+            try Data("#!/bin/sh\nexit 0\n".utf8).write(to: url)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: url.path
+            )
+        }
+        return (ffmpeg, ffprobe)
     }
 
     private func createRuntimeFiles(at paths: ApplicationPaths) throws {

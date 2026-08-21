@@ -753,6 +753,7 @@ final class AppViewModel: ObservableObject {
             vertexAIProjectID: settings.vertexAIProjectID,
             vertexAILocation: settings.vertexAILocation,
             vertexAIModelID: settings.vertexAIModelID,
+            vertexAIGCSBucket: settings.vertexAIGCSBucket,
             vertexAIIncludeSummary: settings.vertexAIIncludeSummary
         )
 
@@ -1142,6 +1143,7 @@ final class AppViewModel: ObservableObject {
                 vertexAIProjectID: settings.vertexAIProjectID,
                 vertexAILocation: settings.vertexAILocation,
                 vertexAIModelID: settings.vertexAIModelID,
+                vertexAIGCSBucket: settings.vertexAIGCSBucket,
                 vertexAIIncludeSummary: settings.vertexAIIncludeSummary
             )
             var job = TranscriptionJob(
@@ -1208,7 +1210,9 @@ final class AppViewModel: ObservableObject {
             let runtime = try RuntimeEnvironment.resolve(
                 paths: paths,
                 settings: settings,
-                bundledHelperURL: bundledHelperURL
+                bundledHelperURL: bundledHelperURL,
+                bundledFFmpegURL: bundledFFmpegURL,
+                bundledFFprobeURL: bundledFFprobeURL
             )
             let engine: TranscriptionEngine
             if let reusableEngine,
@@ -1617,6 +1621,27 @@ final class AppViewModel: ObservableObject {
         return "\(base) \(index)"
     }
 
+    private var bundledFFmpegURL: URL? {
+        bundledAuxiliaryExecutable(named: "ffmpeg")
+    }
+
+    private var bundledFFprobeURL: URL? {
+        bundledAuxiliaryExecutable(named: "ffprobe")
+    }
+
+    private func bundledAuxiliaryExecutable(named name: String) -> URL? {
+        let candidates: [URL] = [
+            Bundle.main.url(forAuxiliaryExecutable: name),
+            Bundle.main.bundleURL
+                .appendingPathComponent("Contents/Helpers/\(name)", isDirectory: false),
+            URL(fileURLWithPath: CommandLine.arguments[0])
+                .deletingLastPathComponent()
+                .appendingPathComponent("Helpers/\(name)")
+        ].compactMap { $0 }
+
+        return candidates.first(where: { fileManager.isExecutableFile(atPath: $0.path) })
+    }
+
     private var bundledHelperURL: URL? {
         let helperName = CPUArchitecture.current == .x86_64
             ? "qwen_asr_transformers_runner"
@@ -1642,44 +1667,13 @@ final class AppViewModel: ObservableObject {
     }
 
     private func runtimeCandidate() -> ResolvedRuntime {
-        let releaseBin = paths.runtimes
-            .appendingPathComponent("current", isDirectory: true)
-            .appendingPathComponent("bin", isDirectory: true)
-        let helperFilename = CPUArchitecture.current == .x86_64
-            ? "qwen_asr_transformers_runner.py"
-            : "qwen_asr_mlx_runner.py"
-
-        if settings.developerMode {
-            let prefix = CPUArchitecture.current == .x86_64
-                ? "/usr/local/bin"
-                : "/opt/homebrew/bin"
-            let defaultEnvironmentName = CPUArchitecture.current == .x86_64
-                ? "record-to-text-intel-env"
-                : "mlx-audio-env"
-            let python = settings.customPythonPath
-                ?? fileManager.homeDirectoryForCurrentUser
-                    .appendingPathComponent("\(defaultEnvironmentName)/bin/python")
-                    .path
-            let helper = settings.customHelperPath
-                ?? bundledHelperURL?.path
-                ?? releaseBin.appendingPathComponent(helperFilename).path
-            return ResolvedRuntime(
-                python: URL(fileURLWithPath: python),
-                ffmpeg: URL(fileURLWithPath: "\(prefix)/ffmpeg"),
-                ffprobe: URL(fileURLWithPath: "\(prefix)/ffprobe"),
-                opencc: URL(fileURLWithPath: "\(prefix)/opencc"),
-                helper: URL(fileURLWithPath: helper),
-                isDeveloperRuntime: true
-            )
-        }
-
-        return ResolvedRuntime(
-            python: releaseBin.appendingPathComponent("python"),
-            ffmpeg: releaseBin.appendingPathComponent("ffmpeg"),
-            ffprobe: releaseBin.appendingPathComponent("ffprobe"),
-            opencc: releaseBin.appendingPathComponent("opencc"),
-            helper: releaseBin.appendingPathComponent(helperFilename),
-            isDeveloperRuntime: false
+        RuntimeEnvironment.candidate(
+            paths: paths,
+            settings: settings,
+            bundledHelperURL: bundledHelperURL,
+            bundledFFmpegURL: bundledFFmpegURL,
+            bundledFFprobeURL: bundledFFprobeURL,
+            fileManager: fileManager
         )
     }
 

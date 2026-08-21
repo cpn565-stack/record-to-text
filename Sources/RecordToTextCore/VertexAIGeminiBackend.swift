@@ -8,6 +8,8 @@ public enum VertexAIError: LocalizedError, Equatable {
     case prohibitedContent(String)
     case emptyResponse
     case invalidJSONResponse
+    case transportMessageTooLarge
+    case gcsBucketRequired
     case cancelled
 
     public var errorDescription: String? {
@@ -29,6 +31,10 @@ public enum VertexAIError: LocalizedError, Equatable {
             return "Vertex AI 未回傳任何文字內容或候選結果。"
         case .invalidJSONResponse:
             return "Vertex AI 回傳的資料無法解讀為有效 JSON。"
+        case .transportMessageTooLarge:
+            return "連到 Google 的傳輸通道失敗（本機無法送出這包資料）。這不是音檔超過 Gemini 時長上限。請重試；若持續發生，需要改為先上傳音檔再轉錄。"
+        case .gcsBucketRequired:
+            return "Vertex AI 雲端轉錄需設定 GCS Bucket 以進行音訊上傳。請至設定填入 GCS Bucket 或改用 Google AI Studio 後端。"
         case .cancelled:
             return "轉錄程序已取消。"
         }
@@ -94,7 +100,9 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         mimeType: String = "audio/mp3",
         terms: [String] = [],
         customPrompt: String = "",
-        timeOffsetSeconds: Double = 0
+        timeOffsetSeconds: Double = 0,
+        workingDirectory: URL? = nil,
+        logger: ((_ level: String, _ message: String) -> Void)? = nil
     ) async throws -> String {
         let currentConfig = getConfiguration()
 
@@ -105,18 +113,23 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                 mimeType: mimeType,
                 terms: terms,
                 customPrompt: customPrompt,
-                timeOffsetSeconds: timeOffsetSeconds
+                timeOffsetSeconds: timeOffsetSeconds,
+                workingDirectory: workingDirectory,
+                logger: logger
             )
         } catch VertexAIError.prohibitedContent {
             // 若 3.7 Flash 遇到 Google 預先審查誤判（False Positive），自動切換至 Gemini 3.1 Pro 重試
             if currentConfig.modelID.contains("3.7") {
+                logger?("info", "遇到內容安全政策誤判，自動切換至 Gemini 3.1 Pro 重試。")
                 return try await executeGenerateContent(
                     modelID: "gemini-3.1-pro-preview",
                     audioData: audioData,
                     mimeType: mimeType,
                     terms: terms,
                     customPrompt: customPrompt,
-                    timeOffsetSeconds: timeOffsetSeconds
+                    timeOffsetSeconds: timeOffsetSeconds,
+                    workingDirectory: workingDirectory,
+                    logger: logger
                 )
             }
             throw VertexAIError.prohibitedContent("Google 內容安全誤判，建議切換至 Gemini 3.1 Pro。")
@@ -129,7 +142,9 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         mimeType: String,
         terms: [String],
         customPrompt: String,
-        timeOffsetSeconds: Double
+        timeOffsetSeconds: Double,
+        workingDirectory: URL?,
+        logger: ((_ level: String, _ message: String) -> Void)?
     ) async throws -> String {
         let currentConfig = getConfiguration()
 
@@ -146,22 +161,14 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         }
 
         // 2. 取得 Access Token
-        let accessToken: String
+        var accessToken: String
         do {
             accessToken = try await authService.getAccessToken()
         } catch {
             throw VertexAIError.authenticationFailed(error.localizedDescription)
         }
 
-        // 3. 檢查音檔大小 (目前支援 inline base64)
-        guard audioData.count <= Self.maximumInlineAudioBytes else {
-            throw VertexAIError.audioPayloadTooLarge(
-                sizeBytes: audioData.count,
-                limitBytes: Self.maximumInlineAudioBytes
-            )
-        }
-
-        // 4. 組裝 API Endpoint (全球端點為 aiplatform.googleapis.com，區域端點為 {location}-aiplatform.googleapis.com)
+        // 3. 組裝 API Endpoint
         let resolvedLocation = currentConfig.location.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "global" : currentConfig.location.trimmingCharacters(in: .whitespacesAndNewlines)
         let host = (resolvedLocation == "global") ? "aiplatform.googleapis.com" : "\(resolvedLocation)-aiplatform.googleapis.com"
         let endpointString = "https://\(host)/v1/projects/\(resolvedProjectID)/locations/\(resolvedLocation)/publishers/google/models/\(modelID):generateContent"
@@ -169,11 +176,66 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             throw VertexAIError.invalidEndpointURL(endpointString)
         }
 
-        // 5. 組裝 Prompt
         let systemInstructionText = buildSystemInstruction()
         let userPromptText = buildUserPrompt(terms: terms, customPrompt: customPrompt, timeOffsetSeconds: timeOffsetSeconds)
 
-        let base64Audio = audioData.base64EncodedString()
+        let audioPart: [String: Any]
+        var uploadedGCSObjectName: String? = nil
+        let bucket = currentConfig.gcsBucket?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // 第二層優先：若有設定 GCS Bucket 則走 GCS 上傳
+        if let bucket, !bucket.isEmpty {
+            let objectName = "record_to_text_\(UUID().uuidString).mp3"
+            uploadedGCSObjectName = objectName
+            logger?("info", "使用 GCS Bucket (\(bucket)) 串流上傳音訊...")
+
+            try await uploadToGCS(
+                bucket: bucket,
+                objectName: objectName,
+                audioData: audioData,
+                mimeType: mimeType,
+                accessToken: accessToken,
+                workingDirectory: workingDirectory,
+                logger: logger
+            )
+
+            audioPart = [
+                "fileData": [
+                    "mimeType": mimeType,
+                    "fileUri": "gs://\(bucket)/\(objectName)"
+                ]
+            ]
+        } else {
+            // 第一層路徑：Inline Base64 透過檔案串流 POST
+            guard audioData.count <= Self.maximumInlineAudioBytes else {
+                throw VertexAIError.audioPayloadTooLarge(
+                    sizeBytes: audioData.count,
+                    limitBytes: Self.maximumInlineAudioBytes
+                )
+            }
+
+            let base64Audio = audioData.base64EncodedString()
+            audioPart = [
+                "inlineData": [
+                    "mimeType": mimeType,
+                    "data": base64Audio
+                ]
+            ]
+        }
+
+        defer {
+            // 清理 GCS 遠端暫存物件
+            if let bucket, !bucket.isEmpty, let objectName = uploadedGCSObjectName {
+                Task {
+                    await self.deleteGCSObject(
+                        bucket: bucket,
+                        objectName: objectName,
+                        accessToken: accessToken,
+                        logger: logger
+                    )
+                }
+            }
+        }
 
         let requestBody: [String: Any] = [
             "systemInstruction": [
@@ -185,15 +247,8 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                 [
                     "role": "user",
                     "parts": [
-                        [
-                            "inlineData": [
-                                "mimeType": mimeType,
-                                "data": base64Audio
-                            ]
-                        ],
-                        [
-                            "text": userPromptText
-                        ]
+                        audioPart,
+                        ["text": userPromptText]
                     ]
                 ]
             ],
@@ -212,32 +267,50 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
 
         let requestData = try JSONSerialization.data(withJSONObject: requestBody)
 
-        // 6. 發送 HTTP 請求
+        // 將請求寫入工作暫存檔進行串流上傳，禁止整包塞進 URLRequest.httpBody
+        let tempRequestFile = try GeminiTransportHelper.writeTemporaryRequestFile(
+            data: requestData,
+            in: workingDirectory,
+            prefix: "vertex_generate"
+        )
+        defer {
+            try? FileManager.default.removeItem(at: tempRequestFile)
+        }
+
         var urlRequest = URLRequest(url: endpointURL)
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         urlRequest.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
-        urlRequest.httpBody = requestData
         urlRequest.timeoutInterval = 300 // 5 分鐘超時
 
-        var (data, response) = try await urlSession.data(for: urlRequest)
-
-        guard var httpResponse = response as? HTTPURLResponse else {
-            throw VertexAIError.invalidJSONResponse
-        }
+        var (data, httpResponse) = try await sendWithPOSIXRetry(
+            request: urlRequest,
+            fileURL: tempRequestFile,
+            session: urlSession,
+            logger: logger
+        )
 
         // 若遇 401 Token 過期，自動刷新並重試一次
         if httpResponse.statusCode == 401 {
             authService.invalidateToken()
             if let freshToken = try? await authService.getAccessToken(forceRefresh: true) {
+                accessToken = freshToken
                 urlRequest.setValue("Bearer \(freshToken)", forHTTPHeaderField: "Authorization")
-                let retryResult = try await urlSession.data(for: urlRequest)
+                let retryResult = try await sendWithPOSIXRetry(
+                    request: urlRequest,
+                    fileURL: tempRequestFile,
+                    session: urlSession,
+                    logger: logger
+                )
                 data = retryResult.0
-                if let retryHTTP = retryResult.1 as? HTTPURLResponse {
-                    httpResponse = retryHTTP
-                }
+                httpResponse = retryResult.1
             }
         }
+
+        logger?(
+            "info",
+            "Vertex AI 請求回應：HTTP \(httpResponse.statusCode), MP3 \(audioData.count) bytes, JSON \(requestData.count) bytes, 模型 \(modelID), location \(resolvedLocation)"
+        )
 
         if httpResponse.statusCode != 200 {
             let errorMsg = parseErrorMessage(from: data)
@@ -247,8 +320,122 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             )
         }
 
-        // 7. 解析回傳文字
         return try parseCandidateText(from: data)
+    }
+
+    /// 透過串流上傳將請求送出，若遇到 POSIX 40 自動建立全新 Ephemeral Session 重試一次
+    private func sendWithPOSIXRetry(
+        request: URLRequest,
+        fileURL: URL,
+        session: URLSession,
+        logger: ((_ level: String, _ message: String) -> Void)?
+    ) async throws -> (Data, HTTPURLResponse) {
+        do {
+            let (data, response) = try await session.upload(for: request, fromFile: fileURL)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw VertexAIError.invalidJSONResponse
+            }
+            return (data, httpResponse)
+        } catch {
+            if GeminiTransportHelper.isPOSIXMessageTooLarge(error) {
+                logger?("info", "本機傳輸通道失敗（POSIX 40），正改用全新連線 (TCP/Ephemeral) 重試，非音檔時長問題。")
+                let retrySession = GeminiTransportHelper.makeEphemeralRetrySession(protocolClasses: session.configuration.protocolClasses)
+                var retryRequest = request
+                retryRequest.assumesHTTP3Capable = false
+
+                do {
+                    let (data, response) = try await retrySession.upload(for: retryRequest, fromFile: fileURL)
+                    guard let httpResponse = response as? HTTPURLResponse else {
+                        throw VertexAIError.invalidJSONResponse
+                    }
+                    logger?("info", "傳輸通道重試成功（HTTP \(httpResponse.statusCode)）。")
+                    return (data, httpResponse)
+                } catch let retryError {
+                    if GeminiTransportHelper.isPOSIXMessageTooLarge(retryError) {
+                        logger?("warning", "重試後仍為 POSIX 40 傳輸失敗。")
+                        throw VertexAIError.transportMessageTooLarge
+                    }
+                    throw retryError
+                }
+            } else {
+                throw error
+            }
+        }
+    }
+
+    /// 上傳音檔至 Google Cloud Storage
+    private func uploadToGCS(
+        bucket: String,
+        objectName: String,
+        audioData: Data,
+        mimeType: String,
+        accessToken: String,
+        workingDirectory: URL?,
+        logger: ((_ level: String, _ message: String) -> Void)?
+    ) async throws {
+        let tempAudioFile = try GeminiTransportHelper.writeTemporaryRequestFile(
+            data: audioData,
+            in: workingDirectory,
+            prefix: "gcs_audio"
+        )
+        defer {
+            try? FileManager.default.removeItem(at: tempAudioFile)
+        }
+
+        guard let encodedName = objectName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let uploadURL = URL(string: "https://storage.googleapis.com/upload/storage/v1/b/\(bucket)/o?uploadType=media&name=\(encodedName)") else {
+            throw VertexAIError.invalidEndpointURL("GCS Upload URL 格式錯誤")
+        }
+
+        var request = URLRequest(url: uploadURL)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue(mimeType, forHTTPHeaderField: "Content-Type")
+        request.setValue("\(audioData.count)", forHTTPHeaderField: "Content-Length")
+        request.timeoutInterval = 300
+
+        let (data, httpResponse) = try await sendWithPOSIXRetry(
+            request: request,
+            fileURL: tempAudioFile,
+            session: urlSession,
+            logger: logger
+        )
+
+        if httpResponse.statusCode < 200 || httpResponse.statusCode >= 300 {
+            let errorMsg = parseErrorMessage(from: data)
+            throw VertexAIError.requestFailed(
+                statusCode: httpResponse.statusCode,
+                message: "GCS 音訊上傳失敗：\(errorMsg)"
+            )
+        }
+    }
+
+    /// 刪除 GCS 遠端暫存物件
+    private func deleteGCSObject(
+        bucket: String,
+        objectName: String,
+        accessToken: String,
+        logger: ((_ level: String, _ message: String) -> Void)?
+    ) async {
+        guard let encodedName = objectName.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let deleteURL = URL(string: "https://storage.googleapis.com/storage/v1/b/\(bucket)/o/\(encodedName)") else {
+            return
+        }
+
+        var request = URLRequest(url: deleteURL)
+        request.httpMethod = "DELETE"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 30
+
+        do {
+            let (_, response) = try await urlSession.data(for: request)
+            if let httpResponse = response as? HTTPURLResponse, (httpResponse.statusCode == 200 || httpResponse.statusCode == 204 || httpResponse.statusCode == 404) {
+                // 刪除成功或已不存在
+                return
+            }
+        } catch {
+            logger?("warning", "清理 GCS 暫存檔 (\(objectName)) 失敗：\(error.localizedDescription)")
+        }
     }
 
     private func buildSystemInstruction() -> String {
@@ -345,24 +532,16 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
     private func sanitizeTranscript(_ rawText: String) -> String {
         var text = rawText
 
-        // 1. 若含有舊式 "## 📝 完整整理逐字稿" 或重複的草稿重啟標記，保留後方完整逐字內容
         if let range = text.range(of: "## 📝 完整整理逐字稿") {
             text = String(text[range.upperBound...])
         } else if let range = text.range(of: "## 完整整理逐字稿") {
             text = String(text[range.upperBound...])
         }
 
-        // 2. 移除 Markdown 標題符號 (例如 ### [00:00 - 05:00] -> [00:00 - 05:00])
         text = text.replacingOccurrences(of: #"(?m)^[ \t]*#{1,6}[ \t]*(\[\d{2}:\d{2})"#, with: "$1", options: .regularExpression)
         text = text.replacingOccurrences(of: #"(?m)^[ \t]*#{1,6}[ \t]*"#, with: "", options: .regularExpression)
-
-        // 3. 移除粗體語法 **講者** -> 講者
         text = text.replacingOccurrences(of: #"\*\*([^*]+)\*\*"#, with: "$1", options: .regularExpression)
-
-        // 4. 移除水平分隔線
         text = text.replacingOccurrences(of: #"(?m)^[ \t]*---[ \t]*$"#, with: "", options: .regularExpression)
-
-        // 5. 正規化多餘空行
         text = text.replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
 
         return text.trimmingCharacters(in: .whitespacesAndNewlines)

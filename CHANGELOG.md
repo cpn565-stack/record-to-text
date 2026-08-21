@@ -6,6 +6,10 @@
 
 ### Added
 
+- Gemini 雲端傳輸強固化（雙層架構）：
+  - 傳輸層改造：全面以工作暫存檔串流上傳 (`upload(for:fromFile:)`) 替代 in-memory `httpBody`，遞迴檢測並攔截 POSIX 40 (`EMSGSIZE`) 與 `_kCFStreamErrorCodeKey: 40`，自動以 Ephemeral TCP Session 重試 1 次。
+  - 音訊上傳分離：Google AI Studio 預設啟用官方 Files API 串流傳輸音訊，Vertex AI 支援 GCS Bucket 參照（`gs://...`），大幅降低推論 API 的 Payload 體積與斷線風險。
+- Google AI Studio 模式把 FFmpeg 9.0 / FFprobe（arm64 static，含 libmp3lame）打進 App `Contents/Helpers`，預設不再依賴 Homebrew 或 Developer Mode。
 - Runtime 設定可選 Apple Silicon 模型：`Qwen3-ASR 1.7B 8-bit`、`1.7B BF16`、`0.6B 8-bit`（含鎖定 revision）。
 - 模型選擇旁提供「下載模型／匯入本機模型」：優先從 `~/.cache/huggingface` 匯入，否則下載到 App Models 目錄。
 - 預設輸出檔名後綴改為 `_逐字稿`（例如 `原檔名_逐字稿.txt`）。

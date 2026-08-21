@@ -13,6 +13,8 @@ dist/
 *.bin
 Models/
 Runtimes/
+runtime/macos-arm64/bin/
+runtime/macos-arm64/downloads/
 .env
 *.p12
 *.cer

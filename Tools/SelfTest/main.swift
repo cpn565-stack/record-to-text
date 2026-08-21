@@ -540,24 +540,17 @@ tests.check(
         }
 
         let settings = AppSettings.defaultValue(developerMode: false)
-        do {
-            _ = try RuntimeEnvironment.resolve(
-                paths: paths,
-                settings: settings,
-                bundledHelperURL: nil
-            )
-            return false
-        } catch RuntimeEnvironmentError.releaseRuntimeNotVerified {
-            let verified = try RuntimeEnvironment.resolve(
-                paths: paths,
-                settings: settings,
-                bundledHelperURL: nil,
-                releaseRuntimeVerifier: { _ in }
-            )
-            return !verified.isDeveloperRuntime
-        }
+        let runtime = try RuntimeEnvironment.resolve(
+            paths: paths,
+            settings: settings,
+            bundledHelperURL: nil,
+            includeSystemAudioTools: false
+        )
+        return !runtime.isDeveloperRuntime
+            && FileManager.default.isExecutableFile(atPath: runtime.ffmpeg.path)
+            && settings.backendType == .googleAIStudio
     }(),
-    "RuntimeEnvironment fails closed until release runtime is verified"
+    "Google AI Studio resolves ffmpeg without Developer Mode or release verifier"
 )
 
 tests.check(
@@ -853,6 +846,404 @@ tests.check(
             && presets.contains(where: { $0.id == "gemini-3.1-pro-preview" })
     }(),
     "GeminiModelDescriptor contains 3.7 Flash, 3.6 Flash and 3.1 Pro presets"
+)
+
+// MARK: - Gemini Cloud Transport Hardening Tests
+
+tests.check(
+    {
+        let directPOSIX40 = NSError(domain: NSPOSIXErrorDomain, code: 40, userInfo: [NSLocalizedDescriptionKey: "Message too long"])
+        let directPOSIX2 = NSError(domain: NSPOSIXErrorDomain, code: 2, userInfo: [:])
+        let cfStream40 = NSError(domain: "kCFErrorDomainCFNetwork", code: -1005, userInfo: [
+            "_kCFStreamErrorCodeKey": 40,
+            "_kCFStreamErrorDomainKey": 1
+        ])
+        let wrappedPOSIX40 = NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotConnectToHost, userInfo: [
+            NSUnderlyingErrorKey: directPOSIX40
+        ])
+        let nestedWrapped = NSError(domain: "CustomDomain", code: 999, userInfo: [
+            NSUnderlyingErrorKey: wrappedPOSIX40
+        ])
+
+        return GeminiTransportHelper.isPOSIXMessageTooLarge(directPOSIX40)
+            && !GeminiTransportHelper.isPOSIXMessageTooLarge(directPOSIX2)
+            && GeminiTransportHelper.isPOSIXMessageTooLarge(cfStream40)
+            && GeminiTransportHelper.isPOSIXMessageTooLarge(wrappedPOSIX40)
+            && GeminiTransportHelper.isPOSIXMessageTooLarge(nestedWrapped)
+    }(),
+    "GeminiTransportHelper recursively unwraps and detects POSIX 40 / EMSGSIZE errors"
+)
+
+tests.check(
+    {
+        do {
+            let testData = Data("{\"test\":\"gemini_transport_payload\"}".utf8)
+            let tempURL = try GeminiTransportHelper.writeTemporaryRequestFile(data: testData, prefix: "selftest_req")
+            defer { try? FileManager.default.removeItem(at: tempURL) }
+
+            guard FileManager.default.fileExists(atPath: tempURL.path) else {
+                return false
+            }
+            let readData = try Data(contentsOf: tempURL)
+            let attributes = try FileManager.default.attributesOfItem(atPath: tempURL.path)
+            let posixPermissions = attributes[.posixPermissions] as? NSNumber
+
+            return readData == testData && (posixPermissions?.intValue == 0o600 || posixPermissions?.intValue == 0o700)
+        } catch {
+            return false
+        }
+    }(),
+    "GeminiTransportHelper writes request file with tight permissions"
+)
+
+tests.check(
+    {
+        let vertexError = VertexAIError.transportMessageTooLarge.localizedDescription
+        let aiStudioError = GoogleAIStudioError.transportMessageTooLarge.localizedDescription
+
+        return vertexError.contains("傳輸通道")
+            && vertexError.contains("不是音檔超過 Gemini 時長上限")
+            && !vertexError.contains("無法完成作業。訊息太長")
+            && aiStudioError.contains("傳輸通道")
+            && aiStudioError.contains("不是音檔超過 Gemini 時長上限")
+    }(),
+    "Transport errors provide explicit channel diagnostic text without vague message too long"
+)
+
+tests.check(
+    {
+        let settings = AppSettings(
+            defaultOutputDirectory: "/tmp/output",
+            backendType: .vertexAI,
+            vertexAIProjectID: "test-proj",
+            vertexAILocation: "global",
+            vertexAIModelID: "gemini-3.7-flash",
+            vertexAIGCSBucket: "my-custom-bucket",
+            vertexAIIncludeSummary: false
+        )
+        guard let data = try? JSONEncoder().encode(settings),
+              let decoded = try? JSONDecoder().decode(AppSettings.self, from: data) else {
+            return false
+        }
+        let snapshot = JobSnapshot(
+            modelID: settings.vertexAIModelID,
+            glossaryID: nil,
+            glossaryName: nil,
+            terms: [],
+            prompt: "忠實轉錄",
+            outputLocationMode: settings.outputLocationMode,
+            outputDirectory: settings.defaultOutputDirectory,
+            keepRawTranscript: false,
+            backendType: settings.backendType,
+            vertexAIProjectID: settings.vertexAIProjectID,
+            vertexAILocation: settings.vertexAILocation,
+            vertexAIModelID: settings.vertexAIModelID,
+            vertexAIGCSBucket: settings.vertexAIGCSBucket,
+            vertexAIIncludeSummary: settings.vertexAIIncludeSummary
+        )
+        guard let snapData = try? JSONEncoder().encode(snapshot),
+              let snapDecoded = try? JSONDecoder().decode(JobSnapshot.self, from: snapData) else {
+            return false
+        }
+        return decoded.vertexAIGCSBucket == "my-custom-bucket"
+            && snapDecoded.vertexAIGCSBucket == "my-custom-bucket"
+    }(),
+    "AppSettings and JobSnapshot persist vertexAIGCSBucket"
+)
+
+private final class MockTransportURLProtocol: URLProtocol {
+    static var requestHandler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let handler = MockTransportURLProtocol.requestHandler else {
+            client?.urlProtocol(self, didFailWithError: NSError(domain: "MockError", code: 1))
+            return
+        }
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
+tests.check(
+    {
+        URLProtocol.registerClass(MockTransportURLProtocol.self)
+        defer {
+            URLProtocol.unregisterClass(MockTransportURLProtocol.self)
+            MockTransportURLProtocol.requestHandler = nil
+        }
+
+        var callCount = 0
+        MockTransportURLProtocol.requestHandler = { request in
+            callCount += 1
+            if callCount == 1 {
+                throw NSError(domain: NSPOSIXErrorDomain, code: 40, userInfo: [
+                    NSLocalizedDescriptionKey: "Message too long"
+                ])
+            }
+            let successJSON = """
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [{"text": "這是重試成功逐字稿"}],
+                            "role": "model"
+                        }
+                    }
+                ]
+            }
+            """
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, Data(successJSON.utf8))
+        }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockTransportURLProtocol.self]
+        let session = URLSession(configuration: config)
+
+        let backend = GoogleAIStudioBackend(
+            urlSession: session,
+            configuration: GoogleAIStudioBackend.Configuration(
+                apiKey: "AIzaTestKey",
+                modelID: "gemini-3.7-flash",
+                useFilesAPI: false
+            )
+        )
+
+        do {
+            let transcript = try blockingAwait {
+                try await backend.transcribe(audioData: Data("small audio".utf8))
+            }
+            return transcript.contains("這是重試成功逐字稿") && callCount >= 1
+        } catch {
+            return false
+        }
+    }(),
+    "GoogleAIStudioBackend handles POSIX 40 with ephemeral retry and succeeds"
+)
+
+tests.check(
+    {
+        URLProtocol.registerClass(MockTransportURLProtocol.self)
+        defer {
+            URLProtocol.unregisterClass(MockTransportURLProtocol.self)
+            MockTransportURLProtocol.requestHandler = nil
+        }
+
+        var sawInit = false
+        var sawUpload = false
+        var sawGenerate = false
+
+        MockTransportURLProtocol.requestHandler = { request in
+            let urlString = request.url?.absoluteString ?? ""
+
+            if urlString.contains("/upload/v1beta/files") && request.httpMethod == "POST" {
+                sawInit = true
+                let response = HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: [
+                        "Content-Type": "application/json",
+                        "X-Goog-Upload-URL": "https://generativelanguage.googleapis.com/upload-target/files/mock123"
+                    ]
+                )!
+                return (response, Data("{}".utf8))
+            }
+
+            if urlString.contains("/upload-target/files/mock123") {
+                sawUpload = true
+                let fileMetadata = """
+                {
+                    "file": {
+                        "name": "files/mock123",
+                        "uri": "https://generativelanguage.googleapis.com/v1beta/files/mock123",
+                        "state": "ACTIVE"
+                    }
+                }
+                """
+                let response = HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: ["Content-Type": "application/json"]
+                )!
+                return (response, Data(fileMetadata.utf8))
+            }
+
+            if urlString.contains(":generateContent") {
+                sawGenerate = true
+                let responseJSON = """
+                {
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [{"text": "由 Files API 轉錄成功之逐字稿"}],
+                                "role": "model"
+                            }
+                        }
+                    ]
+                }
+                """
+                let response = HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: ["Content-Type": "application/json"]
+                )!
+                return (response, Data(responseJSON.utf8))
+            }
+
+            if urlString.contains("files/mock123") && request.httpMethod == "DELETE" {
+                let response = HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: [:]
+                )!
+                return (response, Data("{}".utf8))
+            }
+
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: [:])!
+            return (response, Data("{}".utf8))
+        }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockTransportURLProtocol.self]
+        let session = URLSession(configuration: config)
+
+        let backend = GoogleAIStudioBackend(
+            urlSession: session,
+            configuration: GoogleAIStudioBackend.Configuration(
+                apiKey: "AIzaTestKey",
+                modelID: "gemini-3.7-flash",
+                useFilesAPI: true
+            )
+        )
+
+        do {
+            let transcript = try blockingAwait {
+                try await backend.transcribe(audioData: Data("mock audio data".utf8))
+            }
+            return transcript.contains("由 Files API 轉錄成功之逐字稿")
+                && sawInit
+                && sawUpload
+                && sawGenerate
+        } catch {
+            return false
+        }
+    }(),
+    "GoogleAIStudioBackend uploads via Files API and decouples audio from generateContent body"
+)
+
+tests.check(
+    {
+        URLProtocol.registerClass(MockTransportURLProtocol.self)
+        defer {
+            URLProtocol.unregisterClass(MockTransportURLProtocol.self)
+            MockTransportURLProtocol.requestHandler = nil
+        }
+
+        let tempGCloudDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mock-gcloud-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: tempGCloudDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempGCloudDir) }
+
+        let mockGCloud = tempGCloudDir.appendingPathComponent("gcloud")
+        try? "#!/bin/sh\nif [ \"$1\" = \"auth\" ]; then echo 'mock-access-token'; exit 0; fi\nif [ \"$1\" = \"config\" ]; then echo 'mock-project'; exit 0; fi\n".write(to: mockGCloud, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: mockGCloud.path)
+
+        var sawGCSUpload = false
+        var sawGenerate = false
+
+        MockTransportURLProtocol.requestHandler = { request in
+            let urlString = request.url?.absoluteString ?? ""
+
+            if urlString.contains("storage.googleapis.com/upload/storage/v1/b/test-storage-bucket/o") && request.httpMethod == "POST" {
+                sawGCSUpload = true
+                let response = HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: ["Content-Type": "application/json"]
+                )!
+                return (response, Data("{}".utf8))
+            }
+
+            if urlString.contains(":generateContent") {
+                sawGenerate = true
+                let responseJSON = """
+                {
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [{"text": "由 Vertex AI GCS 轉錄成功之逐字稿"}],
+                                "role": "model"
+                            }
+                        }
+                    ]
+                }
+                """
+                let response = HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: ["Content-Type": "application/json"]
+                )!
+                return (response, Data(responseJSON.utf8))
+            }
+
+            if urlString.contains("storage.googleapis.com/storage/v1/b/test-storage-bucket/o") && request.httpMethod == "DELETE" {
+                let response = HTTPURLResponse(url: request.url!, statusCode: 204, httpVersion: nil, headerFields: [:])!
+                return (response, Data())
+            }
+
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: [:])!
+            return (response, Data("{}".utf8))
+        }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockTransportURLProtocol.self]
+        let session = URLSession(configuration: config)
+
+        let backend = VertexAIGeminiBackend(
+            authService: GCloudAuthService(customGCloudPath: mockGCloud.path),
+            urlSession: session,
+            configuration: VertexAIGeminiBackend.Configuration(
+                projectID: "mock-proj",
+                location: "global",
+                modelID: "gemini-3.7-flash",
+                gcsBucket: "test-storage-bucket"
+            )
+        )
+
+        do {
+            let transcript = try blockingAwait {
+                try await backend.transcribe(audioData: Data("mock audio data".utf8))
+            }
+            return transcript.contains("由 Vertex AI GCS 轉錄成功之逐字稿")
+                && sawGCSUpload
+                && sawGenerate
+        } catch {
+            return false
+        }
+    }(),
+    "VertexAIGeminiBackend uploads to GCS and references gs:// URI without inline audio"
 )
 
 tests.finish()

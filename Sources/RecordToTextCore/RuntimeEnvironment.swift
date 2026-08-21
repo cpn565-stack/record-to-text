@@ -110,44 +110,47 @@ public enum RuntimeEnvironmentError: LocalizedError {
 }
 
 public enum RuntimeEnvironment {
-    public static func resolve(
+    public static func homebrewPrefix(for architecture: CPUArchitecture = .current) -> String {
+        architecture == .x86_64 ? "/usr/local/bin" : "/opt/homebrew/bin"
+    }
+
+    /// Locate ffmpeg / ffprobe / helper without executing them.
+    /// Audio tools prefer: bundled app Helpers → Homebrew → App-managed Runtime.
+    /// Set `includeSystemAudioTools` to false in tests so Homebrew cannot mask missing fixtures.
+    public static func candidate(
         paths: ApplicationPaths,
         settings: AppSettings,
         bundledHelperURL: URL?,
-        releaseRuntimeVerifier: ((ResolvedRuntime) throws -> Void)? = nil,
+        bundledFFmpegURL: URL? = nil,
+        bundledFFprobeURL: URL? = nil,
+        includeSystemAudioTools: Bool = true,
         fileManager: FileManager = .default
-    ) throws -> ResolvedRuntime {
+    ) -> ResolvedRuntime {
         let releaseBin = paths.runtimes
             .appendingPathComponent("current", isDirectory: true)
             .appendingPathComponent("bin", isDirectory: true)
-
         let releaseHelperName = CPUArchitecture.current == .x86_64
             ? "qwen_asr_transformers_runner.py"
             : "qwen_asr_mlx_runner.py"
+        let prefix = homebrewPrefix()
+        let home = fileManager.homeDirectoryForCurrentUser
+        let defaultEnvironmentName = CPUArchitecture.current == .x86_64
+            ? "record-to-text-intel-env"
+            : "mlx-audio-env"
 
-        var isDeveloperRuntime = false
         let python: URL
-        let ffmpeg: URL
-        let ffprobe: URL
         let opencc: URL
         let helper: URL
+        let isDeveloperRuntime: Bool
 
         if settings.developerMode {
             isDeveloperRuntime = true
-            let home = fileManager.homeDirectoryForCurrentUser
-            let prefix = CPUArchitecture.current == .x86_64 ? "/usr/local/bin" : "/opt/homebrew/bin"
-            let defaultEnvironmentName = CPUArchitecture.current == .x86_64
-                ? "record-to-text-intel-env"
-                : "mlx-audio-env"
-
             python = URL(
                 fileURLWithPath: settings.customPythonPath
                     ?? home.appendingPathComponent(
                         "\(defaultEnvironmentName)/bin/python"
                     ).path
             )
-            ffmpeg = URL(fileURLWithPath: "\(prefix)/ffmpeg")
-            ffprobe = URL(fileURLWithPath: "\(prefix)/ffprobe")
             opencc = URL(fileURLWithPath: "\(prefix)/opencc")
             helper = URL(
                 fileURLWithPath: settings.customHelperPath
@@ -155,14 +158,25 @@ public enum RuntimeEnvironment {
                     ?? releaseBin.appendingPathComponent(releaseHelperName).path
             )
         } else {
+            isDeveloperRuntime = false
             python = releaseBin.appendingPathComponent("python")
-            ffmpeg = releaseBin.appendingPathComponent("ffmpeg")
-            ffprobe = releaseBin.appendingPathComponent("ffprobe")
             opencc = releaseBin.appendingPathComponent("opencc")
             helper = releaseBin.appendingPathComponent(releaseHelperName)
         }
 
-        let runtime = ResolvedRuntime(
+        var ffmpegCandidates: [URL?] = [bundledFFmpegURL]
+        var ffprobeCandidates: [URL?] = [bundledFFprobeURL]
+        if includeSystemAudioTools {
+            ffmpegCandidates.append(URL(fileURLWithPath: "\(prefix)/ffmpeg"))
+            ffprobeCandidates.append(URL(fileURLWithPath: "\(prefix)/ffprobe"))
+        }
+        ffmpegCandidates.append(releaseBin.appendingPathComponent("ffmpeg"))
+        ffprobeCandidates.append(releaseBin.appendingPathComponent("ffprobe"))
+
+        let ffmpeg = firstExecutable(ffmpegCandidates, fileManager: fileManager)
+        let ffprobe = firstExecutable(ffprobeCandidates, fileManager: fileManager)
+
+        return ResolvedRuntime(
             python: python,
             ffmpeg: ffmpeg,
             ffprobe: ffprobe,
@@ -170,20 +184,46 @@ public enum RuntimeEnvironment {
             helper: helper,
             isDeveloperRuntime: isDeveloperRuntime
         )
-        // At this point we only need a physical-file check. Trust is enforced
-        // immediately below by the injected verifier for release runtimes.
+    }
+
+    public static func resolve(
+        paths: ApplicationPaths,
+        settings: AppSettings,
+        bundledHelperURL: URL?,
+        bundledFFmpegURL: URL? = nil,
+        bundledFFprobeURL: URL? = nil,
+        includeSystemAudioTools: Bool = true,
+        releaseRuntimeVerifier: ((ResolvedRuntime) throws -> Void)? = nil,
+        fileManager: FileManager = .default
+    ) throws -> ResolvedRuntime {
+        let runtime = candidate(
+            paths: paths,
+            settings: settings,
+            bundledHelperURL: bundledHelperURL,
+            bundledFFmpegURL: bundledFFmpegURL,
+            bundledFFprobeURL: bundledFFprobeURL,
+            includeSystemAudioTools: includeSystemAudioTools,
+            fileManager: fileManager
+        )
+
+        let usesCloudAudioTools = settings.backendType == .googleAIStudio
+            || settings.backendType == .vertexAI
+
         let report = inspect(
             runtime,
             backendType: settings.backendType,
             customGCloudPath: settings.customGCloudPath,
-            releaseRuntimeVerified: true,
+            releaseRuntimeVerified: usesCloudAudioTools || runtime.isDeveloperRuntime,
             fileManager: fileManager
         )
         let missing = report.components.filter { !$0.isAvailable }
         guard missing.isEmpty else {
             throw RuntimeEnvironmentError.missingComponents(missing)
         }
-        if !runtime.isDeveloperRuntime {
+
+        // Cloud backends only need ffmpeg/ffprobe (plus gcloud for Vertex).
+        // The old MLX release-runtime verifier does not apply.
+        if !runtime.isDeveloperRuntime && !usesCloudAudioTools {
             guard let releaseRuntimeVerifier else {
                 throw RuntimeEnvironmentError.releaseRuntimeNotVerified
             }
@@ -211,6 +251,8 @@ public enum RuntimeEnvironment {
             // Google AI Studio API 僅需 ffmpeg/ffprobe 進行音訊壓縮與切片
         }
 
+        let usesCloudAudioTools = backendType == .googleAIStudio || backendType == .vertexAI
+
         let components = pairs.map { component, url in
             guard let url else {
                 return EnvironmentComponentReport(
@@ -224,7 +266,10 @@ public enum RuntimeEnvironment {
             let executable = component == .helper
                 ? exists
                 : fileManager.isExecutableFile(atPath: url.path)
-            let trusted = runtime.isDeveloperRuntime || releaseRuntimeVerified || component == .gcloud
+            let trusted = runtime.isDeveloperRuntime
+                || releaseRuntimeVerified
+                || usesCloudAudioTools
+                || component == .gcloud
             let available = executable && trusted
             let detail: String
             if !executable {
@@ -248,5 +293,16 @@ public enum RuntimeEnvironment {
             isDeveloperRuntime: runtime.isDeveloperRuntime,
             backendType: backendType
         )
+    }
+
+    private static func firstExecutable(
+        _ candidates: [URL?],
+        fileManager: FileManager
+    ) -> URL {
+        let urls = candidates.compactMap { $0 }
+        if let match = urls.first(where: { fileManager.isExecutableFile(atPath: $0.path) }) {
+            return match
+        }
+        return urls.last ?? URL(fileURLWithPath: "/usr/bin/false")
     }
 }

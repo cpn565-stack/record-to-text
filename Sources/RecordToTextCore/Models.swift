@@ -460,6 +460,7 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
     public let vertexAIProjectID: String?
     public let vertexAILocation: String
     public let vertexAIModelID: String
+    public let vertexAIGCSBucket: String?
     public let vertexAIIncludeSummary: Bool
 
     public init(
@@ -481,6 +482,7 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
         vertexAIProjectID: String? = nil,
         vertexAILocation: String = "global",
         vertexAIModelID: String = "gemini-3.7-flash",
+        vertexAIGCSBucket: String? = nil,
         vertexAIIncludeSummary: Bool = false
     ) {
         self.modelID = modelID
@@ -507,6 +509,7 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
         self.vertexAIProjectID = vertexAIProjectID
         self.vertexAILocation = vertexAILocation
         self.vertexAIModelID = vertexAIModelID
+        self.vertexAIGCSBucket = vertexAIGCSBucket
         self.vertexAIIncludeSummary = vertexAIIncludeSummary
     }
 
@@ -539,6 +542,7 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
         vertexAIProjectID = try container.decodeIfPresent(String.self, forKey: .vertexAIProjectID)
         vertexAILocation = try container.decodeIfPresent(String.self, forKey: .vertexAILocation) ?? "global"
         vertexAIModelID = try container.decodeIfPresent(String.self, forKey: .vertexAIModelID) ?? "gemini-3.7-flash"
+        vertexAIGCSBucket = try container.decodeIfPresent(String.self, forKey: .vertexAIGCSBucket)
         vertexAIIncludeSummary = try container.decodeIfPresent(Bool.self, forKey: .vertexAIIncludeSummary) ?? false
     }
 }

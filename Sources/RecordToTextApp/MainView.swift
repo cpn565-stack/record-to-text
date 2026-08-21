@@ -37,7 +37,7 @@ struct MainView: View {
                 } label: {
                     Label("環境檢查", systemImage: "checkmark.shield")
                 }
-                .help("環境檢查：確認 Python、ffmpeg、ffprobe、OpenCC 與 ASR helper 是否就緒")
+                .help("環境檢查：確認 ffmpeg／ffprobe 是否就緒（Google AI Studio 使用 App 內建版本）")
                 .accessibilityLabel("環境檢查")
                 .accessibilityHint("開啟執行環境檢查")
 

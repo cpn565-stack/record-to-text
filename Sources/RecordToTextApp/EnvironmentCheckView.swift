@@ -11,7 +11,7 @@ struct EnvironmentCheckView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("環境檢查")
                         .font(.title2.weight(.semibold))
-                    Text("確認目前架構需要的 Runtime、音訊工具與 ASR helper 是否可用。")
+                    Text("確認本機音訊工具（ffmpeg／ffprobe）是否可用。Google AI Studio 會優先使用 App 內建版本。")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }

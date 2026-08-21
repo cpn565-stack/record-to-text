@@ -333,6 +333,16 @@ struct SettingsView: View {
                     )
                     .textFieldStyle(.roundedBorder)
 
+                    TextField(
+                        "GCS Bucket 名稱（可選）",
+                        text: Binding(
+                            get: { viewModel.settings.vertexAIGCSBucket ?? "" },
+                            set: { viewModel.setSetting(\.vertexAIGCSBucket, to: $0.isEmpty ? nil : $0) }
+                        ),
+                        prompt: Text("例：my-transcription-bucket（音訊分離上傳用）")
+                    )
+                    .textFieldStyle(.roundedBorder)
+
                     Picker(
                         "模型選擇",
                         selection: Binding(

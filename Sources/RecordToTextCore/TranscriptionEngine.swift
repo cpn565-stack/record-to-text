@@ -829,6 +829,7 @@ public final class TranscriptionEngine {
                 timeOffset: timeOffset,
                 basePercent: 25.0,
                 maxPercent: 88.0,
+                workingDirectory: workingDirectory,
                 update: update
             )
         } else {
@@ -871,6 +872,7 @@ public final class TranscriptionEngine {
                     timeOffset: segment.startSeconds,
                     basePercent: baseProgress,
                     maxPercent: segMaxProgress,
+                    workingDirectory: workingDirectory,
                     update: update
                 )
 
@@ -926,6 +928,7 @@ public final class TranscriptionEngine {
         timeOffset: Double,
         basePercent: Double,
         maxPercent: Double,
+        workingDirectory: URL? = nil,
         update: @escaping (PipelineUpdate) -> Void
     ) async throws -> String {
         let progressUpdater = Task {
@@ -952,7 +955,11 @@ public final class TranscriptionEngine {
                 mimeType: "audio/mp3",
                 terms: job.snapshot.terms,
                 customPrompt: job.snapshot.prompt,
-                timeOffsetSeconds: timeOffset
+                timeOffsetSeconds: timeOffset,
+                workingDirectory: workingDirectory,
+                logger: { level, message in
+                    update(.log(level: level, message: message))
+                }
             )
             progressUpdater.cancel()
             return text
@@ -984,6 +991,7 @@ public final class TranscriptionEngine {
                 projectID: job.snapshot.vertexAIProjectID,
                 location: resolvedLocation,
                 modelID: job.snapshot.vertexAIModelID,
+                gcsBucket: job.snapshot.vertexAIGCSBucket,
                 includeSummary: job.snapshot.vertexAIIncludeSummary
             )
         )
@@ -1043,6 +1051,7 @@ public final class TranscriptionEngine {
                 timeOffset: timeOffset,
                 basePercent: 25.0,
                 maxPercent: 88.0,
+                workingDirectory: workingDirectory,
                 update: update
             )
         } else {
@@ -1085,6 +1094,7 @@ public final class TranscriptionEngine {
                     timeOffset: segment.startSeconds,
                     basePercent: baseProgress,
                     maxPercent: segMaxProgress,
+                    workingDirectory: workingDirectory,
                     update: update
                 )
 
@@ -1140,6 +1150,7 @@ public final class TranscriptionEngine {
         timeOffset: Double,
         basePercent: Double,
         maxPercent: Double,
+        workingDirectory: URL? = nil,
         update: @escaping (PipelineUpdate) -> Void
     ) async throws -> String {
         let progressUpdater = Task {

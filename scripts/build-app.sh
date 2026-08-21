@@ -4,8 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="${0:A:h}"
 PROJECT_DIR="${SCRIPT_DIR:h}"
 CONFIGURATION="${CONFIGURATION:-debug}"
-VERSION="${VERSION:-0.1.1}"
-BUILD_NUMBER="${BUILD_NUMBER:-20260801-8}"
+VERSION="${VERSION:-0.1.2}"
+BUILD_NUMBER="${BUILD_NUMBER:-20260814-1}"
 UNIVERSAL="${UNIVERSAL:-0}"
 ADHOC_SIGN="${ADHOC_SIGN:-1}"
 BUILD_DIR="${PROJECT_DIR}/.build"
@@ -58,7 +58,16 @@ for resource_bundle in "${BIN_DIR}"/*RecordToTextApp*.bundle(N); do
     "${APP_PATH}/Contents/Resources/${resource_bundle:t}"
 done
 
+"${SCRIPT_DIR}/fetch-bundled-ffmpeg.sh"
+HELPERS_DIR="${APP_PATH}/Contents/Helpers"
+mkdir -p "${HELPERS_DIR}"
+ditto "${PROJECT_DIR}/runtime/macos-arm64/bin/ffmpeg" "${HELPERS_DIR}/ffmpeg"
+ditto "${PROJECT_DIR}/runtime/macos-arm64/bin/ffprobe" "${HELPERS_DIR}/ffprobe"
+chmod 755 "${HELPERS_DIR}/ffmpeg" "${HELPERS_DIR}/ffprobe"
+
 if [[ "${ADHOC_SIGN}" == "1" ]]; then
+  codesign --force --sign - "${HELPERS_DIR}/ffmpeg"
+  codesign --force --sign - "${HELPERS_DIR}/ffprobe"
   codesign --force --sign - "${APP_PATH}"
 fi
 
