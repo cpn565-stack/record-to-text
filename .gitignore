@@ -19,3 +19,5 @@ runtime/macos-arm64/downloads/
 *.p12
 *.cer
 *.mobileprovision
+__pycache__/
+*.pyc
