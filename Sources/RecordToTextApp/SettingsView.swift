@@ -238,6 +238,12 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.segmented)
 
+                if viewModel.settings.backendType == .localQwen {
+                    Text("本機模式：錄音與模型皆留在這台 Mac，不上雲。需要先下載 Qwen ASR 模型。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 if viewModel.settings.backendType == .googleAIStudio {
                     VStack(alignment: .leading, spacing: 8) {
                         SecureField(
@@ -399,6 +405,10 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+
+                if viewModel.settings.backendType == .localQwen {
+                    localQwenModelSettings
+                }
             }
 
             Section {
@@ -409,6 +419,110 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    private var localQwenModelSettings: some View {
+        Group {
+            Picker(
+                "模型",
+                selection: Binding(
+                    get: { viewModel.settings.selectedModelID },
+                    set: { viewModel.setSelectedModelID($0) }
+                )
+            ) {
+                ForEach(viewModel.availableModels) { model in
+                    Text(model.displayName).tag(model.id)
+                }
+                if !viewModel.availableModels.contains(where: {
+                    $0.id == viewModel.settings.selectedModelID
+                }) {
+                    Text(viewModel.settings.selectedModelID)
+                        .tag(viewModel.settings.selectedModelID)
+                }
+            }
+            .disabled(viewModel.modelDownloadPhase.isBusy)
+
+            HStack(spacing: 10) {
+                Button(viewModel.modelDownloadButtonTitle) {
+                    viewModel.downloadSelectedModel()
+                }
+                .disabled(!viewModel.canDownloadSelectedModel)
+
+                if viewModel.modelDownloadPhase.isBusy {
+                    ProgressView()
+                        .controlSize(.small)
+                    Button("取消") {
+                        viewModel.cancelModelDownload()
+                    }
+                } else if viewModel.isSelectedModelCached {
+                    Label("App 模型目錄已就緒", systemImage: "checkmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                } else if viewModel.isSelectedModelInDefaultHFCache {
+                    Label("本機 Hugging Face cache 可匯入", systemImage: "externaldrive.fill.badge.checkmark")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            LabeledContent("模型 ID") {
+                Text(viewModel.settings.selectedModelID)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .multilineTextAlignment(.trailing)
+            }
+
+            if let detail = viewModel.selectedModelDetail {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !viewModel.modelDownloadProgressLine.isEmpty {
+                Text(viewModel.modelDownloadProgressLine)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .lineLimit(4)
+            }
+
+            switch viewModel.modelDownloadPhase {
+            case let .succeeded(message):
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.green)
+            case let .failed(message):
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+            case .idle, .importingLocal, .downloading:
+                EmptyView()
+            }
+
+            Text("下載位置：App 的 Models 目錄。若 ~/.cache/huggingface 已有同模型，會優先本機匯入，避免重複下載。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if CPUArchitecture.current == .x86_64 {
+                Label(
+                    "Intel CPU backend 尚未完成實機驗證，目前為 Experimental。",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
+            } else if viewModel.settings.selectedModelID
+                == ASRModelDescriptor.appleSiliconBF16.id
+            {
+                Text("BF16 體積較大，並需要更多統一記憶體。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .onAppear {
+            viewModel.refreshSelectedModelCacheStatus()
+        }
     }
 
     private var storageSettings: some View {

@@ -131,6 +131,7 @@ public enum OutputLocationMode: String, Codable, CaseIterable, Sendable {
 public enum ASRBackendType: String, Codable, CaseIterable, Sendable {
     case googleAIStudio = "googleAIStudio"
     case vertexAI = "vertexAI"
+    case localQwen = "localQwen"
 
     public var displayName: String {
         switch self {
@@ -138,6 +139,8 @@ public enum ASRBackendType: String, Codable, CaseIterable, Sendable {
             return "Google AI Studio (Gemini API Key)"
         case .vertexAI:
             return "Google Cloud Vertex AI (GCP / ADC)"
+        case .localQwen:
+            return "本機 Qwen ASR（不上雲）"
         }
     }
 }

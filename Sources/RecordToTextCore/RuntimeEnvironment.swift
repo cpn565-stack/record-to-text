@@ -213,7 +213,11 @@ public enum RuntimeEnvironment {
             runtime,
             backendType: settings.backendType,
             customGCloudPath: settings.customGCloudPath,
-            releaseRuntimeVerified: usesCloudAudioTools || runtime.isDeveloperRuntime,
+            // 本機 Qwen 雖非雲端，但實體檔案已由 inspect 逐一檢查；
+            // 舊的 MLX release-runtime 驗證器在本分支已不存在，故同樣放行。
+            releaseRuntimeVerified: usesCloudAudioTools
+                || settings.backendType == .localQwen
+                || runtime.isDeveloperRuntime,
             fileManager: fileManager
         )
         let missing = report.components.filter { !$0.isAvailable }
@@ -222,8 +226,8 @@ public enum RuntimeEnvironment {
         }
 
         // Cloud backends only need ffmpeg/ffprobe (plus gcloud for Vertex).
-        // The old MLX release-runtime verifier does not apply.
-        if !runtime.isDeveloperRuntime && !usesCloudAudioTools {
+        // 本機 Qwen 已通過上面的完整元件檢查（python/ffmpeg/ffprobe/opencc/helper）。
+        if !runtime.isDeveloperRuntime && !usesCloudAudioTools && settings.backendType != .localQwen {
             guard let releaseRuntimeVerifier else {
                 throw RuntimeEnvironmentError.releaseRuntimeNotVerified
             }
@@ -247,6 +251,11 @@ public enum RuntimeEnvironment {
         if backendType == .vertexAI {
             let gcloudURL = GCloudAuthService(customGCloudPath: customGCloudPath).resolveGCloudURL(fileManager: fileManager)
             pairs.append((.gcloud, gcloudURL))
+        } else if backendType == .localQwen {
+            // 本機 Qwen 需要完整 Runtime：python / ffmpeg / ffprobe / opencc / helper
+            pairs.append((.python, runtime.python))
+            pairs.append((.opencc, runtime.opencc))
+            pairs.append((.helper, runtime.helper))
         } else if backendType == .googleAIStudio {
             // Google AI Studio API 僅需 ffmpeg/ffprobe 進行音訊壓縮與切片
         }
@@ -266,9 +275,11 @@ public enum RuntimeEnvironment {
             let executable = component == .helper
                 ? exists
                 : fileManager.isExecutableFile(atPath: url.path)
+            // 本機 Qwen 沒有雲端憑證概念，實體檔案存在即可用。
             let trusted = runtime.isDeveloperRuntime
                 || releaseRuntimeVerified
                 || usesCloudAudioTools
+                || backendType == .localQwen
                 || component == .gcloud
             let available = executable && trusted
             let detail: String

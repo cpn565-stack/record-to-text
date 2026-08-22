@@ -11,7 +11,7 @@ struct EnvironmentCheckView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("環境檢查")
                         .font(.title2.weight(.semibold))
-                    Text("確認本機音訊工具（ffmpeg／ffprobe）是否可用。Google AI Studio 會優先使用 App 內建版本。")
+                    Text("確認轉錄引擎所需工具是否可用。雲端模式檢查 ffmpeg／ffprobe（優先使用 App 內建版本）；本機 Qwen 模式另檢查 Python、OpenCC 與 Helper。")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }

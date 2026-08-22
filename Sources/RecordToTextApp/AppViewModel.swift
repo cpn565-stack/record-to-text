@@ -193,11 +193,16 @@ final class AppViewModel: ObservableObject {
                 return "Vertex AI (\(preset.displayName))"
             }
             return "Vertex AI (\(settings.vertexAIModelID))"
+        case .localQwen:
+            return ASRModelDescriptor.descriptor(id: settings.selectedModelID)?.displayName
+                ?? settings.selectedModelID
         }
     }
 
     var selectedModelIcon: String {
-        "cloud.fill"
+        settings.backendType == .localQwen
+            ? (CPUArchitecture.current == .x86_64 ? "cpu" : "apple.logo")
+            : "cloud.fill"
     }
 
     var appSubtitle: String {
@@ -206,6 +211,8 @@ final class AppViewModel: ObservableObject {
             return "透過 Google AI Studio (Gemini)，極速產出台灣繁體逐字稿。"
         case .vertexAI:
             return "透過 Google Cloud Vertex AI (Gemini)，直接產出台灣繁體逐字稿。"
+        case .localQwen:
+            return "把會議錄音留在這台 Mac，產生可繼續整理的台灣繁體文字稿。"
         }
     }
 
@@ -215,6 +222,8 @@ final class AppViewModel: ObservableObject {
             return GeminiModelDescriptor.presetModels.first(where: { $0.id == settings.googleAIStudioModelID })?.note
         case .vertexAI:
             return GeminiModelDescriptor.presetModels.first(where: { $0.id == settings.vertexAIModelID })?.note
+        case .localQwen:
+            return ASRModelDescriptor.descriptor(id: settings.selectedModelID)?.detail
         }
     }
 

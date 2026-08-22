@@ -556,6 +556,61 @@ tests.check(
 tests.check(
     try {
         let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("record-to-text-local-qwen-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = ApplicationPaths(root: root)
+        let bin = paths.runtimes
+            .appendingPathComponent("current", isDirectory: true)
+            .appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let helperName = CPUArchitecture.current == .x86_64
+            ? "qwen_asr_transformers_runner.py"
+            : "qwen_asr_mlx_runner.py"
+        for name in ["python", "ffmpeg", "ffprobe", "opencc", helperName] {
+            let url = bin.appendingPathComponent(name)
+            try AtomicFileWriter.writeText("#!/bin/sh\nexit 0\n", to: url)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: url.path
+            )
+        }
+
+        var settings = AppSettings.defaultValue(developerMode: false)
+        settings.backendType = .localQwen
+        guard settings.backendType.displayName.contains("本機") else { return false }
+        let runtime = try RuntimeEnvironment.resolve(
+            paths: paths,
+            settings: settings,
+            bundledHelperURL: nil,
+            includeSystemAudioTools: false
+        )
+        let report = RuntimeEnvironment.inspect(runtime, backendType: .localQwen)
+        let components = report.components.map(\.component)
+        return !runtime.isDeveloperRuntime
+            && report.isReady
+            && components.contains(.python)
+            && components.contains(.helper)
+            && components.contains(.opencc)
+    }(),
+    "Local Qwen backend resolves full runtime and inspection is ready without cloud"
+)
+
+tests.check(
+    {
+        var settings = AppSettings.defaultValue(developerMode: false)
+        settings.backendType = .localQwen
+        guard let data = try? JSONEncoder().encode(settings),
+              let decoded = try? JSONDecoder().decode(AppSettings.self, from: data) else {
+            return false
+        }
+        return decoded.backendType == .localQwen
+    }(),
+    "AppSettings persists localQwen backend selection across JSON round-trip"
+)
+
+tests.check(
+    try {
+        let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("record-to-text-no-overwrite-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
         let destination = root.appendingPathComponent("output.txt")
