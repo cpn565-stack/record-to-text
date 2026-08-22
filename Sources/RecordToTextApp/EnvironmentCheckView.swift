@@ -79,7 +79,11 @@ struct EnvironmentCheckView: View {
                         .font(.headline)
                     Text(
                         report.isReady
-                            ? (report.backendType == .googleAIStudio ? "可以開始使用 Google AI Studio (Gemini) 轉錄。" : "可以開始使用 Google Cloud Vertex AI (Gemini) 轉錄。")
+                            ? (report.backendType == .googleAIStudio
+                                ? "可以開始使用 Google AI Studio (Gemini) 轉錄。"
+                                : report.backendType == .vertexAI
+                                    ? "可以開始使用 Google Cloud Vertex AI (Gemini) 轉錄。"
+                                    : "可以開始使用本機 Qwen ASR 轉錄。")
                             : "缺少的元件會在下方標示。"
                     )
                     .font(.caption)

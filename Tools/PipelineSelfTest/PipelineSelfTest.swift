@@ -135,7 +135,8 @@ private struct PipelineSelfTest {
             prompt: prompt.prompt,
             outputLocationMode: .fixedDirectory,
             outputDirectory: outputDirectory.path,
-            keepRawTranscript: false
+            keepRawTranscript: false,
+            backendType: .localQwen
         )
         let sourceSlice = isSlicedScenario
             ? TranscriptionSourceSlice(
