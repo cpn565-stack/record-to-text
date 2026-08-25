@@ -35,6 +35,14 @@ struct SettingsView: View {
     @State private var apiKeyTestResult: String?
     @State private var apiKeyTestSucceeded: Bool?
     @State private var apiKeyDraft = ""
+    // Discovery parses PATH and stats several executables; run it once per
+    // appearance (plus explicit re-detect) instead of on every render.
+    @State private var developerRuntimeDiscovery = DeveloperRuntimeDiscovery(
+        python: URL(fileURLWithPath: "/usr/bin/python3"),
+        openCC: URL(fileURLWithPath: "/opt/homebrew/bin/opencc"),
+        pythonWasDetected: false,
+        openCCWasDetected: false
+    )
 
     var body: some View {
         TabView {
@@ -695,10 +703,11 @@ struct SettingsView: View {
                 }
             }
         }
+        .onAppear(perform: refreshDeveloperRuntimeDiscovery)
     }
 
-    private var developerRuntimeDiscovery: DeveloperRuntimeDiscovery {
-        RuntimeEnvironment.discoverDeveloperRuntime()
+    private func refreshDeveloperRuntimeDiscovery() {
+        developerRuntimeDiscovery = RuntimeEnvironment.discoverDeveloperRuntime()
     }
 
     private func runtimePathSetting(
@@ -723,6 +732,7 @@ struct SettingsView: View {
         viewModel.setSetting(\.customPythonPath, to: nil)
         viewModel.setSetting(\.customHelperPath, to: nil)
         viewModel.setSetting(\.developerMode, to: true)
+        refreshDeveloperRuntimeDiscovery()
         viewModel.refreshEnvironment()
     }
 

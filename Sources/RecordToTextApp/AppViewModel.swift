@@ -236,9 +236,14 @@ final class AppViewModel: ObservableObject {
             persistJobs()
         }
 
-        refreshSelectedModelCacheStatus()
-        // Read-only inventory only — never deletes on startup.
-        runRecoveryScan(presentIfNonEmpty: true)
+        // Model-cache and recovery scans touch many directories; defer them
+        // past the first frame so launch stays responsive. Both only publish
+        // results when ready.
+        Task { [weak self] in
+            self?.refreshSelectedModelCacheStatus()
+            // Read-only inventory only — never deletes on startup.
+            self?.runRecoveryScan(presentIfNonEmpty: true)
+        }
     }
 
     deinit {
@@ -248,6 +253,7 @@ final class AppViewModel: ObservableObject {
         reusableEngine?.cancelCurrentJob()
         modelDownloadTask?.cancel()
         modelDownloadRunner.cancelCurrent()
+        settingsPersistTask?.cancel()
     }
 
     // MARK: - Read-only presentation state
@@ -387,6 +393,13 @@ final class AppViewModel: ObservableObject {
 
     // MARK: - Settings
 
+    /// Typing in a settings field used to hit the disk synchronously on every
+    /// keystroke; changes now coalesce into one write shortly after typing
+    /// stops. Explicit `persistSettings()` calls (credentials, migrations)
+    /// remain immediate.
+    private var settingsPersistTask: Task<Void, Never>?
+    private static let settingsPersistInterval: Duration = .milliseconds(600)
+
     func setSetting<Value>(
         _ keyPath: WritableKeyPath<AppSettings, Value>,
         to value: Value
@@ -398,7 +411,18 @@ final class AppViewModel: ObservableObject {
             return
         }
         settings = updated
-        persistSettings()
+        scheduleSettingsPersist()
+    }
+
+    func scheduleSettingsPersist() {
+        settingsPersistTask?.cancel()
+        settingsPersistTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.settingsPersistInterval)
+            guard let self, !Task.isCancelled else {
+                return
+            }
+            self.persistSettings()
+        }
     }
 
     var googleAIStudioCredentialStorageDescription: String {

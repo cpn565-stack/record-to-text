@@ -431,8 +431,27 @@ def transcribe(request: dict[str, Any]) -> None:
     )
 
 
+def _raise_cancelled(_signal: int, _frame) -> None:
+    raise KeyboardInterrupt
+
+
+def install_signal_handlers() -> None:
+    """Route both SIGINT and SIGTERM through the cancellation path.
+
+    The Swift side escalates SIGINT -> SIGTERM -> SIGKILL. Without a SIGTERM
+    handler, a helper that misses the first signal exits without emitting the
+    `cancelled` event or preserving partial output.
+    """
+
+    signal.signal(signal.SIGINT, _raise_cancelled)
+    try:
+        signal.signal(signal.SIGTERM, _raise_cancelled)
+    except (ValueError, OSError):
+        pass
+
+
 def main() -> int:
-    signal.signal(signal.SIGINT, lambda _signal, _frame: raise_keyboard_interrupt())
+    install_signal_handlers()
     args = parse_args()
     if args.events_jsonl != "-":
         emit(
@@ -443,7 +462,18 @@ def main() -> int:
         )
         return 2
     if args.server:
-        return serve()
+        # A cancel arriving while blocked on stdin must not escape as an
+        # uncaught KeyboardInterrupt traceback.
+        try:
+            return serve()
+        except KeyboardInterrupt:
+            emit(
+                "error",
+                code="cancelled",
+                message="轉錄已取消。",
+                recoverable=True,
+            )
+            return 130
     if not args.request_json:
         emit(
             "error",
@@ -465,7 +495,10 @@ def main() -> int:
         )
         return 130
     except SystemExit as error:
-        return int(error.code or 1)
+        # SystemExit(0)/SystemExit() mean success; only real codes are errors.
+        if error.code is None or error.code == 0:
+            return 0
+        return int(error.code)
     except TokenLimitReached as error:
         emit(
             "error",
@@ -524,10 +557,6 @@ def serve() -> int:
             )
             print(details, file=sys.stderr, flush=True)
     return 0
-
-
-def raise_keyboard_interrupt() -> None:
-    raise KeyboardInterrupt
 
 
 def exception_details(error: Exception) -> str:

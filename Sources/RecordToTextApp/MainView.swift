@@ -853,8 +853,19 @@ private struct RecentJobRow: View {
     let summary: RecentJobSummary
     @ObservedObject var viewModel: AppViewModel
     @State private var isDeletePresented = false
+    // Filesystem stats are captured once per row (and when the summary
+    // changes) instead of on every render of every row.
+    @State private var fileStatus: RecentJobFileStatus = .available
+    @State private var sourceIsAvailable = false
+    @State private var outputIsAvailable = false
 
     var body: some View {
+        statusList
+        .onAppear(perform: refreshAvailability)
+        .onChange(of: summary) { refreshAvailability() }
+    }
+
+    private var statusList: some View {
         HStack(spacing: 11) {
             Image(systemName: statusSymbol)
                 .foregroundStyle(statusColor)
@@ -870,8 +881,8 @@ private struct RecentJobRow: View {
                     Text(summary.stage.displayName)
                         .font(.caption)
                         .foregroundStyle(statusColor)
-                    if let fileStatus = summary.fileStatus().displayName {
-                        Text("・\(fileStatus)")
+                    if let fileStatusName = fileStatus.displayName {
+                        Text("・\(fileStatusName)")
                             .font(.caption)
                             .foregroundStyle(.orange)
                     }
@@ -957,8 +968,18 @@ private struct RecentJobRow: View {
         }
     }
 
+    private func refreshAvailability() {
+        fileStatus = summary.fileStatus()
+        sourceIsAvailable = FileManager.default.fileExists(atPath: summary.sourcePath)
+        if summary.stage == .completed, let outputPath = summary.outputPath {
+            outputIsAvailable = FileManager.default.fileExists(atPath: outputPath)
+        } else {
+            outputIsAvailable = false
+        }
+    }
+
     private var statusSymbol: String {
-        if summary.fileStatus() != .available {
+        if fileStatus != .available {
             return "exclamationmark.triangle.fill"
         }
         switch summary.stage {
@@ -974,7 +995,7 @@ private struct RecentJobRow: View {
     }
 
     private var statusColor: Color {
-        if summary.fileStatus() != .available {
+        if fileStatus != .available {
             return .orange
         }
         switch summary.stage {
@@ -985,17 +1006,6 @@ private struct RecentJobRow: View {
         default:
             return .secondary
         }
-    }
-
-    private var sourceIsAvailable: Bool {
-        FileManager.default.fileExists(atPath: summary.sourcePath)
-    }
-
-    private var outputIsAvailable: Bool {
-        guard summary.stage == .completed, let outputPath = summary.outputPath else {
-            return false
-        }
-        return FileManager.default.fileExists(atPath: outputPath)
     }
 }
 

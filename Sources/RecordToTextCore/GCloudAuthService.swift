@@ -25,6 +25,11 @@ public enum GCloudAuthError: LocalizedError, Equatable {
 }
 
 public final class GCloudAuthService: @unchecked Sendable {
+    /// Standard gcloud user tokens live about an hour, but the CLI does not
+    /// report the real expiry of the token it prints (impersonation policies
+    /// can issue shorter-lived ones). Cache conservatively; anything shorter
+    /// is recovered by the 401 auto-refresh path in the Vertex backend.
+    private static let cachedTokenTTL: TimeInterval = 30 * 60
     private struct CachedToken {
         let token: String
         let expiresAt: Date
@@ -116,23 +121,15 @@ public final class GCloudAuthService: @unchecked Sendable {
                 inactivityTimeout: 15
             )
 
-            if result.terminationStatus != 0 {
-                throw GCloudAuthError.commandFailed(
-                    status: result.terminationStatus,
-                    message: result.standardErrorText
-                )
-            }
-
             let token = result.standardOutputText.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !token.isEmpty else {
                 throw GCloudAuthError.tokenEmpty
             }
 
-            // Token 預設有效時間為 1 小時，我們快取 45 分鐘
             lock.withLock {
                 cachedToken = CachedToken(
                     token: token,
-                    expiresAt: Date().addingTimeInterval(45 * 60)
+                    expiresAt: Date().addingTimeInterval(Self.cachedTokenTTL)
                 )
             }
 
