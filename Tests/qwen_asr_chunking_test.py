@@ -16,6 +16,7 @@ from qwen_asr_chunking import (  # noqa: E402
     TokenLimitReached,
     TranscriptAccumulator,
     generate_span_with_token_guard,
+    join_transcript_parts,
     remove_prompt_echo,
 )
 
@@ -283,6 +284,37 @@ class PromptEchoTests(unittest.TestCase):
             remove_prompt_echo(f"真正內容。\n{prompt}", prompt),
             "真正內容。",
         )
+
+
+class TranscriptJoinTests(unittest.TestCase):
+    def test_cjk_fragments_join_without_spurious_spaces(self) -> None:
+        self.assertEqual(join_transcript_parts(["我們開始", "今天的會議"]), "我們開始今天的會議")
+
+    def test_cjk_punctuation_boundary_does_not_gain_a_space(self) -> None:
+        self.assertEqual(join_transcript_parts(["第一句。", "第二句"]), "第一句。第二句")
+        self.assertEqual(join_transcript_parts(["前半", "，後半"]), "前半，後半")
+        self.assertEqual(
+            join_transcript_parts(["內容", "【此處約缺少 30 秒：模型達到 token 上限，已跳過此片段】", "續內容"]),
+            "內容【此處約缺少 30 秒：模型達到 token 上限，已跳過此片段】續內容",
+        )
+
+    def test_latin_words_keep_a_separator(self) -> None:
+        self.assertEqual(join_transcript_parts(["Michael", "Jordan spoke"]), "Michael Jordan spoke")
+
+    def test_mixed_cjk_and_latin_keeps_a_separator(self) -> None:
+        self.assertEqual(join_transcript_parts(["使用", "MLX 轉錄"]), "使用 MLX 轉錄")
+        self.assertEqual(join_transcript_parts(["finished the report", "然後結束"]), "finished the report 然後結束")
+
+    def test_empty_parts_are_dropped(self) -> None:
+        self.assertEqual(join_transcript_parts(["", "內容", "", "續"]), "內容續")
+        self.assertEqual(join_transcript_parts([]), "")
+
+    def test_accumulator_text_has_no_space_between_chinese_chunks(self) -> None:
+        accumulator = TranscriptAccumulator(prompt="請忠實轉錄。")
+        accumulator.record_completed_text("上半段的內容")
+        accumulator.record_completed_text("下半段的內容。")
+
+        self.assertEqual(accumulator.text, "上半段的內容下半段的內容。")
 
 
 if __name__ == "__main__":

@@ -193,6 +193,12 @@ private final class PersistentASRHelperSession: @unchecked Sendable {
         self.environment = environment
     }
 
+    /// Persistent sessions freeze the helper environment (HF cache, offline
+    /// flags) at first use; a settings change must recycle the session.
+    func matchesEnvironment(_ other: [String: String]) -> Bool {
+        environment == other
+    }
+
     deinit {
         stop()
     }
@@ -228,9 +234,9 @@ private final class PersistentASRHelperSession: @unchecked Sendable {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation {
                 (continuation: CheckedContinuation<Void, Error>) in
-                let input: FileHandle? = lock.withLock {
+                let acquired: Bool = lock.withLock {
                     guard requestContinuation == nil else {
-                        return nil
+                        return false
                     }
                     requestContinuation = continuation
                     self.stdoutLineHandler = { line in
@@ -241,14 +247,28 @@ private final class PersistentASRHelperSession: @unchecked Sendable {
                         activity.recordActivity()
                         stderrLineHandler(line)
                     }
-                    return inputPipe?.fileHandleForWriting
+                    return true
                 }
 
+                guard acquired else {
+                    // Reject this caller only; the in-flight request keeps its
+                    // own continuation untouched.
+                    continuation.resume(
+                        throwing: ASRBackendError.helperFailed(
+                            status: -1,
+                            message: "ASR Helper 同時只能處理一個請求。",
+                            technicalDetails: ""
+                        )
+                    )
+                    return
+                }
+
+                let input: FileHandle? = lock.withLock { inputPipe?.fileHandleForWriting }
                 guard let input else {
                     finishRequest(
                         with: ASRBackendError.helperFailed(
                             status: -1,
-                            message: "ASR Helper 同時只能處理一個請求。",
+                            message: "ASR Helper 程序已結束，無法寫入請求。",
                             technicalDetails: ""
                         )
                     )
@@ -272,13 +292,15 @@ private final class PersistentASRHelperSession: @unchecked Sendable {
         guard let currentProcess, currentProcess.isRunning else {
             return
         }
-        terminate(currentProcess)
+        ProcessTreeTermination.begin(currentProcess)
     }
 
     func stop() {
         let currentProcess = lock.withLock { () -> Process? in
             let current = process
             process = nil
+            inputPipe?.fileHandleForReading.readabilityHandler = nil
+            errorPipe?.fileHandleForReading.readabilityHandler = nil
             inputPipe = nil
             outputPipe = nil
             errorPipe = nil
@@ -291,7 +313,7 @@ private final class PersistentASRHelperSession: @unchecked Sendable {
         guard let currentProcess, currentProcess.isRunning else {
             return
         }
-        currentProcess.terminate()
+        ProcessTreeTermination.begin(currentProcess)
     }
 
     private func startIfNeeded() throws {
@@ -436,7 +458,7 @@ private final class PersistentASRHelperSession: @unchecked Sendable {
                 timeout: asrHelperInactivityTimeout
             )
         )
-        terminate(currentProcess)
+        ProcessTreeTermination.begin(currentProcess)
     }
 
     private func handleTermination(_ terminated: Process) {
@@ -454,35 +476,14 @@ private final class PersistentASRHelperSession: @unchecked Sendable {
         lock.withLock {
             if process === terminated {
                 process = nil
+                // A partial JSONL line from the crashed helper must not leak
+                // into the next request's event stream.
+                outputBuffer.removeAll()
+                inputPipe?.fileHandleForReading.readabilityHandler = nil
+                errorPipe?.fileHandleForReading.readabilityHandler = nil
                 inputPipe = nil
                 outputPipe = nil
                 errorPipe = nil
-            }
-        }
-    }
-
-    private func terminate(_ process: Process) {
-        let pid = process.processIdentifier
-        if pid > 0 {
-            _ = kill(-pid, SIGINT)
-        }
-        process.interrupt()
-        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2) {
-            guard process.isRunning else {
-                return
-            }
-            if pid > 0 {
-                _ = kill(-pid, SIGTERM)
-            }
-            process.terminate()
-        }
-        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 4) {
-            guard process.isRunning else {
-                return
-            }
-            if pid > 0 {
-                _ = kill(-pid, SIGKILL)
-                _ = kill(pid, SIGKILL)
             }
         }
     }
@@ -614,13 +615,20 @@ public final class HelperASRBackend {
     private func persistentSessionForRequest(
         _ request: ASRRequest
     ) -> PersistentASRHelperSession {
-        sessionLock.withLock {
-            if let persistentSession {
-                return persistentSession
+        let desiredEnvironment = helperEnvironment(request: request)
+        return sessionLock.withLock {
+            if let existing = persistentSession {
+                if existing.matchesEnvironment(desiredEnvironment) {
+                    return existing
+                }
+                // Offline flag or model cache changed; the frozen environment
+                // inside the old session would silently misapply settings.
+                existing.stop()
+                persistentSession = nil
             }
             let session = PersistentASRHelperSession(
                 runtime: runtime,
-                environment: helperEnvironment(request: request)
+                environment: desiredEnvironment
             )
             persistentSession = session
             return session

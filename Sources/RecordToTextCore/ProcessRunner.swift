@@ -237,63 +237,99 @@ public final class ProcessRunner: @unchecked Sendable {
             throw CancellationError()
         }
 
-        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
-            capture.appendStdout(handle.availableData)
-        }
-        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
-            capture.appendStderr(handle.availableData)
-        }
-
         let result: ProcessResult
         do {
             result = try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation { continuation in
-                    var resumed = false
-                    let resumeLock = NSLock()
-                    func resumeOnce(_ body: () -> Void) {
-                        resumeLock.lock()
-                        defer { resumeLock.unlock() }
-                        guard !resumed else {
-                            return
-                        }
-                        resumed = true
-                        body()
-                    }
+                    let session = ProcessLaunchSession()
 
-                    process.terminationHandler = { [weak self] terminated in
+                    session.handleNormalCompletion = { [weak self] status, reason in
                         stdoutPipe.fileHandleForReading.readabilityHandler = nil
                         stderrPipe.fileHandleForReading.readabilityHandler = nil
-
-                        capture.appendStdout(stdoutPipe.fileHandleForReading.readDataToEndOfFile())
-                        capture.appendStderr(stderrPipe.fileHandleForReading.readDataToEndOfFile())
                         let captured = capture.finish()
-
                         self?.clear(process)
-                        resumeOnce {
-                            continuation.resume(
-                                returning: ProcessResult(
-                                    terminationStatus: terminated.terminationStatus,
-                                    terminationReason: terminated.terminationReason,
-                                    standardOutput: captured.stdout,
-                                    standardError: captured.stderr
-                                )
+                        continuation.resume(
+                            returning: ProcessResult(
+                                terminationStatus: status,
+                                terminationReason: reason,
+                                standardOutput: captured.stdout,
+                                standardError: captured.stderr
                             )
+                        )
+                    }
+                    // Nothing valid was launched (or launch was cancelled);
+                    // release our pipe fds instead of leaking them.
+                    session.handleAbort = { [weak self] error in
+                        stdoutPipe.fileHandleForReading.readabilityHandler = nil
+                        stderrPipe.fileHandleForReading.readabilityHandler = nil
+                        try? stdoutPipe.fileHandleForReading.close()
+                        try? stderrPipe.fileHandleForReading.close()
+                        self?.clear(process)
+                        continuation.resume(throwing: error)
+                    }
+
+                    // EOF-driven completion: readability handlers keep draining
+                    // until the kernel delivers a zero-byte read (all write
+                    // ends closed). A blocking readDataToEndOfFile() would hang
+                    // forever when orphaned grandchildren inherit the pipes, so
+                    // completion waits for both EOF *and* exit, with a forced
+                    // deadline as the last resort.
+                    stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+                        let data = handle.availableData
+                        if data.isEmpty {
+                            handle.readabilityHandler = nil
+                            if let exit = session.notePipeEOF() {
+                                session.handleNormalCompletion?(exit.status, exit.reason)
+                            }
+                        } else {
+                            capture.appendStdout(data)
+                        }
+                    }
+                    stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+                        let data = handle.availableData
+                        if data.isEmpty {
+                            handle.readabilityHandler = nil
+                            if let exit = session.notePipeEOF() {
+                                session.handleNormalCompletion?(exit.status, exit.reason)
+                            }
+                        } else {
+                            capture.appendStderr(data)
+                        }
+                    }
+
+                    process.terminationHandler = { terminated in
+                        if let exit = session.noteExit(
+                            status: terminated.terminationStatus,
+                            reason: terminated.terminationReason
+                        ) {
+                            session.handleNormalCompletion?(exit.status, exit.reason)
+                        }
+                        // Orphaned grandchildren holding inherited pipes delay
+                        // EOF indefinitely; force completion after a grace
+                        // period rather than hanging this call forever.
+                        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 10) {
+                            if let exit = session.forceDeadline() {
+                                session.handleNormalCompletion?(exit.status, exit.reason)
+                            }
                         }
                     }
 
                     do {
                         // Abort if cancelled while setting up handlers.
                         if self.lock.withLock({ self.cancelRequested }) || Task.isCancelled {
-                            self.clear(process)
-                            resumeOnce {
-                                continuation.resume(throwing: CancellationError())
+                            if session.claimAbort() {
+                                session.handleAbort?(CancellationError())
                             }
                             return
                         }
 
                         try process.run()
 
-                        // Become process-group leader so cancel can signal the tree.
+                        // Best-effort process-group creation so cancel can
+                        // signal the tree. This races with the child's exec
+                        // and may fail silently; ProcessTreeTermination also
+                        // walks descendants, so correctness never relies on
+                        // this call succeeding.
                         let pid = process.processIdentifier
                         if pid > 0 {
                             _ = setpgid(pid, 0)
@@ -304,15 +340,14 @@ public final class ProcessRunner: @unchecked Sendable {
                             inactivityTimeout: inactivityTimeout
                         )
 
-                        // Cancel raced in between run() and setpgid — kill now.
+                        // Cancel raced in between run() and setup — kill now.
                         if self.lock.withLock({ self.cancelRequested }) || Task.isCancelled {
-                            self.terminateProcessTree(process)
+                            ProcessTreeTermination.begin(process)
                         }
                     } catch {
-                        self.clear(process)
-                        resumeOnce {
-                            continuation.resume(
-                                throwing: ProcessRunnerError.couldNotLaunch(
+                        if session.claimAbort() {
+                            session.handleAbort?(
+                                ProcessRunnerError.couldNotLaunch(
                                     executable: executableURL.path,
                                     underlying: error
                                 )
@@ -478,37 +513,10 @@ public final class ProcessRunner: @unchecked Sendable {
         }
     }
 
-    /// SIGINT → SIGTERM → SIGKILL against the process group (negative PID)
-    /// so helper children (e.g. Python → MLX workers) are included when
-    /// `setpgid` succeeded after launch.
+    /// SIGINT → SIGTERM → SIGKILL against the process group and every
+    /// discovered descendant.
     private func terminateProcessTree(_ process: Process) {
-        let pid = process.processIdentifier
-        guard pid > 0 else {
-            return
-        }
-
-        // Negative PID = process group. Also interrupt the Process handle.
-        _ = Darwin.kill(-pid, SIGINT)
-        if process.isRunning {
-            process.interrupt()
-        }
-
-        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2) {
-            guard process.isRunning else {
-                return
-            }
-            _ = Darwin.kill(-pid, SIGTERM)
-            process.terminate()
-
-            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2) {
-                guard process.isRunning else {
-                    return
-                }
-                _ = Darwin.kill(-pid, SIGKILL)
-                // Fallback: direct PID if group kill failed.
-                _ = Darwin.kill(pid, SIGKILL)
-            }
-        }
+        ProcessTreeTermination.begin(process)
     }
 
     private func clear(_ process: Process) {
@@ -524,5 +532,166 @@ public final class ProcessRunner: @unchecked Sendable {
             return nil
         }
         watchdog?.cancel()
+    }
+}
+
+/// Owns the single-completion contract for one `run()` invocation: normal
+/// completion requires both pipes at EOF plus process exit; aborts (launch
+/// failure or pre-launch cancel) win immediately; a forced deadline covers
+/// stragglers holding inherited pipes open. Exactly one resume ever fires.
+private final class ProcessLaunchSession: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pipesPendingEOF = 2
+    private var exitStatus: Int32?
+    private var exitReason: Process.TerminationReason?
+    private var resumed = false
+
+    fileprivate var handleNormalCompletion: ((Int32, Process.TerminationReason) -> Void)?
+    fileprivate var handleAbort: ((Error) -> Void)?
+
+    func notePipeEOF() -> (status: Int32, reason: Process.TerminationReason)? {
+        lock.withLock {
+            pipesPendingEOF = max(pipesPendingEOF - 1, 0)
+            return popIfReadyLocked()
+        }
+    }
+
+    /// `terminationStatus` must only be read after exit, so this records the
+    /// values and may claim the completion in one atomic step.
+    func noteExit(
+        status: Int32,
+        reason: Process.TerminationReason
+    ) -> (status: Int32, reason: Process.TerminationReason)? {
+        lock.withLock {
+            exitStatus = status
+            exitReason = reason
+            return popIfReadyLocked()
+        }
+    }
+
+    func forceDeadline() -> (status: Int32, reason: Process.TerminationReason)? {
+        lock.withLock {
+            pipesPendingEOF = 0
+            return popIfReadyLocked()
+        }
+    }
+
+    func claimAbort() -> Bool {
+        lock.withLock {
+            guard !resumed else {
+                return false
+            }
+            resumed = true
+            return true
+        }
+    }
+
+    private func popIfReadyLocked() -> (status: Int32, reason: Process.TerminationReason)? {
+        guard !resumed,
+              pipesPendingEOF == 0,
+              let status = exitStatus,
+              let reason = exitReason
+        else {
+            return nil
+        }
+        resumed = true
+        return (status, reason)
+    }
+}
+
+/// Escalating termination (SIGINT → SIGTERM → SIGKILL) for a spawned process
+/// and its whole descendant tree.
+///
+/// The post-launch `setpgid(pid, 0)` races with the child's exec and usually
+/// fails with `EACCES`, so negative-PID group kills cannot be relied upon.
+/// Descendants are discovered through `kinfo_proc` parent links instead, which
+/// works regardless of whether the group was ever created.
+enum ProcessTreeTermination {
+    static func begin(_ process: Process) {
+        let pid = process.processIdentifier
+        guard pid > 0 else {
+            return
+        }
+
+        deliver(process, pid: pid, signal: SIGINT)
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2) {
+            deliver(process, pid: pid, signal: SIGTERM)
+        }
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 4) {
+            deliver(process, pid: pid, signal: SIGKILL)
+        }
+    }
+
+    private static func deliver(_ process: Process, pid: pid_t, signal sig: Int32) {
+        _ = Darwin.kill(-pid, sig) // Group kill; only valid if setpgid won.
+        _ = Darwin.kill(pid, sig)
+        for descendant in descendantPIDs(of: pid) {
+            _ = Darwin.kill(descendant, sig)
+        }
+        switch sig {
+        case SIGINT:
+            if process.isRunning {
+                process.interrupt()
+            }
+        case SIGTERM:
+            if process.isRunning {
+                process.terminate()
+            }
+        default:
+            break
+        }
+    }
+
+    static func descendantPIDs(of rootPID: pid_t) -> [pid_t] {
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL]
+        var length = 0
+        guard sysctl(&mib, u_int(mib.count), nil, &length, nil, 0) == 0,
+              length > 0
+        else {
+            return []
+        }
+
+        let stride = MemoryLayout<kinfo_proc>.stride
+        var entries: [kinfo_proc] = []
+        var actualLength = 0
+
+        // The process table can grow between the size probe and the copy;
+        // retry with headroom when sysctl reports ENOMEM.
+        for _ in 0..<4 {
+            let count = length / stride + 8
+            entries = Array(repeating: kinfo_proc(), count: count)
+            actualLength = count * stride
+            if sysctl(&mib, u_int(mib.count), &entries, &actualLength, nil, 0) == 0 {
+                break
+            }
+            guard errno == ENOMEM else {
+                return []
+            }
+            var needed = 0
+            guard sysctl(&mib, u_int(mib.count), nil, &needed, nil, 0) == 0,
+                  needed > 0
+            else {
+                return []
+            }
+            length = needed + stride * 8
+        }
+        guard actualLength > 0 else {
+            return []
+        }
+
+        var childrenByParent: [pid_t: [pid_t]] = [:]
+        for entry in entries.prefix(actualLength / stride) {
+            childrenByParent[entry.kp_eproc.e_ppid, default: []].append(entry.kp_proc.p_pid)
+        }
+
+        var descendants: Set<pid_t> = []
+        var queue: [pid_t] = [rootPID]
+        while let current = queue.popLast() {
+            for child in childrenByParent[current] ?? [] where child != rootPID && !descendants.contains(child) {
+                descendants.insert(child)
+                queue.append(child)
+            }
+        }
+        return Array(descendants)
     }
 }

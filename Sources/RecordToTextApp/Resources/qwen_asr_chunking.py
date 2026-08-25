@@ -161,6 +161,46 @@ def _default_emit(_event_type: str, **_payload: Any) -> None:
     return None
 
 
+def _is_cjk_punct(char: str) -> bool:
+    return bool(char) and (
+        (0x3000 <= ord(char) <= 0x303F) or (0xFF00 <= ord(char) <= 0xFFEF)
+    )
+
+
+def _is_cjk_char(char: str) -> bool:
+    return _is_cjk_token(char) or _is_cjk_punct(char)
+
+
+def _needs_word_separator(left: str, right: str) -> bool:
+    """Decide whether two transcript fragments need a space at the seam.
+
+    Chinese text flows without spaces, so no separator is inserted between
+    CJK characters or around CJK punctuation.  A space is only added when it
+    is needed to keep Latin/digit words from gluing together.
+    """
+
+    if not left or not right:
+        return False
+    if _is_cjk_punct(left[-1]) or _is_cjk_punct(right[0]):
+        return False
+    if _is_cjk_token(left[-1]) and _is_cjk_token(right[0]):
+        return False
+    return True
+
+
+def join_transcript_parts(parts: Sequence[str]) -> str:
+    """Join chunk/split fragments without injecting spurious spaces."""
+
+    joined = ""
+    for part in parts:
+        if not part:
+            continue
+        if joined and _needs_word_separator(joined, part):
+            joined += " "
+        joined += part.strip()
+    return joined.strip()
+
+
 class TranscriptAccumulator:
     """Collect cleaned leaf output while retaining failure-quality signals."""
 
@@ -210,7 +250,7 @@ class TranscriptAccumulator:
 
     @property
     def text(self) -> str:
-        return " ".join(part for part in self._parts if part).strip()
+        return join_transcript_parts(self._parts)
 
     @property
     def has_prompt_echo_only_chunk(self) -> bool:
@@ -312,7 +352,7 @@ def generate_span_with_token_guard(
             max_depth=max_depth,
             depth=depth + 1,
         )
-        return " ".join(part for part in (left, right) if part).strip()
+        return join_transcript_parts((left, right))
 
     error = TokenLimitReached(
         label=label,
