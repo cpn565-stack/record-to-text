@@ -122,12 +122,100 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         logger: ((_ level: String, _ message: String) -> Void)? = nil
     ) async throws -> String {
         let currentConfig = getConfiguration()
+        let authService = lock.withLock { self.authService }
 
+        // 1. 取得 Project ID
+        let resolvedProjectID: String
+        if let explicitID = currentConfig.projectID, !explicitID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            resolvedProjectID = explicitID.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            do {
+                resolvedProjectID = try await authService.getDefaultProjectID()
+            } catch {
+                throw VertexAIError.authenticationFailed("無法取得 GCP Project ID：\(error.localizedDescription)")
+            }
+        }
+
+        // 2. 取得 Access Token
+        let accessToken: String
         do {
-            return try await executeGenerateContent(
-                modelID: currentConfig.modelID,
-                audioData: audioData,
-                mimeType: mimeType,
+            accessToken = try await authService.getAccessToken()
+        } catch {
+            throw VertexAIError.authenticationFailed(error.localizedDescription)
+        }
+
+        // 3. 上傳音訊一次。所有重試與模型 fallback 共用同一個參照，
+        //    不穩定的伺服器不該放大付費上傳次數。
+        let preparedAudio = try await prepareAudioPart(
+            bucket: currentConfig.gcsBucket?.trimmingCharacters(in: .whitespacesAndNewlines),
+            authService: authService,
+            accessToken: accessToken,
+            audioData: audioData,
+            mimeType: mimeType,
+            workingDirectory: workingDirectory,
+            logger: logger
+        )
+
+        let resolvedLocation = currentConfig.location.trimmingCharacters(in: .whitespacesAndNewlines)
+        let location = resolvedLocation.isEmpty ? "global" : resolvedLocation
+
+        let text: String
+        do {
+            text = try await runTranscriptionAttempts(
+                preferredModelID: currentConfig.modelID,
+                projectID: resolvedProjectID,
+                location: location,
+                preparedAudio: preparedAudio.audioPart,
+                accessToken: accessToken,
+                authService: authService,
+                audioByteCount: audioData.count,
+                terms: terms,
+                customPrompt: customPrompt,
+                timeOffsetSeconds: timeOffsetSeconds,
+                workingDirectory: workingDirectory,
+                logger: logger
+            )
+        } catch {
+            await deletePreparedGCSObject(
+                preparedAudio,
+                accessToken: accessToken,
+                authService: authService,
+                logger: logger
+            )
+            throw error
+        }
+        await deletePreparedGCSObject(
+            preparedAudio,
+            accessToken: accessToken,
+            authService: authService,
+            logger: logger
+        )
+        return text
+    }
+
+    private func runTranscriptionAttempts(
+        preferredModelID: String,
+        projectID: String,
+        location: String,
+        preparedAudio: [String: Any],
+        accessToken: String,
+        authService: GCloudAuthService,
+        audioByteCount: Int,
+        terms: [String],
+        customPrompt: String,
+        timeOffsetSeconds: Double,
+        workingDirectory: URL?,
+        logger: ((_ level: String, _ message: String) -> Void)?
+    ) async throws -> String {
+        do {
+            return try await executeWithRetries(
+                modelID: preferredModelID,
+                projectID: projectID,
+                location: location,
+                preparedAudio: preparedAudio,
+                accessToken: accessToken,
+                authService: authService,
+                inputByteCount: audioByteCount,
                 terms: terms,
                 customPrompt: customPrompt,
                 timeOffsetSeconds: timeOffsetSeconds,
@@ -135,13 +223,17 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                 logger: logger
             )
         } catch VertexAIError.prohibitedContent {
-            // 若 3.7 Flash 遇到 Google 預先審查誤判（False Positive），自動切換至 Gemini 3.1 Pro 重試
-            if currentConfig.modelID.contains("3.7") {
-                logger?("info", "遇到內容安全政策誤判，自動切換至 Gemini 3.1 Pro 重試。")
-                return try await executeGenerateContent(
+            // 若遇到 Google 預先審查誤判（False Positive），自動切換至 Gemini 3.1 Pro 重試
+            if !preferredModelID.contains("pro") {
+                logger?("info", "遇到內容安全政策誤判，自動 Fallback 至 Gemini 3.1 Pro 重試。")
+                return try await executeWithRetries(
                     modelID: "gemini-3.1-pro-preview",
-                    audioData: audioData,
-                    mimeType: mimeType,
+                    projectID: projectID,
+                    location: location,
+                    preparedAudio: preparedAudio,
+                    accessToken: accessToken,
+                    authService: authService,
+                    inputByteCount: audioByteCount,
                     terms: terms,
                     customPrompt: customPrompt,
                     timeOffsetSeconds: timeOffsetSeconds,
@@ -150,7 +242,262 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                 )
             }
             throw VertexAIError.prohibitedContent("Google 內容安全誤判，建議切換至 Gemini 3.1 Pro。")
+        } catch let error as VertexAIError {
+            // 若 3.7 Flash 在多次重試後依然遇到伺服器尖峰，自動 Fallback。
+            if case let .requestFailed(statusCode, _) = error,
+               Self.isRetryableServerFailure(error)
+            {
+                if preferredModelID.contains("3.7") {
+                    let fallbackModel = "gemini-3.6-flash"
+                    logger?("info", "Gemini 3.7 伺服器尖峰 (HTTP \(statusCode))，自動 Fallback 至 \(fallbackModel) 重試。")
+                    do {
+                        return try await executeWithRetries(
+                            modelID: fallbackModel,
+                            projectID: projectID,
+                            location: location,
+                            preparedAudio: preparedAudio,
+                            accessToken: accessToken,
+                            authService: authService,
+                            inputByteCount: audioByteCount,
+                            terms: terms,
+                            customPrompt: customPrompt,
+                            timeOffsetSeconds: timeOffsetSeconds,
+                            workingDirectory: workingDirectory,
+                            logger: logger
+                        )
+                    } catch is CancellationError {
+                        // 使用者取消不應被解讀成再送另一個付費 fallback 的理由。
+                        throw CancellationError()
+                    } catch let escalationError as VertexAIError
+                        where Self.isRetryableServerFailure(escalationError)
+                    {
+                        logger?("info", "\(fallbackModel) 重試失敗，再次 Fallback 至 gemini-3.1-pro-preview 重試。")
+                        return try await executeWithRetries(
+                            modelID: "gemini-3.1-pro-preview",
+                            projectID: projectID,
+                            location: location,
+                            preparedAudio: preparedAudio,
+                            accessToken: accessToken,
+                            authService: authService,
+                            inputByteCount: audioByteCount,
+                            terms: terms,
+                            customPrompt: customPrompt,
+                            timeOffsetSeconds: timeOffsetSeconds,
+                            workingDirectory: workingDirectory,
+                            logger: logger
+                        )
+                    } catch let fallbackNonRetryable {
+                        // Fallback 嘗試的非可重試錯誤如實回報（fail-closed），
+                        // 不再默默換模型送出更多請求。
+                        throw fallbackNonRetryable
+                    }
+                }
+            }
+            throw error
         }
+    }
+
+    static func isRetryableServerFailure(_ error: VertexAIError) -> Bool {
+        guard case let .requestFailed(statusCode, _) = error else {
+            return false
+        }
+        return GeminiTransportHelper.RetryPolicy.isRetryableStatusCode(statusCode)
+    }
+
+    private struct PreparedAudio {
+        let audioPart: [String: Any]
+        let gcsBucket: String?
+        let gcsObjectName: String?
+    }
+
+    /// Uploads once per transcribe() call; retries reuse the result.
+    private func prepareAudioPart(
+        bucket: String?,
+        authService: GCloudAuthService,
+        accessToken: String,
+        audioData: Data,
+        mimeType: String,
+        workingDirectory: URL?,
+        logger: ((_ level: String, _ message: String) -> Void)?
+    ) async throws -> PreparedAudio {
+        // 第二層優先：若有設定 GCS Bucket 則走 GCS 上傳
+        if let bucket, !bucket.isEmpty {
+            let objectName = "record_to_text_\(UUID().uuidString).mp3"
+            logger?("info", "使用 GCS Bucket (\(bucket)) 串流上傳音訊...")
+
+            do {
+                try await uploadToGCS(
+                    bucket: bucket,
+                    objectName: objectName,
+                    audioData: audioData,
+                    mimeType: mimeType,
+                    accessToken: accessToken,
+                    workingDirectory: workingDirectory,
+                    logger: logger
+                )
+            } catch {
+                await deleteGCSObjectShielded(
+                    bucket: bucket,
+                    objectName: objectName,
+                    accessToken: accessToken,
+                    authService: authService,
+                    logger: logger
+                )
+                throw error
+            }
+
+            return PreparedAudio(
+                audioPart: [
+                    "fileData": [
+                        "mimeType": mimeType,
+                        "fileUri": "gs://\(bucket)/\(objectName)"
+                    ]
+                ],
+                gcsBucket: bucket,
+                gcsObjectName: objectName
+            )
+        }
+
+        // 第一層路徑：Inline Base64 透過檔案串流 POST
+        guard audioData.count <= Self.maximumInlineAudioBytes else {
+            throw VertexAIError.audioPayloadTooLarge(
+                sizeBytes: audioData.count,
+                limitBytes: Self.maximumInlineAudioBytes
+            )
+        }
+
+        let base64Audio = audioData.base64EncodedString()
+        return PreparedAudio(
+            audioPart: [
+                "inlineData": [
+                    "mimeType": mimeType,
+                    "data": base64Audio
+                ]
+            ],
+            gcsBucket: nil,
+            gcsObjectName: nil
+        )
+    }
+
+    private func deletePreparedGCSObject(
+        _ prepared: PreparedAudio,
+        accessToken: String,
+        authService: GCloudAuthService,
+        logger: ((_ level: String, _ message: String) -> Void)?
+    ) async {
+        guard let bucket = prepared.gcsBucket, let objectName = prepared.gcsObjectName else {
+            return
+        }
+        await deleteGCSObjectShielded(
+            bucket: bucket,
+            objectName: objectName,
+            accessToken: accessToken,
+            authService: authService,
+            logger: logger
+        )
+    }
+
+    private func executeWithRetries(
+        modelID: String,
+        projectID: String,
+        location: String,
+        preparedAudio: [String: Any],
+        accessToken: String,
+        authService: GCloudAuthService,
+        inputByteCount: Int,
+        terms: [String],
+        customPrompt: String,
+        timeOffsetSeconds: Double,
+        workingDirectory: URL?,
+        logger: ((_ level: String, _ message: String) -> Void)?
+    ) async throws -> String {
+        let policy = GeminiTransportHelper.RetryPolicy.self
+        var lastError: Error?
+
+        for attempt in 1...policy.maximumAttempts {
+            do {
+                let result = try await generateTranscript(
+                    modelID: modelID,
+                    projectID: projectID,
+                    location: location,
+                    preparedAudio: preparedAudio,
+                    accessToken: accessToken,
+                    authService: authService,
+                    inputByteCount: inputByteCount,
+                    terms: terms,
+                    customPrompt: customPrompt,
+                    timeOffsetSeconds: timeOffsetSeconds,
+                    workingDirectory: workingDirectory,
+                    logger: logger
+                )
+                return result.text
+            } catch let error as VertexAIError {
+                guard case let .requestFailed(statusCode, _) = error,
+                      policy.isRetryableStatusCode(statusCode)
+                else {
+                    throw error
+                }
+                lastError = error
+                if attempt < policy.maximumAttempts {
+                    let backoffSeconds = policy.backoffSeconds(forAttempt: attempt)
+                    logger?("info", "HTTP \(statusCode) 伺服器忙碌，等候 \(Int(backoffSeconds)) 秒後進行第 \(attempt + 1) 次重試...")
+                    try await Task.sleep(nanoseconds: UInt64(backoffSeconds * 1_000_000_000))
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            }
+        }
+
+        if let lastError {
+            throw lastError
+        }
+        throw VertexAIError.requestFailed(statusCode: 503, message: "伺服器忙碌，重試後仍失敗。")
+    }
+
+    private func generateTranscript(
+        modelID: String,
+        projectID: String,
+        location: String,
+        preparedAudio: [String: Any],
+        accessToken: String,
+        authService: GCloudAuthService,
+        inputByteCount: Int,
+        terms: [String],
+        customPrompt: String,
+        timeOffsetSeconds: Double,
+        workingDirectory: URL?,
+        logger: ((_ level: String, _ message: String) -> Void)?
+    ) async throws -> (text: String, accessToken: String) {
+        let host = (location == "global") ? "aiplatform.googleapis.com" : "\(location)-aiplatform.googleapis.com"
+        let endpointString = "https://\(host)/v1/projects/\(projectID)/locations/\(location)/publishers/google/models/\(modelID):generateContent"
+        guard let endpointURL = URL(string: endpointString) else {
+            throw VertexAIError.invalidEndpointURL(endpointString)
+        }
+
+        // 音訊分段永遠只回傳逐字稿。若使用者有勾選摘要，
+        // 由 TranscriptionEngine 在所有分段合併後再做一次文字摘要。
+        let systemInstructionText = buildSystemInstruction()
+        let userPromptText = buildUserPrompt(
+            terms: terms,
+            customPrompt: customPrompt,
+            timeOffsetSeconds: timeOffsetSeconds
+        )
+
+        return try await sendGenerateContentRequest(
+            modelID: modelID,
+            resolvedLocation: location,
+            endpointURL: endpointURL,
+            accessToken: accessToken,
+            authService: authService,
+            inputByteCount: inputByteCount,
+            inputPart: preparedAudio,
+            systemInstructionText: systemInstructionText,
+            userPromptText: userPromptText,
+            requestDescription: "轉錄",
+            maximumOutputTokens: 8_192,
+            workingDirectory: workingDirectory,
+            logger: logger
+        )
     }
 
     /// 對已完成合併的逐字稿產生一次文字摘要。
@@ -223,152 +570,6 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             logger: logger
         )
         return result.text
-    }
-
-    private func executeGenerateContent(
-        modelID: String,
-        audioData: Data,
-        mimeType: String,
-        terms: [String],
-        customPrompt: String,
-        timeOffsetSeconds: Double,
-        workingDirectory: URL?,
-        logger: ((_ level: String, _ message: String) -> Void)?
-    ) async throws -> String {
-        let currentConfig = getConfiguration()
-        let authService = lock.withLock { self.authService }
-
-        // 1. 取得 Project ID
-        let resolvedProjectID: String
-        if let explicitID = currentConfig.projectID, !explicitID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            resolvedProjectID = explicitID.trimmingCharacters(in: .whitespacesAndNewlines)
-        } else {
-            do {
-                resolvedProjectID = try await authService.getDefaultProjectID()
-            } catch {
-                throw VertexAIError.authenticationFailed("無法取得 GCP Project ID：\(error.localizedDescription)")
-            }
-        }
-
-        // 2. 取得 Access Token
-        var accessToken: String
-        do {
-            accessToken = try await authService.getAccessToken()
-        } catch {
-            throw VertexAIError.authenticationFailed(error.localizedDescription)
-        }
-
-        // 3. 組裝 API Endpoint
-        let resolvedLocation = currentConfig.location.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "global" : currentConfig.location.trimmingCharacters(in: .whitespacesAndNewlines)
-        let host = (resolvedLocation == "global") ? "aiplatform.googleapis.com" : "\(resolvedLocation)-aiplatform.googleapis.com"
-        let endpointString = "https://\(host)/v1/projects/\(resolvedProjectID)/locations/\(resolvedLocation)/publishers/google/models/\(modelID):generateContent"
-        guard let endpointURL = URL(string: endpointString) else {
-            throw VertexAIError.invalidEndpointURL(endpointString)
-        }
-
-        // 音訊分段永遠只回傳逐字稿。若使用者有勾選摘要，
-        // 由 TranscriptionEngine 在所有分段合併後再做一次文字摘要。
-        let systemInstructionText = buildSystemInstruction()
-        let userPromptText = buildUserPrompt(
-            terms: terms,
-            customPrompt: customPrompt,
-            timeOffsetSeconds: timeOffsetSeconds
-        )
-
-        let audioPart: [String: Any]
-        var uploadedGCSObjectName: String? = nil
-        let bucket = currentConfig.gcsBucket?.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // 第二層優先：若有設定 GCS Bucket 則走 GCS 上傳
-        if let bucket, !bucket.isEmpty {
-            let objectName = "record_to_text_\(UUID().uuidString).mp3"
-            uploadedGCSObjectName = objectName
-            logger?("info", "使用 GCS Bucket (\(bucket)) 串流上傳音訊...")
-
-            do {
-                try await uploadToGCS(
-                    bucket: bucket,
-                    objectName: objectName,
-                    audioData: audioData,
-                    mimeType: mimeType,
-                    accessToken: accessToken,
-                    workingDirectory: workingDirectory,
-                    logger: logger
-                )
-            } catch {
-                await deleteGCSObjectShielded(
-                    bucket: bucket,
-                    objectName: objectName,
-                    accessToken: accessToken,
-                    authService: authService,
-                    logger: logger
-                )
-                throw error
-            }
-
-            audioPart = [
-                "fileData": [
-                    "mimeType": mimeType,
-                    "fileUri": "gs://\(bucket)/\(objectName)"
-                ]
-            ]
-        } else {
-            // 第一層路徑：Inline Base64 透過檔案串流 POST
-            guard audioData.count <= Self.maximumInlineAudioBytes else {
-                throw VertexAIError.audioPayloadTooLarge(
-                    sizeBytes: audioData.count,
-                    limitBytes: Self.maximumInlineAudioBytes
-                )
-            }
-
-            let base64Audio = audioData.base64EncodedString()
-            audioPart = [
-                "inlineData": [
-                    "mimeType": mimeType,
-                    "data": base64Audio
-                ]
-            ]
-        }
-
-        do {
-            let result = try await sendGenerateContentRequest(
-                modelID: modelID,
-                resolvedLocation: resolvedLocation,
-                endpointURL: endpointURL,
-                accessToken: accessToken,
-                authService: authService,
-                inputByteCount: audioData.count,
-                inputPart: audioPart,
-                systemInstructionText: systemInstructionText,
-                userPromptText: userPromptText,
-                requestDescription: "轉錄",
-                maximumOutputTokens: 8_192,
-                workingDirectory: workingDirectory,
-                logger: logger
-            )
-            accessToken = result.accessToken
-            if let bucket, !bucket.isEmpty, let objectName = uploadedGCSObjectName {
-                await deleteGCSObjectShielded(
-                    bucket: bucket,
-                    objectName: objectName,
-                    accessToken: accessToken,
-                    authService: authService,
-                    logger: logger
-                )
-            }
-            return result.text
-        } catch {
-            if let bucket, !bucket.isEmpty, let objectName = uploadedGCSObjectName {
-                await deleteGCSObjectShielded(
-                    bucket: bucket,
-                    objectName: objectName,
-                    accessToken: accessToken,
-                    authService: authService,
-                    logger: logger
-                )
-            }
-            throw error
-        }
     }
 
     private func sendGenerateContentRequest(
@@ -497,6 +698,9 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             if GeminiTransportHelper.isPOSIXMessageTooLarge(error) {
                 logger?("info", "本機傳輸通道失敗（POSIX 40），正改用全新連線 (TCP/Ephemeral) 重試，非音檔時長問題。")
                 let retrySession = GeminiTransportHelper.makeEphemeralRetrySession(protocolClasses: session.configuration.protocolClasses)
+                // The retry session owns a connection pool; release it as soon
+                // as this single retry finishes instead of leaking one per hit.
+                defer { retrySession.finishTasksAndInvalidate() }
                 var retryRequest = request
                 retryRequest.assumesHTTP3Capable = false
 

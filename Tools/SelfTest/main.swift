@@ -1506,4 +1506,133 @@ tests.check(
     "ProcessRunner timeout kills spawned grandchildren, not just the direct child"
 )
 
+// MARK: - Cloud Retry Policy Tests
+
+tests.check(
+    {
+        URLProtocol.registerClass(MockTransportURLProtocol.self)
+        defer {
+            URLProtocol.unregisterClass(MockTransportURLProtocol.self)
+            MockTransportURLProtocol.requestHandler = nil
+        }
+
+        let tempGCloudDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mock-gcloud-retry-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: tempGCloudDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempGCloudDir) }
+        let mockGCloud = tempGCloudDir.appendingPathComponent("gcloud")
+        try? "#!/bin/sh\nif [ \"$1\" = \"auth\" ]; then echo 'mock-access-token'; exit 0; fi\n".write(to: mockGCloud, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: mockGCloud.path)
+
+        var generateCalls = 0
+        MockTransportURLProtocol.requestHandler = { request in
+            let urlString = request.url?.absoluteString ?? ""
+
+            if urlString.contains(":generateContent") {
+                generateCalls += 1
+                if generateCalls == 1 {
+                    // Transient server overload must be retried, not fatal.
+                    let busy = #"{"error":{"code":503,"message":"overloaded"}}"#
+                    return (
+                        HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!,
+                        Data(busy.utf8)
+                    )
+                }
+                let responseJSON = """
+                {"candidates":[{"content":{"parts":[{"text":"Vertex 重試後成功的逐字稿"}],"role":"model"},"finishReason":"STOP"}]}
+                """
+                return (
+                    HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!,
+                    Data(responseJSON.utf8)
+                )
+            }
+
+            if urlString.contains("storage.googleapis.com") && request.httpMethod == "DELETE" {
+                return (HTTPURLResponse(url: request.url!, statusCode: 204, httpVersion: nil, headerFields: [:])!, Data())
+            }
+
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: [:])!, Data("{}".utf8))
+        }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockTransportURLProtocol.self]
+        let session = URLSession(configuration: config)
+
+        let backend = VertexAIGeminiBackend(
+            authService: GCloudAuthService(customGCloudPath: mockGCloud.path),
+            urlSession: session,
+            configuration: VertexAIGeminiBackend.Configuration(
+                projectID: "retry-proj",
+                location: "global",
+                modelID: "gemini-3.7-flash",
+                gcsBucket: nil
+            )
+        )
+
+        do {
+            let transcript = try blockingAwait {
+                try await backend.transcribe(audioData: Data("small audio".utf8))
+            }
+            return transcript.contains("Vertex 重試後成功的逐字稿") && generateCalls == 2
+        } catch {
+            return false
+        }
+    }(),
+    "VertexAIGeminiBackend retries transient HTTP 503 and succeeds without failing the job"
+)
+
+tests.check(
+    {
+        URLProtocol.registerClass(MockTransportURLProtocol.self)
+        defer {
+            URLProtocol.unregisterClass(MockTransportURLProtocol.self)
+            MockTransportURLProtocol.requestHandler = nil
+        }
+
+        var generateCalls = 0
+        MockTransportURLProtocol.requestHandler = { request in
+            generateCalls += 1
+            if generateCalls <= 3 {
+                // Primary model exhausts its retry budget with server errors.
+                let busy = #"{"error":{"code":503,"message":"high demand"}}"#
+                return (
+                    HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!,
+                    Data(busy.utf8)
+                )
+            }
+            // The fallback model answers with a structurally empty response.
+            return (
+                HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!,
+                Data(#"{"candidates": []}"#.utf8)
+            )
+        }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockTransportURLProtocol.self]
+        let session = URLSession(configuration: config)
+
+        let backend = GoogleAIStudioBackend(
+            urlSession: session,
+            configuration: GoogleAIStudioBackend.Configuration(
+                apiKey: "AIzaTestKey",
+                modelID: "gemini-3.7-flash",
+                useFilesAPI: false
+            )
+        )
+
+        do {
+            _ = try blockingAwait {
+                try await backend.transcribe(audioData: Data("small audio".utf8))
+            }
+            return false
+        } catch GoogleAIStudioError.emptyResponse {
+            // The fallback's own failure must surface, not the stale primary 503.
+            return true
+        } catch {
+            return false
+        }
+    }(),
+    "GoogleAIStudioBackend fallback failure surfaces its real error instead of masking it"
+)
+
 tests.finish()

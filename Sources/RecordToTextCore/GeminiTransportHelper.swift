@@ -89,4 +89,18 @@ public enum GeminiTransportHelper {
         config.timeoutIntervalForResource = 600
         return URLSession(configuration: config)
     }
+
+    /// Shared transient-failure policy for both Gemini cloud backends.
+    public enum RetryPolicy {
+        public static let maximumAttempts = 3
+
+        /// Server-side busy/quota conditions worth retrying with backoff.
+        public static func isRetryableStatusCode(_ statusCode: Int) -> Bool {
+            statusCode == 429 || statusCode == 500 || statusCode == 503
+        }
+
+        public static func backoffSeconds(forAttempt attempt: Int) -> Double {
+            Double(attempt * 2)
+        }
+    }
 }
