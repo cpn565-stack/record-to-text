@@ -140,20 +140,22 @@ final class AppViewModel: ObservableObject {
             startupMessages.append("詞庫無法讀取：\(error.localizedDescription)")
         }
 
-        let loadedRecentJobs: RecentJobCollection
-        do {
-            loadedRecentJobs = try recentJobsRepository.load(default: RecentJobCollection())
-        } catch {
-            loadedRecentJobs = RecentJobCollection()
-            startupMessages.append("最近工作無法讀取：\(error.localizedDescription)")
+        let recentJobsOutcome = LenientCollectionLoader.loadRecentJobs(
+            at: paths.recentJobs,
+            fileManager: fileManager
+        )
+        let loadedRecentJobs = recentJobsOutcome.value
+        if let message = recentJobsOutcome.diagnosticMessage {
+            startupMessages.append(message)
         }
 
-        var loadedLedger: JobLedgerCollection
-        do {
-            loadedLedger = try jobLedgerRepository.load(default: JobLedgerCollection())
-        } catch {
-            loadedLedger = JobLedgerCollection()
-            startupMessages.append("未完成工作記錄無法讀取：\(error.localizedDescription)")
+        let ledgerOutcome = LenientCollectionLoader.loadJobLedger(
+            at: paths.jobLedger,
+            fileManager: fileManager
+        )
+        var loadedLedger = ledgerOutcome.value
+        if let message = ledgerOutcome.diagnosticMessage {
+            startupMessages.append(message)
         }
 
         let legacySettingsAPIKey = Self.normalizedAPIKey(

@@ -1369,4 +1369,141 @@ tests.check(
     "VertexAIGeminiBackend uploads to GCS and references gs:// URI without inline audio"
 )
 
+// MARK: - Lenient Collection Loader Tests
+
+private func makeSelfTestSnapshot() -> JobSnapshot {
+    JobSnapshot(
+        modelID: "mock/model",
+        glossaryID: nil,
+        glossaryName: nil,
+        terms: [],
+        prompt: "忠實轉錄",
+        outputLocationMode: .fixedDirectory,
+        outputDirectory: "/tmp/output",
+        keepRawTranscript: false
+    )
+}
+
+private func makeSelfTestISO8601Encoder() -> JSONEncoder {
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .custom { date, encoder in
+        var container = encoder.singleValueContainer()
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        try container.encode(formatter.string(from: date))
+    }
+    return encoder
+}
+
+tests.check(
+    try {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("record-to-text-lenient-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let url = root.appendingPathComponent("job-ledger.json")
+
+        let job = TranscriptionJob(
+            sourcePath: "/tmp/audio.m4a",
+            snapshot: makeSelfTestSnapshot()
+        )
+        let encoded = try makeSelfTestISO8601Encoder()
+            .encode(JobLedgerCollection(jobs: [job]))
+        guard
+            var object = try? JSONSerialization.jsonObject(with: encoded) as? [String: Any],
+            var jobs = object["jobs"] as? [[String: Any]]
+        else {
+            return false
+        }
+        jobs.insert(["sourcePath": 42], at: 0) // Wrong type: record must be skipped.
+        object["jobs"] = jobs
+        try JSONSerialization.data(withJSONObject: object).write(to: url)
+
+        let outcome = LenientCollectionLoader.loadJobLedger(at: url)
+        guard outcome.skippedRecordCount == 1,
+              outcome.value.jobs.count == 1,
+              outcome.value.jobs.first?.id == job.id,
+              outcome.diagnosticMessage != nil else {
+            return false
+        }
+
+        let siblings = try FileManager.default.contentsOfDirectory(atPath: root.path)
+        return siblings.contains { $0.hasPrefix("job-ledger.json.corrupt-") }
+    }(),
+    "Lenient ledger load skips an incompatible record and quarantines the damaged file"
+)
+
+tests.check(
+    try {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("record-to-text-lenient-garbage-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let url = root.appendingPathComponent("job-ledger.json")
+        try Data("這不是 JSON".utf8).write(to: url)
+
+        let outcome = LenientCollectionLoader.loadJobLedger(at: url)
+        guard outcome.value.jobs.isEmpty, outcome.diagnosticMessage != nil else {
+            return false
+        }
+
+        // A follow-up save recreates a usable store; the backup stays.
+        let repository = JSONRepository<JobLedgerCollection>(url: url)
+        try repository.save(JobLedgerCollection())
+        let siblings = try FileManager.default.contentsOfDirectory(atPath: root.path)
+        return siblings.contains { $0.hasPrefix("job-ledger.json.corrupt-") }
+            && siblings.contains("job-ledger.json")
+    }(),
+    "Unparsable ledger is quarantined instead of being overwritten by a future save"
+)
+
+// MARK: - Process Tree Termination Test
+
+tests.check(
+    {
+        // A shell that spawns its own child: killing the tree must take down
+        // BOTH processes, even though post-launch setpgid usually loses the
+        // race against exec. Before descendant-walking termination existed,
+        // this scenario could also hang run() forever on inherited pipes.
+        let marker = FileManager.default.temporaryDirectory
+            .appendingPathComponent("record-to-text-tree-child-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: marker) }
+
+        let runner = ProcessRunner()
+        do {
+            _ = try blockingAwait {
+                try await runner.run(
+                    executableURL: URL(fileURLWithPath: "/bin/sh"),
+                    arguments: [
+                        "-c",
+                        "sleep 60 & echo $! > '\(marker.path)'; wait"
+                    ],
+                    requireSuccess: false,
+                    timeout: 0.5
+                )
+            }
+            return false
+        } catch ProcessRunnerError.timedOut {
+            // Expected.
+        } catch {
+            return false
+        }
+
+        guard let childPIDString = try? String(contentsOf: marker, encoding: .utf8),
+              let childPID = Int32(childPIDString.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            return false
+        }
+
+        // SIGKILL pass lands ~4s after the initial signal; poll briefly past it.
+        for _ in 0..<80 {
+            if Darwin.kill(childPID, 0) == -1 && errno == ESRCH {
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        return false
+    }(),
+    "ProcessRunner timeout kills spawned grandchildren, not just the direct child"
+)
+
 tests.finish()
