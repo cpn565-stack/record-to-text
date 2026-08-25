@@ -60,7 +60,7 @@ let package = Package(
         ),
         .testTarget(
             name: "RecordToTextCoreTests",
-            dependencies: ["RecordToTextCore"],
+            dependencies: ["RecordToTextCore", "RecordToTextApp"],
             path: "Tests/RecordToTextCoreTests",
             resources: [
                 .copy("Fixtures")

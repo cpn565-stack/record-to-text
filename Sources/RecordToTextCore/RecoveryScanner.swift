@@ -2,7 +2,8 @@ import Foundation
 
 /// Classification for leftover App-managed temp / recovery directories.
 public enum RecoveryItemKind: String, Codable, Equatable, Sendable {
-    /// Temp-Recovery with valid recovery.json and usable WAV (or equivalent).
+    /// A valid item whose partial text can be retrieved and/or whose original
+    /// source can be re-enqueued. It does not imply automatic checkpoint resume.
     case recoverable
     /// UUID job directory under App roots, but incomplete or leftover work temp.
     case orphaned
@@ -31,6 +32,7 @@ public struct RecoveryScanItem: Equatable, Identifiable, Sendable {
     public let hasSegmentManifest: Bool
     public let recognizedFileNames: [String]
     public let unknownEntryNames: [String]
+    public let hasPartialTranscript: Bool
 
     public init(
         jobID: UUID?,
@@ -46,7 +48,8 @@ public struct RecoveryScanItem: Equatable, Identifiable, Sendable {
         hasRecoveryJSON: Bool,
         hasSegmentManifest: Bool,
         recognizedFileNames: [String],
-        unknownEntryNames: [String]
+        unknownEntryNames: [String],
+        hasPartialTranscript: Bool = false
     ) {
         self.jobID = jobID
         self.location = location
@@ -62,6 +65,7 @@ public struct RecoveryScanItem: Equatable, Identifiable, Sendable {
         self.hasSegmentManifest = hasSegmentManifest
         self.recognizedFileNames = recognizedFileNames
         self.unknownEntryNames = unknownEntryNames
+        self.hasPartialTranscript = hasPartialTranscript
     }
 }
 
@@ -111,6 +115,7 @@ public enum RecoveryScanner {
     public static let normalizedWAVFileName = "normalized.wav"
     public static let segmentManifestFileName = "segment-manifest.json"
     public static let segmentsDirectoryName = "segments"
+    public static let partialTranscriptFileName = "partial-transcript.txt"
 
     /// Files the pipeline may leave in a system-temp job directory.
     public static let knownTempJobFileNames: Set<String> = [
@@ -118,13 +123,16 @@ public enum RecoveryScanner {
         "raw.txt",
         "traditional.txt",
         "request.json",
-        "segment-manifest.json"
+        segmentManifestFileName,
+        partialTranscriptFileName
     ]
 
     public static let knownRecoveryFileNames: Set<String> = [
         recoveryJSONFileName,
         normalizedWAVFileName,
-        segmentManifestFileName
+        segmentManifestFileName,
+        segmentsDirectoryName,
+        partialTranscriptFileName
     ]
 
     public struct RecoveryMetadata: Codable, Equatable, Sendable {
@@ -135,6 +143,15 @@ public enum RecoveryScanner {
         public let failureStage: String
         public let createdAt: Date
         public let technicalError: String
+        /// Version 2 cloud failures/cancellations may preserve completed text
+        /// without a normalized WAV. This is retrieval metadata, not an
+        /// automatic-resume contract. All fields remain optional so version 1
+        /// metadata continues to decode unchanged.
+        public let recoveryKind: String?
+        public let backendType: ASRBackendType?
+        public let checkpointFile: String?
+        public let segmentsDirectory: String?
+        public let partialTranscriptFile: String?
 
         public init(
             schemaVersion: Int,
@@ -143,7 +160,12 @@ public enum RecoveryScanner {
             sourceSlice: TranscriptionSourceSlice? = nil,
             failureStage: String,
             createdAt: Date,
-            technicalError: String
+            technicalError: String,
+            recoveryKind: String? = nil,
+            backendType: ASRBackendType? = nil,
+            checkpointFile: String? = nil,
+            segmentsDirectory: String? = nil,
+            partialTranscriptFile: String? = nil
         ) {
             self.schemaVersion = schemaVersion
             self.jobID = jobID
@@ -152,6 +174,11 @@ public enum RecoveryScanner {
             self.failureStage = failureStage
             self.createdAt = createdAt
             self.technicalError = technicalError
+            self.recoveryKind = recoveryKind
+            self.backendType = backendType
+            self.checkpointFile = checkpointFile
+            self.segmentsDirectory = segmentsDirectory
+            self.partialTranscriptFile = partialTranscriptFile
         }
     }
 
@@ -492,6 +519,54 @@ public enum RecoveryScanner {
                         unknown: unknown
                     )
                 }
+                if metadata.recoveryKind == "cloudCheckpoint" {
+                    guard metadata.schemaVersion >= 2, hasManifest else {
+                        return makeItem(
+                            jobID: expectedJobID,
+                            location: .tempRecovery,
+                            kind: .damaged,
+                            directory: directory,
+                            summary: "雲端部分稿資料不完整",
+                            detail: hasManifest
+                                ? "recovery.json 版本或類型不受支援。"
+                                : "缺少 \(segmentManifestFileName)。",
+                            sourcePath: metadata.sourcePath,
+                            sourceSlice: metadata.sourceSlice,
+                            failureStage: metadata.failureStage,
+                            hasWAV: hasWAV,
+                            hasRecoveryJSON: true,
+                            hasManifest: hasManifest,
+                            recognized: recognized,
+                            unknown: unknown
+                        )
+                    }
+                    let backend = metadata.backendType?.displayName ?? "雲端"
+                    let hasPartial = hasUsablePartialTranscript(
+                        in: directory,
+                        fileManager: fileManager
+                    )
+                    return makeItem(
+                        jobID: expectedJobID,
+                        location: .tempRecovery,
+                        kind: .recoverable,
+                        directory: directory,
+                        summary: hasPartial
+                            ? "雲端工作留下可取回的部分稿"
+                            : "雲端工作已停止，沒有可取回文字",
+                        detail: hasPartial
+                            ? "\(backend)；可人工取回已完成片段，不會自動從剩餘片段續跑。重新加入原始錄音會從頭轉錄。\n\(metadata.technicalError)"
+                            : "\(backend)；只有工作記錄與分段 manifest，沒有已完成的文字可取回。如原始錄音仍存在，可重新加入並從頭轉錄。\n\(metadata.technicalError)",
+                        sourcePath: metadata.sourcePath,
+                        sourceSlice: metadata.sourceSlice,
+                        failureStage: metadata.failureStage,
+                        hasWAV: hasWAV,
+                        hasRecoveryJSON: true,
+                        hasManifest: true,
+                        recognized: recognized,
+                        unknown: unknown,
+                        hasPartialTranscript: hasPartial
+                    )
+                }
                 if hasWAV {
                     return makeItem(
                         jobID: expectedJobID,
@@ -634,6 +709,28 @@ public enum RecoveryScanner {
             )
         }
 
+        let hasPartial = hasUsablePartialTranscript(
+            in: directory,
+            fileManager: fileManager
+        )
+        if hasManifest, hasPartial
+        {
+            return makeItem(
+                jobID: expectedJobID,
+                location: .systemTemp,
+                kind: .recoverable,
+                directory: directory,
+                summary: "App 中斷後留下可取回的雲端部分稿",
+                detail: "已保留 \(partialTranscriptFileName) 與分段 manifest；可人工取回已完成片段，不會自動斷點續跑。由於系統暫存沒有來源路徑，請自行重新選擇原始錄音從頭轉錄。",
+                hasWAV: hasWAV,
+                hasRecoveryJSON: false,
+                hasManifest: true,
+                recognized: recognized,
+                unknown: unknown,
+                hasPartialTranscript: true
+            )
+        }
+
         if hasWAV || hasManifest || listing.names.contains(segmentsDirectoryName)
             || !recognized.isEmpty
         {
@@ -691,6 +788,28 @@ public enum RecoveryScanner {
         return (names, names.count)
     }
 
+    /// A filename alone is not enough to promise a retrievable transcript.
+    /// Reject directories, symlinks, invalid UTF-8, and empty/whitespace files.
+    private static func hasUsablePartialTranscript(
+        in directory: URL,
+        fileManager: FileManager
+    ) -> Bool {
+        let partialURL = directory.appendingPathComponent(
+            partialTranscriptFileName
+        )
+        guard
+            let attributes = try? fileManager.attributesOfItem(
+                atPath: partialURL.path
+            ),
+            attributes[.type] as? FileAttributeType == .typeRegular,
+            let data = try? Data(contentsOf: partialURL),
+            let text = String(data: data, encoding: .utf8)
+        else {
+            return false
+        }
+        return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     private static func makeItem(
         jobID: UUID?,
         location: RecoveryItemLocation,
@@ -705,7 +824,8 @@ public enum RecoveryScanner {
         hasRecoveryJSON: Bool,
         hasManifest: Bool,
         recognized: [String],
-        unknown: [String]
+        unknown: [String],
+        hasPartialTranscript: Bool = false
     ) -> RecoveryScanItem {
         RecoveryScanItem(
             jobID: jobID,
@@ -721,7 +841,8 @@ public enum RecoveryScanner {
             hasRecoveryJSON: hasRecoveryJSON,
             hasSegmentManifest: hasManifest,
             recognizedFileNames: recognized,
-            unknownEntryNames: unknown
+            unknownEntryNames: unknown,
+            hasPartialTranscript: hasPartialTranscript
         )
     }
 }

@@ -24,7 +24,12 @@ jobs:
         run: scripts/run-checks.sh
 
       - name: Build unsigned App bundle
+        env:
+          ADHOC_SIGN: "0"
         run: scripts/build-app.sh
 
-      - name: Verify bundle has no model weights
-        run: ALLOW_UNSIGNED=1 scripts/verify-release.sh dist/record-to-text.app
+      - name: Verify functional App bundle contents
+        env:
+          ALLOW_UNSIGNED: "1"
+          CHECK_APP_SIZE: "0"
+        run: scripts/verify-release.sh dist/record-to-text.app

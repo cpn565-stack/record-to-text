@@ -171,13 +171,15 @@ public final class AudioProbeService {
                 .volumeAvailableCapacityKey
             ]
         )
-        if let important = values.volumeAvailableCapacityForImportantUsage {
-            return important
-        }
-        if let standard = values.volumeAvailableCapacity {
-            return Int64(standard)
-        }
-        return nil
+        // On some macOS volumes (including temporary/sandbox locations), the
+        // important-usage value is reported as zero even when the standard
+        // capacity is available. Treat non-positive values as unavailable so
+        // a transient resource-value quirk does not reject every recording.
+        let important = values.volumeAvailableCapacityForImportantUsage
+            .flatMap { $0 > 0 ? $0 : nil }
+        let standard = values.volumeAvailableCapacity
+            .flatMap { $0 > 0 ? Int64($0) : nil }
+        return [important, standard].compactMap { $0 }.min()
     }
 }
 

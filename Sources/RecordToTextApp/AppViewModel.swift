@@ -28,6 +28,13 @@ enum ModelDownloadPhase: Equatable {
     }
 }
 
+enum GoogleAIStudioCredentialStorageState: Equatable {
+    case absent
+    case stored
+    case memoryOnly
+    case unavailable
+}
+
 @MainActor
 final class AppViewModel: ObservableObject {
     @Published private(set) var settings: AppSettings
@@ -41,6 +48,8 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var modelDownloadPhase: ModelDownloadPhase = .idle
     @Published private(set) var modelDownloadProgressLine: String = ""
     @Published private(set) var recoveryScanReport: RecoveryScanReport?
+    @Published private(set) var googleAIStudioCredentialStorageState:
+        GoogleAIStudioCredentialStorageState = .absent
 
     @Published var alert: UserFacingAlert?
     @Published var isPromptPreviewPresented = false
@@ -59,6 +68,9 @@ final class AppViewModel: ObservableObject {
     private let glossaryRepository: JSONRepository<GlossaryCollection>
     private let recentJobsRepository: JSONRepository<RecentJobCollection>
     private let jobLedgerRepository: JSONRepository<JobLedgerCollection>
+    private let credentialStore: any GoogleAIStudioCredentialStoring
+    private let saveSettingsValue: (AppSettings) throws -> Void
+    private let saveJobLedgerValue: (JobLedgerCollection) throws -> Void
     private let fileManager: FileManager
     private let modelDownloadRunner = ProcessRunner()
 
@@ -76,17 +88,32 @@ final class AppViewModel: ObservableObject {
     private var queuePausedForPromptConsent = false
     private var resumeQueueAfterPromptConsent = false
     private var queuePausedForEnvironment = false
+    private var legacySettingsCredentialMigrationPending = false
+    private var legacyLedgerCredentialMigrationPending = false
+    private var credentialStoreSynchronizedForLegacyMigration = false
 
     init(
         paths: ApplicationPaths = .live(),
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        credentialStore: any GoogleAIStudioCredentialStoring = KeychainGoogleAIStudioCredentialStore(),
+        settingsSaveOverride: ((AppSettings) throws -> Void)? = nil,
+        jobLedgerSaveOverride: ((JobLedgerCollection) throws -> Void)? = nil
     ) {
         self.paths = paths
         self.fileManager = fileManager
-        self.settingsRepository = JSONRepository(url: paths.settings)
+        self.credentialStore = credentialStore
+        let settingsRepository = JSONRepository<AppSettings>(url: paths.settings)
+        let jobLedgerRepository = JSONRepository<JobLedgerCollection>(url: paths.jobLedger)
+        self.settingsRepository = settingsRepository
         self.glossaryRepository = JSONRepository(url: paths.glossaries)
         self.recentJobsRepository = JSONRepository(url: paths.recentJobs)
-        self.jobLedgerRepository = JSONRepository(url: paths.jobLedger)
+        self.jobLedgerRepository = jobLedgerRepository
+        self.saveSettingsValue = settingsSaveOverride ?? { value in
+            try settingsRepository.save(value)
+        }
+        self.saveJobLedgerValue = jobLedgerSaveOverride ?? { value in
+            try jobLedgerRepository.save(value)
+        }
 
         var startupMessages: [String] = []
         do {
@@ -95,7 +122,7 @@ final class AppViewModel: ObservableObject {
             startupMessages.append("無法建立 App 資料夾：\(error.localizedDescription)")
         }
 
-        let loadedSettings: AppSettings
+        var loadedSettings: AppSettings
         do {
             loadedSettings = try settingsRepository.load(
                 default: AppSettings.defaultValue(fileManager: fileManager)
@@ -129,6 +156,42 @@ final class AppViewModel: ObservableObject {
             startupMessages.append("未完成工作記錄無法讀取：\(error.localizedDescription)")
         }
 
+        let legacySettingsAPIKey = Self.normalizedAPIKey(
+            loadedSettings.googleAIStudioAPIKey
+        )
+        let legacyLedgerAPIKey = loadedLedger.jobs.lazy.compactMap {
+            Self.normalizedAPIKey($0.snapshot.googleAIStudioAPIKey)
+        }.first
+        let hasLegacySettingsCredential = legacySettingsAPIKey != nil
+        let hasLegacyLedgerCredential = legacyLedgerAPIKey != nil
+        var legacyCredentialStoreSynchronized = false
+        var loadedCredentialStorageState: GoogleAIStudioCredentialStorageState = .absent
+        do {
+            let storedAPIKey = try credentialStore.loadAPIKey()
+            let resolvedAPIKey = storedAPIKey
+                ?? legacySettingsAPIKey
+                ?? legacyLedgerAPIKey
+            if storedAPIKey == nil, resolvedAPIKey != nil {
+                try credentialStore.saveAPIKey(resolvedAPIKey)
+            }
+            loadedSettings.googleAIStudioAPIKey = resolvedAPIKey
+            legacyCredentialStoreSynchronized = hasLegacySettingsCredential
+                || hasLegacyLedgerCredential
+            loadedCredentialStorageState = resolvedAPIKey == nil ? .absent : .stored
+        } catch {
+            // Keep the legacy files untouched until Keychain is available.
+            // Persisting a redacted replacement now would irreversibly lose
+            // the only credential copy.
+            loadedSettings.googleAIStudioAPIKey = legacySettingsAPIKey
+                ?? legacyLedgerAPIKey
+            loadedCredentialStorageState = loadedSettings.googleAIStudioAPIKey == nil
+                ? .unavailable
+                : .memoryOnly
+            startupMessages.append(
+                "Google AI Studio API Key 無法遷移到 Keychain：\(error.localizedDescription)\n舊版檔案已保留未改寫；Keychain 可用前，相關設定或工作記錄可能無法儲存。"
+            )
+        }
+
         var summaries = loadedRecentJobs.jobs
         var didInterruptJobs = false
         for index in loadedLedger.jobs.indices where !loadedLedger.jobs[index].stage.isTerminal {
@@ -146,6 +209,11 @@ final class AppViewModel: ObservableObject {
         self.jobs = loadedLedger.jobs
         self.recentJobs = summaries
         self.isOnboardingPresented = !loadedSettings.hasCompletedOnboarding
+        self.legacySettingsCredentialMigrationPending = hasLegacySettingsCredential
+        self.legacyLedgerCredentialMigrationPending = hasLegacyLedgerCredential
+        self.credentialStoreSynchronizedForLegacyMigration =
+            legacyCredentialStoreSynchronized
+        self.googleAIStudioCredentialStorageState = loadedCredentialStorageState
 
         if !startupMessages.isEmpty {
             self.alert = UserFacingAlert(
@@ -154,7 +222,15 @@ final class AppViewModel: ObservableObject {
             )
         }
 
-        if didInterruptJobs {
+        if hasLegacySettingsCredential, legacyCredentialStoreSynchronized {
+            // Rewrites the old file immediately with the decode-only secret
+            // field omitted by AppSettings.encode(to:), even if Keychain was
+            // unavailable and the credential is memory-only for this launch.
+            persistSettings()
+        }
+
+        if didInterruptJobs || (hasLegacyLedgerCredential && legacyCredentialStoreSynchronized) {
+            // Also sanitizes legacy job snapshots while preserving retry data.
             persistJobs()
         }
 
@@ -208,7 +284,7 @@ final class AppViewModel: ObservableObject {
     var appSubtitle: String {
         switch settings.backendType {
         case .googleAIStudio:
-            return "透過 Google AI Studio (Gemini)，極速產出台灣繁體逐字稿。"
+            return "透過 Google AI Studio (Gemini) 產出台灣繁體逐字稿。"
         case .vertexAI:
             return "透過 Google Cloud Vertex AI (Gemini)，直接產出台灣繁體逐字稿。"
         case .localQwen:
@@ -315,8 +391,151 @@ final class AppViewModel: ObservableObject {
     ) {
         var updated = settings
         updated[keyPath: keyPath] = value
+        if (keyPath as AnyKeyPath) == (\AppSettings.googleAIStudioAPIKey as AnyKeyPath) {
+            setGoogleAIStudioAPIKey(updated.googleAIStudioAPIKey)
+            return
+        }
         settings = updated
         persistSettings()
+    }
+
+    var googleAIStudioCredentialStorageDescription: String {
+        switch googleAIStudioCredentialStorageState {
+        case .absent:
+            return "尚未儲存憑證。貼上後請按「儲存到 Keychain」。"
+        case .stored:
+            if hasPendingGoogleAIStudioCredentialMigration {
+                return "API Key 已儲存於 macOS Keychain，但舊版設定或工作記錄尚未完成去密；請使用同一內容再按一次「儲存到 Keychain」。"
+            }
+            return "目前憑證已儲存於 macOS Keychain。編輯內容不會在每次鍵入時覆蓋舊憑證。"
+        case .memoryOnly:
+            return "目前憑證只在這次 App 開啟期間可用，尚未儲存到 Keychain；可按儲存重試。"
+        case .unavailable:
+            return "Keychain 狀態無法確認或更新；可再按儲存或清除重試。"
+        }
+    }
+
+    var hasPendingGoogleAIStudioCredentialMigration: Bool {
+        legacySettingsCredentialMigrationPending
+            || legacyLedgerCredentialMigrationPending
+    }
+
+    /// Stores the credential in macOS Keychain and only keeps an in-memory
+    /// copy for UI display and transient request execution.
+    @discardableResult
+    func setGoogleAIStudioAPIKey(_ apiKey: String?) -> Bool {
+        let normalized = Self.normalizedAPIKey(apiKey)
+        if normalized == nil {
+            return clearGoogleAIStudioAPIKey()
+        }
+
+        do {
+            try credentialStore.saveAPIKey(normalized)
+            var updated = settings
+            updated.googleAIStudioAPIKey = normalized
+            settings = updated
+            googleAIStudioCredentialStorageState = .stored
+            if legacySettingsCredentialMigrationPending
+                || legacyLedgerCredentialMigrationPending
+            {
+                credentialStoreSynchronizedForLegacyMigration = true
+            }
+            // A successful Keychain write authorizes redacting pending legacy
+            // JSON copies. Report any persistence failure to the caller even
+            // though the credential itself is already safely stored.
+            let settingsSaved = persistSettings()
+            let ledgerSaved = !legacyLedgerCredentialMigrationPending
+                || persistJobs()
+            return settingsSaved && ledgerSaved
+        } catch {
+            credentialStoreSynchronizedForLegacyMigration = false
+            var updated = settings
+            updated.googleAIStudioAPIKey = normalized
+            settings = updated
+            googleAIStudioCredentialStorageState = .memoryOnly
+            alert = UserFacingAlert(
+                title: "無法儲存 API Key",
+                message: "API Key 只會保留到這次開啟 App 結束，可用同一內容重試：\(error.localizedDescription)"
+            )
+            return false
+        }
+    }
+
+    /// Clears a credential as a small transaction. Any legacy JSON copies are
+    /// first backed by a confirmed Keychain value and then redacted. The
+    /// Keychain item is deleted only after every pending redaction succeeds.
+    private func clearGoogleAIStudioAPIKey() -> Bool {
+        let previousSettings = settings
+        let previousAPIKey = Self.normalizedAPIKey(
+            previousSettings.googleAIStudioAPIKey
+        )
+        let hasPendingLegacyCredential = legacySettingsCredentialMigrationPending
+            || legacyLedgerCredentialMigrationPending
+
+        if hasPendingLegacyCredential,
+           !ensureLegacyCredentialStoreIsSynchronized(
+               credential: previousAPIKey
+           )
+        {
+            alert = UserFacingAlert(
+                title: "無法清除 API Key",
+                message: "舊版憑證還沒有安全寫入 Keychain，因此 App 沒有改寫舊版 JSON，也沒有刪除憑證。請稍後再試。"
+            )
+            return false
+        }
+
+        var clearedSettings = settings
+        clearedSettings.googleAIStudioAPIKey = nil
+        settings = clearedSettings
+
+        // Make progress on both files even if one fails. The Keychain value
+        // remains untouched unless both pending legacy copies were redacted.
+        let settingsSanitized = !legacySettingsCredentialMigrationPending
+            || persistSettings()
+        let ledgerSanitized = !legacyLedgerCredentialMigrationPending
+            || persistJobs()
+        guard settingsSanitized, ledgerSanitized else {
+            settings = previousSettings
+            googleAIStudioCredentialStorageState = previousAPIKey == nil
+                ? .unavailable
+                : .stored
+            alert = UserFacingAlert(
+                title: "無法清除 API Key",
+                message: "舊版設定或工作記錄還沒有全部去除憑證，因此 Keychain 內的 API Key 已保留，避免下次開啟時出現不一致。請排除儲存問題後再試。"
+            )
+            return false
+        }
+
+        do {
+            try credentialStore.saveAPIKey(nil)
+            googleAIStudioCredentialStorageState = .absent
+            credentialStoreSynchronizedForLegacyMigration = false
+            return true
+        } catch {
+            let restorationSucceeded: Bool
+            if let previousAPIKey {
+                do {
+                    try credentialStore.saveAPIKey(previousAPIKey)
+                    restorationSucceeded = true
+                } catch {
+                    restorationSucceeded = false
+                }
+            } else {
+                restorationSucceeded = false
+            }
+
+            settings = previousSettings
+            googleAIStudioCredentialStorageState = restorationSucceeded
+                ? .stored
+                : .unavailable
+            alert = UserFacingAlert(
+                title: "無法清除 API Key",
+                message: restorationSucceeded
+                    ? "Keychain 刪除回報失敗，App 已回存原本憑證，目前仍可使用。請再試一次：\(error.localizedDescription)"
+                    : "Keychain 刪除失敗，也無法確認原憑證是否已回存。App 已保留這次開啟期間的憑證，請稍後再試：\(error.localizedDescription)"
+            )
+            return false
+        }
     }
 
     func setTemporaryTerms(_ value: String) {
@@ -411,14 +630,31 @@ final class AppViewModel: ObservableObject {
         persistSettings()
     }
 
-    func resetSettings(keepGlossaries: Bool) {
-        settings = AppSettings.defaultValue(fileManager: fileManager)
+    @discardableResult
+    func resetSettings(keepGlossaries: Bool) -> Bool {
+        let shouldClearCredential = Self.normalizedAPIKey(
+            settings.googleAIStudioAPIKey
+        ) != nil
+            || googleAIStudioCredentialStorageState != .absent
+            || legacySettingsCredentialMigrationPending
+            || legacyLedgerCredentialMigrationPending
+        let credentialCleared = !shouldClearCredential
+            || setGoogleAIStudioAPIKey(nil)
+
+        var resetSettings = AppSettings.defaultValue(fileManager: fileManager)
+        if !credentialCleared {
+            // The reset still applies non-secret preferences, but it must not
+            // claim that a credential was cleared when the transaction failed.
+            resetSettings.googleAIStudioAPIKey = settings.googleAIStudioAPIKey
+        }
+        settings = resetSettings
         if !keepGlossaries {
             glossaryCollection = GlossaryCollection()
             persistGlossaries()
         }
-        persistSettings()
+        let settingsSaved = persistSettings()
         refreshEnvironment()
+        return credentialCleared && settingsSaved
     }
 
     func clearRecentJobs() {
@@ -744,27 +980,9 @@ final class AppViewModel: ObservableObject {
             return
         }
 
-        let snapshot = JobSnapshot(
-            modelID: oldJob.snapshot.modelID,
-            modelRevision: oldJob.snapshot.modelRevision,
-            glossaryID: oldJob.snapshot.glossaryID,
-            glossaryName: oldJob.snapshot.glossaryName,
-            terms: oldJob.snapshot.terms,
-            prompt: oldJob.snapshot.prompt,
-            outputLocationMode: oldJob.snapshot.outputLocationMode,
-            outputDirectory: oldJob.snapshot.outputDirectory,
-            keepRawTranscript: oldJob.snapshot.keepRawTranscript,
-            outputFilenameSuffix: oldJob.snapshot.outputFilenameSuffix,
-            rawFilenameSuffix: oldJob.snapshot.rawFilenameSuffix,
-            backendType: settings.backendType,
-            googleAIStudioAPIKey: settings.googleAIStudioAPIKey,
-            googleAIStudioModelID: settings.googleAIStudioModelID,
-            vertexAIProjectID: settings.vertexAIProjectID,
-            vertexAILocation: settings.vertexAILocation,
-            vertexAIModelID: settings.vertexAIModelID,
-            vertexAIGCSBucket: settings.vertexAIGCSBucket,
-            vertexAIIncludeSummary: settings.vertexAIIncludeSummary
-        )
+        // Preserve every original semantic/runtime choice. Credentials are
+        // injected from Keychain only for the transient execution copy.
+        let snapshot = oldJob.snapshot.withGoogleAIStudioAPIKey(nil)
 
         var retry = TranscriptionJob(
             sourcePath: oldJob.sourcePath,
@@ -1060,7 +1278,7 @@ final class AppViewModel: ObservableObject {
         guard fileManager.fileExists(atPath: url.path) else {
             alert = UserFacingAlert(
                 title: "來源音檔不存在",
-                message: "找不到：\(sourcePath)\n可先在 Finder 顯示復原的 WAV，或重新選擇音檔。"
+                message: "找不到：\(sourcePath)\n可先在 Finder 顯示復原資料，或重新選擇原始音檔。"
             )
             return
         }
@@ -1147,7 +1365,6 @@ final class AppViewModel: ObservableObject {
                 outputFilenameSuffix: settings.resolvedOutputFilenameSuffix,
                 rawFilenameSuffix: settings.resolvedRawFilenameSuffix,
                 backendType: settings.backendType,
-                googleAIStudioAPIKey: settings.googleAIStudioAPIKey,
                 googleAIStudioModelID: settings.googleAIStudioModelID,
                 vertexAIProjectID: settings.vertexAIProjectID,
                 vertexAILocation: settings.vertexAILocation,
@@ -1216,9 +1433,13 @@ final class AppViewModel: ObservableObject {
         persistJobs()
 
         do {
+            guard var currentJob = jobs.first(where: { $0.id == id }) else {
+                return
+            }
+            let jobRuntimeSettings = runtimeSettings(for: currentJob.snapshot)
             let runtime = try RuntimeEnvironment.resolve(
                 paths: paths,
-                settings: settings,
+                settings: jobRuntimeSettings,
                 bundledHelperURL: bundledHelperURL,
                 bundledFFmpegURL: bundledFFmpegURL,
                 bundledFFprobeURL: bundledFFprobeURL
@@ -1235,8 +1456,10 @@ final class AppViewModel: ObservableObject {
             }
             activeEngine = engine
 
-            guard let currentJob = jobs.first(where: { $0.id == id }) else {
-                return
+            if currentJob.snapshot.backendType == .googleAIStudio {
+                currentJob.snapshot = currentJob.snapshot.withGoogleAIStudioAPIKey(
+                    settings.googleAIStudioAPIKey
+                )
             }
 
             let permitsMissingPrompt = allowMissingPrompt.contains(id)
@@ -1280,12 +1503,16 @@ final class AppViewModel: ObservableObject {
             }
         } catch {
             if cancellationRequested.remove(id) != nil || Task.isCancelled {
-                markCancelled(id)
+                markCancelled(id, error: error)
             } else {
                 markFailed(id, error: error)
                 if error is RuntimeEnvironmentError {
                     queuePausedForEnvironment = true
-                    refreshEnvironment()
+                    if let failedJob = jobs.first(where: { $0.id == id }) {
+                        refreshEnvironment(for: failedJob.snapshot)
+                    } else {
+                        refreshEnvironment()
+                    }
                     alert = UserFacingAlert(
                         title: "轉錄環境尚未就緒",
                         message: "\(error.localizedDescription)\n\n其餘工作會留在佇列，完成環境設定後再繼續。"
@@ -1336,17 +1563,83 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    private func markCancelled(_ id: UUID) {
+    private func markCancelled(_ id: UUID, error: Error) {
         guard let index = jobs.firstIndex(where: { $0.id == id }) else {
             return
         }
+        let recoveryFailure = Self.cancellationRecoveryFailure(
+            jobID: id,
+            paths: paths,
+            fileManager: fileManager,
+            technicalDetails: String(reflecting: error)
+        )
         jobs[index].stage = .cancelled
         jobs[index].progressCurrent = nil
         jobs[index].progressTotal = nil
         jobs[index].progressUnit = nil
         jobs[index].completedAt = Date()
-        jobs[index].failure = nil
-        jobs[index].logLines.append("工作已取消。")
+        jobs[index].failure = recoveryFailure
+        if recoveryFailure == nil {
+            jobs[index].logLines.append("工作已取消，未保留未完成文字。")
+        } else {
+            jobs[index].logLines.append(
+                "工作已取消；已完成的雲端片段已保留為未完成稿，可打開或刪除。"
+            )
+            runRecoveryScan(presentIfNonEmpty: false)
+        }
+    }
+
+    static func cancellationRecoveryFailure(
+        jobID: UUID,
+        paths: ApplicationPaths,
+        fileManager: FileManager = .default,
+        technicalDetails: String = "CancellationError"
+    ) -> JobFailure? {
+        let directory = paths.tempRecovery.appendingPathComponent(
+            jobID.uuidString,
+            isDirectory: true
+        )
+        let metadataURL = directory.appendingPathComponent(
+            RecoveryScanner.recoveryJSONFileName
+        )
+        let manifestURL = directory.appendingPathComponent(
+            RecoveryScanner.segmentManifestFileName
+        )
+        let partialURL = directory.appendingPathComponent(
+            RecoveryScanner.partialTranscriptFileName
+        )
+        guard
+            fileManager.fileExists(atPath: metadataURL.path),
+            fileManager.fileExists(atPath: manifestURL.path),
+            fileManager.fileExists(atPath: partialURL.path),
+            (try? TextFileValidator.readNonEmptyUTF8(at: partialURL)) != nil,
+            let metadataData = try? Data(contentsOf: metadataURL)
+        else {
+            return nil
+        }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard
+            let metadata = try? decoder.decode(
+                RecoveryScanner.RecoveryMetadata.self,
+                from: metadataData
+            ),
+            metadata.schemaVersion >= 2,
+            metadata.jobID == jobID,
+            metadata.recoveryKind == "cloudCheckpoint"
+        else {
+            return nil
+        }
+
+        return JobFailure(
+            stage: .cancelled,
+            userMessage: "工作已取消；已完成的片段仍保留在這台 Mac 的 Temp-Recovery，可打開未完成稿或刪除。",
+            technicalDetails: technicalDetails,
+            recoverable: true,
+            recoveryDirectory: directory.path,
+            partialTranscriptPath: partialURL.path
+        )
     }
 
     private func markFailed(_ id: UUID, error: Error) {
@@ -1686,6 +1979,38 @@ final class AppViewModel: ObservableObject {
         )
     }
 
+    /// Resolves a queued job against the settings captured when it was added,
+    /// so changing the UI cannot switch its backend or runtime underneath it.
+    private func runtimeSettings(for snapshot: JobSnapshot) -> AppSettings {
+        settings.applyingRuntimeConfiguration(from: snapshot)
+    }
+
+    private func refreshEnvironment(for snapshot: JobSnapshot) {
+        let resolved = runtimeSettings(for: snapshot)
+        let candidate = RuntimeEnvironment.candidate(
+            paths: paths,
+            settings: resolved,
+            bundledHelperURL: bundledHelperURL,
+            bundledFFmpegURL: bundledFFmpegURL,
+            bundledFFprobeURL: bundledFFprobeURL,
+            fileManager: fileManager
+        )
+        environmentReport = RuntimeEnvironment.inspect(
+            candidate,
+            backendType: snapshot.backendType,
+            customGCloudPath: resolved.customGCloudPath
+        )
+    }
+
+    private static func normalizedAPIKey(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty
+        else {
+            return nil
+        }
+        return trimmed
+    }
+
     private func performCompletionActions(for job: TranscriptionJob) {
         if settings.showNotificationWhenCompleted {
             let content = UNMutableNotificationContent()
@@ -1725,14 +2050,24 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    private func persistSettings() {
+    @discardableResult
+    private func persistSettings() -> Bool {
+        if legacySettingsCredentialMigrationPending,
+           !ensureLegacyCredentialStoreIsSynchronized()
+        {
+            return false
+        }
         do {
-            try settingsRepository.save(settings)
+            try saveSettingsValue(settings)
+            legacySettingsCredentialMigrationPending = false
+            clearLegacyCredentialSynchronizationIfFinished()
+            return true
         } catch {
             alert = UserFacingAlert(
                 title: "無法儲存設定",
                 message: error.localizedDescription
             )
+            return false
         }
     }
 
@@ -1747,7 +2082,8 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    private func persistJobs() {
+    @discardableResult
+    private func persistJobs() -> Bool {
         for job in jobs where job.stage.isTerminal {
             let summary = RecentJobSummary(job: job)
             recentJobs.removeAll(where: { $0.id == summary.id })
@@ -1764,14 +2100,61 @@ final class AppViewModel: ObservableObject {
             terminalHistoryLimit: limit
         )
 
+        if legacyLedgerCredentialMigrationPending,
+           !ensureLegacyCredentialStoreIsSynchronized()
+        {
+            return false
+        }
+
         do {
             try recentJobsRepository.save(RecentJobCollection(jobs: recentJobs))
-            try jobLedgerRepository.save(JobLedgerCollection(jobs: ledgerJobs))
+            try saveJobLedgerValue(JobLedgerCollection(jobs: ledgerJobs))
+            legacyLedgerCredentialMigrationPending = false
+            clearLegacyCredentialSynchronizationIfFinished()
+            return true
         } catch {
             alert = UserFacingAlert(
                 title: "無法儲存工作記錄",
                 message: error.localizedDescription
             )
+            return false
+        }
+    }
+
+    /// Before redacting the only legacy JSON copy, require a confirmed
+    /// Keychain backup. If Keychain is unavailable, the old file remains
+    /// byte-for-byte untouched so the next launch can retry without losing the
+    /// credential.
+    private func ensureLegacyCredentialStoreIsSynchronized(
+        credential explicitCredential: String? = nil
+    ) -> Bool {
+        if credentialStoreSynchronizedForLegacyMigration {
+            return true
+        }
+        do {
+            let credential = explicitCredential ?? Self.normalizedAPIKey(
+                settings.googleAIStudioAPIKey
+            )
+            try credentialStore.saveAPIKey(credential)
+            credentialStoreSynchronizedForLegacyMigration = true
+            googleAIStudioCredentialStorageState = credential == nil
+                ? .absent
+                : .stored
+            return true
+        } catch {
+            alert = UserFacingAlert(
+                title: "舊版 API Key 尚未遷移",
+                message: "Keychain 仍無法儲存 API Key，因此 App 沒有改寫含舊版憑證的 JSON，以避免遺失：\(error.localizedDescription)"
+            )
+            return false
+        }
+    }
+
+    private func clearLegacyCredentialSynchronizationIfFinished() {
+        if !legacySettingsCredentialMigrationPending,
+           !legacyLedgerCredentialMigrationPending
+        {
+            credentialStoreSynchronizedForLegacyMigration = false
         }
     }
 

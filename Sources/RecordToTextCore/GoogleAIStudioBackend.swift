@@ -5,6 +5,7 @@ public enum GoogleAIStudioError: LocalizedError, Equatable {
     case invalidAPIKey(String)
     case requestFailed(statusCode: Int, message: String)
     case prohibitedContent(String)
+    case incompleteResponse(finishReason: String, message: String?)
     case emptyResponse
     case invalidJSONResponse
     case audioPayloadTooLarge(sizeBytes: Int, limitBytes: Int)
@@ -24,6 +25,10 @@ public enum GoogleAIStudioError: LocalizedError, Equatable {
             return "Google AI Studio 請求失敗（HTTP \(statusCode)）：\(trimmed)"
         case let .prohibitedContent(message):
             return "Google 內容安全政策攔截：\(message)"
+        case let .incompleteResponse(finishReason, message):
+            let detail = message?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let suffix = detail.map { "：\($0)" } ?? ""
+            return "Google AI Studio 回應未正常完成（\(finishReason)）\(suffix)。為避免輸出不完整逐字稿，本次工作已停止。"
         case .emptyResponse:
             return "Google AI Studio 未回傳任何文字內容或候選結果。"
         case .invalidJSONResponse:
@@ -172,7 +177,9 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             throw GoogleAIStudioError.prohibitedContent("Google 內容安全誤判，建議切換至 Gemini 3.1 Pro。")
         } catch let error as GoogleAIStudioError {
             // 若 3.7 Flash 在多次重試後依然遇到 503 High Demand，自動 Fallback 至 3.6 Flash 或 3.1 Pro
-            if case let .requestFailed(statusCode, _) = error, (statusCode == 503 || statusCode == 429) {
+            if case let .requestFailed(statusCode, _) = error,
+               Self.isRetryableServerFailure(error)
+            {
                 if currentConfig.modelID.contains("3.7") {
                     let fallbackModel = "gemini-3.6-flash"
                     logger?("info", "Gemini 3.7 伺服器尖峰 (HTTP \(statusCode))，自動 Fallback 至 \(fallbackModel) 重試。")
@@ -187,8 +194,15 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                             workingDirectory: workingDirectory,
                             logger: logger
                         )
-                    } catch {
-                        // 若 3.6 也尖峰，再嘗試 3.1 Pro
+                    } catch is CancellationError {
+                        // A user cancellation must never be interpreted as a
+                        // reason to upload the same paid segment to yet another
+                        // fallback model.
+                        throw CancellationError()
+                    } catch let fallbackError as GoogleAIStudioError
+                        where Self.isRetryableServerFailure(fallbackError)
+                    {
+                        // 若 3.6 也是可重試的伺服器尖峰，再嘗試 3.1 Pro。
                         logger?("info", "\(fallbackModel) 重試失敗，再次 Fallback 至 gemini-3.1-pro-preview 重試。")
                         return try await executeWithRetries(
                             modelID: "gemini-3.1-pro-preview",
@@ -200,11 +214,23 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                             workingDirectory: workingDirectory,
                             logger: logger
                         )
+                    } catch {
+                        // Validation, policy and other non-retryable failures
+                        // must remain fail-closed instead of silently changing
+                        // models and making an additional request.
+                        throw error
                     }
                 }
             }
             throw error
         }
+    }
+
+    static func isRetryableServerFailure(_ error: GoogleAIStudioError) -> Bool {
+        guard case let .requestFailed(statusCode, _) = error else {
+            return false
+        }
+        return statusCode == 429 || statusCode == 500 || statusCode == 503
     }
 
     private func executeWithRetries(
@@ -238,11 +264,13 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                     if attempt < maxAttempts {
                         let backoffSeconds = Double(attempt * 2)
                         logger?("info", "HTTP \(statusCode) 伺服器忙碌，等候 \(Int(backoffSeconds)) 秒後進行第 \(attempt + 1) 次重試...")
-                        try? await Task.sleep(nanoseconds: UInt64(backoffSeconds * 1_000_000_000))
+                        try await Task.sleep(nanoseconds: UInt64(backoffSeconds * 1_000_000_000))
                         continue
                     }
                 }
                 throw error
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 throw error
             }
@@ -299,6 +327,8 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                         "fileUri": fileUri
                     ]
                 ]
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 logger?("warning", "Files API 上傳未成功，降級至串流 Inline Base64 路徑：\(error.localizedDescription)")
                 guard audioData.count <= Self.maximumInlineAudioBytes else {
@@ -333,14 +363,49 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             ]
         }
 
-        defer {
+        do {
+            let text = try await sendGenerateContentRequest(
+                modelID: modelID,
+                endpointURL: endpointURL,
+                apiKey: apiKey,
+                audioData: audioData,
+                audioPart: audioPart,
+                systemInstructionText: systemInstructionText,
+                userPromptText: userPromptText,
+                workingDirectory: workingDirectory,
+                logger: logger
+            )
             if let fileName = uploadedFileName {
-                Task {
-                    await self.deleteRemoteFile(fileName: fileName, apiKey: apiKey, logger: logger)
-                }
+                await deleteRemoteFileShielded(
+                    fileName: fileName,
+                    apiKey: apiKey,
+                    logger: logger
+                )
             }
+            return text
+        } catch {
+            if let fileName = uploadedFileName {
+                await deleteRemoteFileShielded(
+                    fileName: fileName,
+                    apiKey: apiKey,
+                    logger: logger
+                )
+            }
+            throw error
         }
+    }
 
+    private func sendGenerateContentRequest(
+        modelID: String,
+        endpointURL: URL,
+        apiKey: String,
+        audioData: Data,
+        audioPart: [String: Any],
+        systemInstructionText: String,
+        userPromptText: String,
+        workingDirectory: URL?,
+        logger: ((_ level: String, _ message: String) -> Void)?
+    ) async throws -> String {
         let requestBody: [String: Any] = [
             "systemInstruction": [
                 "parts": [
@@ -525,53 +590,97 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
 
         guard let json = try? JSONSerialization.jsonObject(with: uploadData) as? [String: Any],
               let fileObj = json["file"] as? [String: Any],
-              let fileUri = fileObj["uri"] as? String,
               let fileName = fileObj["name"] as? String else {
             throw GoogleAIStudioError.fileUploadFailed("無法解析 Files API 回傳結構")
         }
 
-        var currentState = fileObj["state"] as? String ?? "ACTIVE"
-
-        // 3. 輪詢檔案狀態直到 ACTIVE
-        var waitedSeconds = 0
-        while currentState == "PROCESSING" && waitedSeconds < 60 {
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
-            waitedSeconds += 2
-
-            guard let pollURL = URL(string: "https://generativelanguage.googleapis.com/v1beta/\(fileName)") else {
-                break
+        do {
+            // Once the server gives us a file name, this scope owns cleanup.
+            // Validate the rest of the response only after entering it so a
+            // malformed response cannot orphan the uploaded remote file.
+            guard let fileUri = fileObj["uri"] as? String else {
+                throw GoogleAIStudioError.fileUploadFailed(
+                    "Files API 回傳檔案名稱，但缺少可用的 URI"
+                )
             }
-            var pollRequest = URLRequest(url: pollURL)
-            pollRequest.httpMethod = "GET"
-            pollRequest.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
-            pollRequest.timeoutInterval = 15
+            var currentState = fileObj["state"] as? String ?? "ACTIVE"
 
-            if let (pollData, pollResponse) = try? await urlSession.data(for: pollRequest),
-               let pollHTTP = pollResponse as? HTTPURLResponse, pollHTTP.statusCode == 200,
-               let pollJson = try? JSONSerialization.jsonObject(with: pollData) as? [String: Any] {
-                currentState = pollJson["state"] as? String ?? "ACTIVE"
+            // 3. 輪詢檔案狀態直到 ACTIVE。取消必須向外傳遞，才能立即清理遠端檔案。
+            var waitedSeconds = 0
+            while currentState == "PROCESSING" && waitedSeconds < 60 {
+                try Task.checkCancellation()
+                try await Task.sleep(nanoseconds: 1_500_000_000)
+                waitedSeconds += 2
+
+                guard let pollURL = URL(string: "https://generativelanguage.googleapis.com/v1beta/\(fileName)") else {
+                    throw GoogleAIStudioError.invalidJSONResponse
+                }
+                var pollRequest = URLRequest(url: pollURL)
+                pollRequest.httpMethod = "GET"
+                pollRequest.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
+                pollRequest.timeoutInterval = 15
+
+                let (pollData, pollResponse) = try await urlSession.data(for: pollRequest)
+                guard let pollHTTP = pollResponse as? HTTPURLResponse else {
+                    throw GoogleAIStudioError.invalidJSONResponse
+                }
+                guard pollHTTP.statusCode == 200,
+                      let pollJson = try? JSONSerialization.jsonObject(with: pollData) as? [String: Any]
+                else {
+                    let errorMsg = parseErrorMessage(from: pollData)
+                    throw GoogleAIStudioError.fileUploadFailed("查詢檔案處理狀態失敗（HTTP \(pollHTTP.statusCode)）：\(errorMsg)")
+                }
+                currentState = pollJson["state"] as? String ?? "PROCESSING"
             }
-        }
 
-        if currentState == "FAILED" {
-            throw GoogleAIStudioError.fileUploadFailed("Google 伺服器處理音訊檔案失敗")
-        }
+            if currentState == "FAILED" {
+                throw GoogleAIStudioError.fileUploadFailed("Google 伺服器處理音訊檔案失敗")
+            }
 
-        if currentState == "PROCESSING" {
-            throw GoogleAIStudioError.fileProcessingTimedOut
-        }
+            if currentState == "PROCESSING" {
+                throw GoogleAIStudioError.fileProcessingTimedOut
+            }
 
-        return (fileUri: fileUri, fileName: fileName)
+            guard currentState == "ACTIVE" else {
+                throw GoogleAIStudioError.fileUploadFailed("Google 伺服器回傳未知的檔案狀態：\(currentState)")
+            }
+
+            return (fileUri: fileUri, fileName: fileName)
+        } catch {
+            await deleteRemoteFileShielded(
+                fileName: fileName,
+                apiKey: apiKey,
+                logger: logger
+            )
+            throw error
+        }
+    }
+
+    /// Cleanup must not inherit the transcription task's cancellation state.
+    /// Otherwise URLSession may reject DELETE immediately after the user cancels.
+    private func deleteRemoteFileShielded(
+        fileName: String,
+        apiKey: String,
+        logger: ((_ level: String, _ message: String) -> Void)?
+    ) async {
+        let cleanupFailure = await Task.detached(priority: .utility) { [self] in
+            await deleteRemoteFile(
+                fileName: fileName,
+                apiKey: apiKey
+            )
+        }.value
+        if let cleanupFailure {
+            logger?("warning", "清理 Files API 暫存檔 (\(fileName)) 失敗：\(cleanupFailure)")
+        }
     }
 
     /// 刪除 Files API 遠端暫存檔案
     private func deleteRemoteFile(
         fileName: String,
-        apiKey: String,
-        logger: ((_ level: String, _ message: String) -> Void)?
-    ) async {
+        apiKey: String
+    ) async -> String? {
         guard let deleteURL = URL(string: "https://generativelanguage.googleapis.com/v1beta/\(fileName)") else {
-            return
+            return "無法建立 DELETE URL"
         }
 
         var request = URLRequest(url: deleteURL)
@@ -581,57 +690,41 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
 
         do {
             let (_, response) = try await urlSession.data(for: request)
-            if let httpResponse = response as? HTTPURLResponse, (httpResponse.statusCode == 200 || httpResponse.statusCode == 204 || httpResponse.statusCode == 404) {
-                return
+            if let httpResponse = response as? HTTPURLResponse {
+                if httpResponse.statusCode == 200 || httpResponse.statusCode == 204 || httpResponse.statusCode == 404 {
+                    return nil
+                }
+                return "HTTP \(httpResponse.statusCode)"
             }
+            return "Google 未回傳有效的 HTTP 回應"
         } catch {
-            logger?("warning", "清理 Files API 暫存檔 (\(fileName)) 失敗：\(error.localizedDescription)")
+            return error.localizedDescription
         }
     }
 
-    private func buildSystemInstruction() -> String {
+    func buildSystemInstruction() -> String {
         return """
-你是一位專業的高精度語音逐字稿轉錄專家。請仔細聆聽這段音訊，直接將其轉錄為排版乾淨整齊的「純文字逐字稿 (Plain Text Transcript)」。
+你是一個高精度語音逐字稿工具。請忠實轉錄音訊中實際聽到的內容，保留原意、語序、口語重複與不完整語句，不要摘要、改寫、刪除或補充。
 
-【排版與輸出規範】
-1. 純文字輸出：嚴禁使用任何 Markdown 格式標記（禁止使用 **粗體**、### 標題、--- 分隔線、Markdown 標題文字等）。
-2. 時間標記：大約每 3 至 5 分鐘（或對話主題轉換時）標註一次時間區間，格式固定為：
-[00:00 - 05:00]
-3. 講者分辨與分段：
-   - 請根據不同說話者的聲音特徵區分講者（例如「講者 1：」、「講者 2：」；若音訊中或專有名詞詞庫有提及姓名則標註姓名，如「Tina：」、「David：」）。
-   - 禁止在講者名稱外包覆任何符號（嚴禁寫成 **講者**：）。
-   - 請依據講者輪替與語意對話自然分段換行。
-4. 語言與用詞：一律使用標準「台灣繁體中文 (zh-TW)」輸出，英文專有名詞維持正確大小寫與拼寫。
-5. 嚴禁多餘內容：從音訊第一秒直接開始輸出逐字內容，嚴禁輸出重複內容、前言草稿、開場白（如「好的，以下是逐字稿」）、結尾客套話、背景說明、會議摘要或待辦事項。
-
-【格式範例】
-[00:00 - 05:00]
-講師：大家早，今天我們主要是對齊進度...
-
-學員 1：我學到的是對話、聚焦、對策...
-
-[05:00 - 10:00]
-學員 2：我學到兩點，第一個是...
+只輸出純文字逐字稿，不使用 Markdown，不加時間戳，不自行辨識、命名或標示講者。可依自然停頓與語意分段，但不可新增音訊中沒有的標題、前言、結語、摘要、待辦事項或背景說明。中文使用台灣繁體中文，英文專有名詞維持正確拼寫。
 """
     }
 
-    private func buildUserPrompt(terms: [String], customPrompt: String, timeOffsetSeconds: Double) -> String {
+    func buildUserPrompt(terms: [String], customPrompt: String, timeOffsetSeconds: Double) -> String {
         var parts: [String] = []
 
         if timeOffsetSeconds > 0 {
-            let startMin = Int(timeOffsetSeconds) / 60
-            let startSec = Int(timeOffsetSeconds) % 60
-            let startFormatted = String(format: "%02d:%02d", startMin, startSec)
-            parts.append("【時間基準通知】：本音訊片段在整場錄音中的起始時間為 \(startFormatted)（第 \(Int(timeOffsetSeconds)) 秒）。請將輸出中的所有時間碼依據此起始時間計算與標註（例如起始標記為 [\(startFormatted) - ...]）。")
+            parts.append("這是長錄音中從第 \(Int(timeOffsetSeconds)) 秒開始的獨立片段。只轉錄本片段實際聽到的內容，不要補寫、重複或猜測前後片段。")
         }
 
-        if !terms.isEmpty {
+        let trimmedPrompt = customPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedPrompt.isEmpty {
+            // JobSnapshot.prompt 已是 PromptBuilder 產生的 canonical prompt，內含詞庫；
+            // 不再同時附加 terms，避免詞庫與整份 prompt 重複送出。
+            parts.append(trimmedPrompt)
+        } else if !terms.isEmpty {
             let termsFormatted = terms.map { "- \($0)" }.joined(separator: "\n")
-            parts.append("【專有名詞與詞庫參考（若音訊中有提及，請優先採用以下標準用字與講者姓名）】：\n\(termsFormatted)")
-        }
-
-        if !customPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            parts.append("【補充指示】：\n\(customPrompt)")
+            parts.append("以下詞彙可能出現在錄音中；只有音訊內容相符時才採用，不得自行加入：\n\(termsFormatted)")
         }
 
         parts.append("請直接開始轉錄上述音訊。")
@@ -647,13 +740,14 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         return String(decoding: data, as: UTF8.self)
     }
 
-    private func parseCandidateText(from data: Data) throws -> String {
+    func parseCandidateText(from data: Data) throws -> String {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw GoogleAIStudioError.invalidJSONResponse
         }
 
         if let promptFeedback = json["promptFeedback"] as? [String: Any],
-           let blockReason = promptFeedback["blockReason"] as? String {
+           let blockReason = promptFeedback["blockReason"] as? String,
+           blockReason != "BLOCK_REASON_UNSPECIFIED" {
             let msg = promptFeedback["blockReasonMessage"] as? String ?? blockReason
             if blockReason == "PROHIBITED_CONTENT" {
                 throw GoogleAIStudioError.prohibitedContent(msg)
@@ -663,12 +757,32 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
 
         guard let candidates = json["candidates"] as? [[String: Any]],
               let firstCandidate = candidates.first else {
-            return ""
+            throw GoogleAIStudioError.emptyResponse
+        }
+
+        guard let finishReason = firstCandidate["finishReason"] as? String,
+              !finishReason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            throw GoogleAIStudioError.incompleteResponse(
+                finishReason: "MISSING_FINISH_REASON",
+                message: firstCandidate["finishMessage"] as? String
+            )
+        }
+        let normalizedFinishReason = finishReason.uppercased()
+        guard normalizedFinishReason == "STOP" else {
+            let message = firstCandidate["finishMessage"] as? String
+            if ["SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "RECITATION"].contains(normalizedFinishReason) {
+                throw GoogleAIStudioError.prohibitedContent(message ?? normalizedFinishReason)
+            }
+            throw GoogleAIStudioError.incompleteResponse(
+                finishReason: normalizedFinishReason,
+                message: message
+            )
         }
 
         guard let content = firstCandidate["content"] as? [String: Any],
               let parts = content["parts"] as? [[String: Any]] else {
-            return ""
+            throw GoogleAIStudioError.emptyResponse
         }
 
         var textChunks: [String] = []
@@ -679,7 +793,11 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         }
 
         let combined = textChunks.joined().trimmingCharacters(in: .whitespacesAndNewlines)
-        return sanitizeTranscript(combined)
+        let sanitized = sanitizeTranscript(combined)
+        guard !sanitized.isEmpty else {
+            throw GoogleAIStudioError.emptyResponse
+        }
+        return sanitized
     }
 
     private func sanitizeTranscript(_ rawText: String) -> String {

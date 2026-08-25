@@ -88,9 +88,9 @@ struct OnboardingView: View {
                 .foregroundStyle(Color.accentColor)
 
             VStack(spacing: 8) {
-                Text("雲端高精度 AI 轉錄")
+                Text("選擇適合的轉錄方式")
                     .font(.system(size: 27, weight: .semibold, design: .rounded))
-                Text("record-to-text 透過 Google AI Studio 與 Vertex AI 提供最高精度的語音轉文字。")
+                Text("record-to-text 支援 Google AI Studio、Vertex AI 與本機 Qwen。雲端模式會上傳音訊；本機模式會把內容留在這台 Mac。")
                     .font(.body)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -100,15 +100,15 @@ struct OnboardingView: View {
             VStack(alignment: .leading, spacing: 10) {
                 OnboardingFact(
                     icon: "key.fill",
-                    text: "支援 Google AI Studio API Key 與 Vertex AI 雙管道"
+                    text: "支援 Google AI Studio API Key、Vertex AI 與本機 Qwen"
                 )
                 OnboardingFact(
                     icon: "waveform.badge.magnifyingglass",
-                    text: "長音檔智慧切片無縫合併，保留連續時間標記"
+                    text: "長音檔分段轉錄與順序合併，不加說話者或時間戳"
                 )
                 OnboardingFact(
                     icon: "character.book.closed.fill",
-                    text: "直接輸出精確台灣繁體中文與專有名詞校正"
+                    text: "輸出台灣繁體中文，並提供專有名詞提示"
                 )
             }
             .padding(16)
@@ -167,7 +167,7 @@ struct OnboardingView: View {
             VStack(spacing: 7) {
                 Text("確認轉錄環境")
                     .font(.system(size: 26, weight: .semibold, design: .rounded))
-                Text("確認本機音訊處理工具 (ffmpeg/ffprobe) 與雲端連線設定。")
+                Text("依你選擇的後端，確認音訊工具、雲端憑證或本機 Qwen Runtime。")
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 520)
@@ -183,7 +183,7 @@ struct OnboardingView: View {
                             .font(.headline)
                         Text(
                             report.isReady
-                                ? "可以開始使用 Gemini 雲端轉錄。"
+                                ? "當前選擇的轉錄後端已可使用。"
                                 : "你仍可先進入主畫面，稍後從「設定」或「環境檢查」處理。"
                         )
                         .font(.caption)

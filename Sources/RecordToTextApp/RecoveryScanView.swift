@@ -80,7 +80,7 @@ struct RecoveryScanView: View {
             }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("只會刪除「孤立暫存」與「損壞／異常」目錄，不會刪除「可復原」項目。此操作無法復原。")
+            Text("只會刪除「孤立暫存」與「損壞／異常」目錄，不會刪除「可取回／可重加」項目。此操作無法復原。")
         }
     }
 
@@ -115,7 +115,7 @@ struct RecoveryScanView: View {
 
     private func kindTitle(_ kind: RecoveryItemKind) -> String {
         switch kind {
-        case .recoverable: return "可復原資料"
+        case .recoverable: return "可取回／可重加資料"
         case .orphaned: return "孤立暫存"
         case .damaged: return "損壞項目"
         }
@@ -125,7 +125,7 @@ struct RecoveryScanView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("復原掃描")
                 .font(.title2.weight(.semibold))
-            Text("盤點系統暫存與 Temp-Recovery；可刪除殘留或把可復原的來源音檔重新加入佇列。")
+            Text("盤點系統暫存與 Temp-Recovery；可取回已完成的部分稿，或把仍存在的原始錄音重新加入並從頭轉錄。本功能不會自動斷點續跑。")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }
@@ -135,7 +135,7 @@ struct RecoveryScanView: View {
         let report = viewModel.recoveryScanReport
         return HStack(spacing: 16) {
             summaryChip(
-                title: "可復原",
+                title: "可取回／可重加",
                 count: report?.recoverableCount ?? 0,
                 color: .orange
             )
@@ -233,11 +233,14 @@ private struct RecoveryScanRow: View {
                 if item.hasSegmentManifest {
                     badge("manifest")
                 }
+                if item.hasPartialTranscript {
+                    badge("可取回部分稿")
+                }
                 Spacer()
                 Button("Finder", action: onReveal)
                     .buttonStyle(.bordered)
-                if item.kind == .recoverable {
-                    Button("重新加入來源", action: onRequeue)
+                if canRequeueSource {
+                    Button("從頭重新加入", action: onRequeue)
                         .buttonStyle(.borderedProminent)
                 }
                 Button("刪除…", role: .destructive, action: onDelete)
@@ -249,10 +252,20 @@ private struct RecoveryScanRow: View {
 
     private var kindTitle: String {
         switch item.kind {
-        case .recoverable: return "可復原"
+        case .recoverable: return "可取回／可重加"
         case .orphaned: return "孤立暫存"
         case .damaged: return "損壞／異常"
         }
+    }
+
+    private var canRequeueSource: Bool {
+        guard item.kind == .recoverable,
+              let sourcePath = item.sourcePath,
+              !sourcePath.isEmpty
+        else {
+            return false
+        }
+        return FileManager.default.fileExists(atPath: sourcePath)
     }
 
     private var kindSymbol: String {

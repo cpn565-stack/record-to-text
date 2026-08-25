@@ -1,12 +1,40 @@
 import RecordToTextCore
 import SwiftUI
 
+enum GoogleAIStudioAPIKeyDraftPolicy {
+    static func shouldDisableSave(
+        normalizedDraft: String?,
+        normalizedInMemoryAPIKey: String?,
+        storageState: GoogleAIStudioCredentialStorageState,
+        hasPendingMigration: Bool
+    ) -> Bool {
+        guard let normalizedDraft else {
+            return true
+        }
+        return normalizedDraft == normalizedInMemoryAPIKey
+            && storageState == .stored
+            && !hasPendingMigration
+    }
+
+    static func afterClearAttempt(
+        succeeded: Bool,
+        attemptedDraft: String,
+        inMemoryAPIKey: String?
+    ) -> String {
+        guard !succeeded else {
+            return ""
+        }
+        return inMemoryAPIKey ?? attemptedDraft
+    }
+}
+
 struct SettingsView: View {
     @ObservedObject var viewModel: AppViewModel
     @State private var resetChoice: ResetChoice?
     @State private var isTestingAPIKey = false
     @State private var apiKeyTestResult: String?
     @State private var apiKeyTestSucceeded: Bool?
+    @State private var apiKeyDraft = ""
 
     var body: some View {
         TabView {
@@ -32,6 +60,12 @@ struct SettingsView: View {
         }
         .padding(20)
         .frame(width: 640, height: 520)
+        .onAppear {
+            apiKeyDraft = viewModel.settings.googleAIStudioAPIKey ?? ""
+        }
+        .onChange(of: viewModel.settings.googleAIStudioAPIKey) { _, newValue in
+            apiKeyDraft = newValue ?? ""
+        }
         .confirmationDialog(
             "重設 record-to-text？",
             isPresented: Binding(
@@ -43,6 +77,7 @@ struct SettingsView: View {
             if let resetChoice {
                 Button(resetChoice.buttonTitle, role: .destructive) {
                     viewModel.resetSettings(keepGlossaries: resetChoice == .keepGlossaries)
+                    apiKeyDraft = viewModel.settings.googleAIStudioAPIKey ?? ""
                     self.resetChoice = nil
                 }
             }
@@ -248,19 +283,52 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         SecureField(
                             "Google AI Studio API Key",
-                            text: Binding(
-                                get: { viewModel.settings.googleAIStudioAPIKey ?? "" },
-                                set: { viewModel.setSetting(\.googleAIStudioAPIKey, to: $0.isEmpty ? nil : $0) }
-                            ),
+                            text: $apiKeyDraft,
                             prompt: Text("請貼上 Gemini API Key (AIza...)")
                         )
                         .textFieldStyle(.roundedBorder)
 
                         HStack {
+                            Button("儲存到 Keychain") {
+                                viewModel.setGoogleAIStudioAPIKey(apiKeyDraft)
+                                apiKeyTestResult = nil
+                                apiKeyTestSucceeded = nil
+                            }
+                            .disabled(
+                                GoogleAIStudioAPIKeyDraftPolicy.shouldDisableSave(
+                                    normalizedDraft: normalizedAPIKeyDraft,
+                                    normalizedInMemoryAPIKey: normalizedInMemoryAPIKey,
+                                    storageState: viewModel
+                                        .googleAIStudioCredentialStorageState,
+                                    hasPendingMigration: viewModel
+                                        .hasPendingGoogleAIStudioCredentialMigration
+                                )
+                            )
+
                             Button("測試 API Key 連線") {
                                 testGoogleAIStudioAPIKey()
                             }
-                            .disabled(isTestingAPIKey || (viewModel.settings.googleAIStudioAPIKey ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            .disabled(isTestingAPIKey || normalizedAPIKeyDraft == nil)
+
+                            Button("清除", role: .destructive) {
+                                let attemptedDraft = apiKeyDraft
+                                let succeeded = viewModel.setGoogleAIStudioAPIKey(nil)
+                                apiKeyDraft = GoogleAIStudioAPIKeyDraftPolicy
+                                    .afterClearAttempt(
+                                        succeeded: succeeded,
+                                        attemptedDraft: attemptedDraft,
+                                        inMemoryAPIKey: viewModel.settings
+                                            .googleAIStudioAPIKey
+                                    )
+                                apiKeyTestResult = nil
+                                apiKeyTestSucceeded = nil
+                            }
+                            .disabled(
+                                viewModel.googleAIStudioCredentialStorageState
+                                    == .absent
+                                    && normalizedInMemoryAPIKey == nil
+                                    && normalizedAPIKeyDraft == nil
+                            )
 
                             if isTestingAPIKey {
                                 ProgressView()
@@ -273,6 +341,10 @@ struct SettingsView: View {
                                     .foregroundStyle(apiKeyTestSucceeded == true ? .green : .red)
                             }
                         }
+
+                        Text(viewModel.googleAIStudioCredentialStorageDescription)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     }
 
                     Picker(
@@ -314,7 +386,7 @@ struct SettingsView: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    Text("Google AI Studio API 採用標準 Gemini API Key，免裝 gcloud、免設定 GCP 專案。超長錄音自動切片上傳並無縫合併，輸出台灣繁體中文。所有設定即時自動儲存。")
+                    Text("Google AI Studio API 採用標準 Gemini API Key，免裝 gcloud、免設定 GCP 專案。長錄音會自動分段上傳並依順序合併，輸出台灣繁體中文。其餘設定會自動儲存；API Key 需按「儲存到 Keychain」。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -388,6 +460,14 @@ struct SettingsView: View {
                             .foregroundStyle(.secondary)
                     }
 
+                    Toggle(
+                        "附加內容摘要（輸出不再是純逐字稿）",
+                        isOn: setting(\.vertexAIIncludeSummary)
+                    )
+                    Text("預設關閉。開啟後，Vertex AI 會在逐字稿後附加摘要；若要保留純原始逐字稿，請維持關閉。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
                     TextField(
                         "自訂 gcloud 路徑",
                         text: Binding(
@@ -423,6 +503,10 @@ struct SettingsView: View {
 
     private var localQwenModelSettings: some View {
         Group {
+            localQwenRuntimeSettings
+
+            Divider()
+
             Picker(
                 "模型",
                 selection: Binding(
@@ -525,6 +609,123 @@ struct SettingsView: View {
         }
     }
 
+    private var localQwenRuntimeSettings: some View {
+        Group {
+            Toggle(
+                "使用這台 Mac 的開發 Runtime",
+                isOn: Binding(
+                    get: { viewModel.settings.developerMode },
+                    set: { enabled in
+                        viewModel.setSetting(\.developerMode, to: enabled)
+                        viewModel.refreshEnvironment()
+                    }
+                )
+            )
+
+            if viewModel.settings.developerMode {
+                Text("你已明確允許 App 使用這台 Mac 上的工具。App 會檢查檔案是否可用，但不會把開發工具誤標成已簽章的受管理 Runtime。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                TextField(
+                    "Python 執行檔",
+                    text: runtimePathSetting(\.customPythonPath),
+                    prompt: Text(developerRuntimeDiscovery.python.path)
+                )
+                .textFieldStyle(.roundedBorder)
+
+                LabeledContent("OpenCC（自動偵測）") {
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(developerRuntimeDiscovery.openCC.path)
+                            .font(.caption.monospaced())
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                        Text(
+                            developerRuntimeDiscovery.openCCWasDetected
+                                ? "已找到"
+                                : "未找到；請先安裝 Homebrew opencc"
+                        )
+                        .font(.caption2)
+                        .foregroundStyle(
+                            developerRuntimeDiscovery.openCCWasDetected
+                                ? Color.green
+                                : Color.red
+                        )
+                    }
+                }
+
+                TextField(
+                    "自訂 Qwen Helper 路徑",
+                    text: runtimePathSetting(\.customHelperPath),
+                    prompt: Text("留空使用 App 內建 Helper")
+                )
+                .textFieldStyle(.roundedBorder)
+
+                HStack(spacing: 10) {
+                    Button("重新自動偵測") {
+                        useAutoDetectedDeveloperRuntime()
+                    }
+
+                    Text(
+                        developerRuntimeDiscovery.pythonWasDetected
+                            ? "已找到 Python：\(developerRuntimeDiscovery.python.path)"
+                            : "未找到專用 Python；預期位置：\(developerRuntimeDiscovery.python.path)"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(
+                        developerRuntimeDiscovery.pythonWasDetected
+                            ? Color.secondary
+                            : Color.red
+                    )
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                }
+            } else {
+                Label(
+                    "受管理 Runtime 必須通過完整性與簽章驗證才會執行；僅有檔案存在並不算可信。若尚未安裝受信任 Runtime，可明確改用這台 Mac 的開發環境。",
+                    systemImage: "lock.shield"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
+
+                Button("改用自動偵測的開發 Runtime") {
+                    useAutoDetectedDeveloperRuntime()
+                }
+            }
+        }
+    }
+
+    private var developerRuntimeDiscovery: DeveloperRuntimeDiscovery {
+        RuntimeEnvironment.discoverDeveloperRuntime()
+    }
+
+    private func runtimePathSetting(
+        _ keyPath: WritableKeyPath<AppSettings, String?>
+    ) -> Binding<String> {
+        Binding(
+            get: { viewModel.settings[keyPath: keyPath] ?? "" },
+            set: { newValue in
+                let normalized = newValue.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                )
+                viewModel.setSetting(
+                    keyPath,
+                    to: normalized.isEmpty ? nil : normalized
+                )
+                viewModel.refreshEnvironment()
+            }
+        )
+    }
+
+    private func useAutoDetectedDeveloperRuntime() {
+        viewModel.setSetting(\.customPythonPath, to: nil)
+        viewModel.setSetting(\.customHelperPath, to: nil)
+        viewModel.setSetting(\.developerMode, to: true)
+        viewModel.refreshEnvironment()
+    }
+
     private var storageSettings: some View {
         Form {
             Section("最近工作") {
@@ -605,7 +806,7 @@ struct SettingsView: View {
     }
 
     private func testGoogleAIStudioAPIKey() {
-        guard let key = viewModel.settings.googleAIStudioAPIKey?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else {
+        guard let key = normalizedAPIKeyDraft else {
             apiKeyTestResult = "請先輸入 API Key"
             apiKeyTestSucceeded = false
             return
@@ -632,6 +833,19 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    private var normalizedAPIKeyDraft: String? {
+        normalizedAPIKey(apiKeyDraft)
+    }
+
+    private var normalizedInMemoryAPIKey: String? {
+        normalizedAPIKey(viewModel.settings.googleAIStudioAPIKey ?? "")
+    }
+
+    private func normalizedAPIKey(_ value: String) -> String? {
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? nil : normalized
     }
 }
 

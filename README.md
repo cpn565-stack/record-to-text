@@ -1,22 +1,30 @@
 # record-to-text
 
-本機會議錄音 → 台灣繁體逐字稿。
+會議錄音 → 台灣繁體逐字稿。
 
-`record-to-text` 是原生 macOS App：把 M4A / MP3 / WAV / AAC / FLAC 拖進去，先整理專有名詞，再在本機完成轉錄。管線依序是 **ffmpeg → Qwen3-ASR → OpenCC**，輸出 UTF-8 繁體 TXT；音檔與文字都留在你的電腦上，不經過雲端。
+`record-to-text` 是原生 macOS App：把 M4A / MP3 / WAV / AAC / FLAC 拖進去，先整理專有名詞，再選擇 Google AI Studio、Vertex AI 或本機 Qwen3-ASR 轉錄，輸出 UTF-8 繁體 TXT。
+
+> **隱私邊界取決於你選的後端。** Google AI Studio 與 Vertex AI 會上傳經壓縮／分段的音訊、Prompt 與詞彙給 Google；只有「本機 Qwen」模式不會上傳音訊或轉錄內容。
 
 | | |
 | --- | --- |
-| **現況** | Phase 0 / Apple Silicon Developer Mode MVP |
+| **現況** | 多後端開發版（尚非 Stable 發行） |
 | **目標平台** | Apple Silicon（macOS 14+） |
 | **Intel** | 不做正式支援（僅保留 Experimental 骨架，未驗證） |
 | **不是** | v1.0 Stable、已公證 DMG、或已驗證的真實長會議產品 |
 
-適合：開發者本機試用、管線驗證、後續加 Runtime／簽署前的工程基底。  
+適合：開發者本機試用、雲端／本機管線驗證、後續加 Runtime／簽署前的工程基底。
 不適合：直接發給一般使用者當正式軟體（**乾淨 Mac 雙擊 DMG 還不能轉錄**）。
 
 ## 使用前需要的環境（必讀）
 
-目前 **沒有** 把 Python／ffmpeg／模型打進 App。要在本機真正轉出文字，請先準備下列項目。
+三種後端需要的環境不同：
+
+- **Google AI Studio**：在設定中儲存 Gemini API Key。音訊工具由 App 或本機環境提供。
+- **Vertex AI**：需可用的 `gcloud` 登入狀態、GCP 專案與有權限的 Vertex AI 區域。
+- **本機 Qwen**：目前需開啟 Developer Mode，並準備 Python／MLX-Audio、OpenCC 與 helper。App 管理的完整 Runtime installer 尚未完成。
+
+下列環境需求主要適用於「本機 Qwen」。
 
 ### 硬體與系統
 
@@ -87,7 +95,7 @@ open /path/to/record-to-text.app
 
 | 項目 | 約略大小 |
 | --- | --- |
-| 目前開發用 `.app`／DMG | 數 MB |
+| 目前開發用 `.app` | 約 130 MB（含 ffmpeg／ffprobe） |
 | 本機 Python + mlx-audio 環境 | 約 **0.5 GB** |
 | ffmpeg + OpenCC（Homebrew） | 約 **數十 MB** |
 | 預設 8-bit 模型 | 約 **2.3 GB** |
@@ -95,7 +103,7 @@ open /path/to/record-to-text.app
 
 ### 快速自檢清單
 
-在 App 內：**環境檢查**（右上角盾牌 icon），確認 Python、ffmpeg、ffprobe、OpenCC、helper 皆就緒後，再按「開始轉文字」。
+在 App 內：**環境檢查**（右上角盾牌 icon）只會檢查當前後端所需元件。雲端模式需 ffmpeg／ffprobe 及對應憑證；本機 Qwen 才需 Python、OpenCC 與 helper。
 
 1. Apple Silicon + macOS 14+  
 2. `ffmpeg` / `ffprobe` / `opencc` 在 PATH（Homebrew）  
@@ -113,10 +121,12 @@ open /path/to/record-to-text.app
 - 拖放、多選、單工佇列、取消、錯誤與最近工作。
 - 先加入錄音，再在「開始轉文字」旁選「切分再依序轉」：前半段先處理，後半段排隊，兩段各自輸出有順序的文字稿；App 不自動合併。
 - 可用「合併文字稿」選取多份 TXT，依分段編號排序產生新檔；原始 TXT 不會被覆寫。
-- `ffprobe → ffmpeg → ASR helper → OpenCC → 原子寫入 TXT`。
-- 超過 **20 分鐘**：coordinator 切成編號 WAV、逐段獨立 ASR（預設 token 預算 16384）；全部通過 manifest gate 後才合併，中段／尾段失敗不交部分結果。
+- 本機管線：`ffprobe → ffmpeg → Qwen ASR helper → OpenCC → 原子寫入 TXT`。
+- 雲端管線：`ffprobe → ffmpeg 壓縮／分段 → Gemini API → 原子寫入 TXT`。
+- 超過 **20 分鐘**：coordinator 切成編號片段、逐段獨立 ASR（預設 token 預算 16384）；全部通過 manifest gate 後才交付正式逐字稿。
+- 雲端分段工作失敗或取消時，若已有完成片段，`Temp-Recovery` 會只保留部分 TXT、manifest 與最小 metadata（不保留 MP3），供人工取回。這不是自動斷點續跑；重新加入原始錄音會從頭轉錄。若還沒有任何完成片段，就不會誤稱有部分稿可取回。
 - Apple Silicon：MLX-Audio helper；Prompt 走 `system_prompt`，不支援則 fail closed。
-- 設定／詞庫 JSON、失敗 WAV `Temp-Recovery`、來源檔不修改。
+- 設定／詞庫 JSON、本機失敗 WAV 與雲端部分稿 `Temp-Recovery`、來源檔不修改。
 - Job ledger：queued／active／interrupted 為 durable，不受「最近工作」上限裁切。
 - App 圖示（`Config/AppIcon.icns`）與 `scripts/build-app.sh` 開發用 `.app` 封裝。
 - XCTest（需完整 Xcode）、executable self-test、mock 管線（成功／失敗復原／取消／長音檔 fail-closed）。
@@ -193,7 +203,7 @@ scripts/run-checks.sh
 - Swift mock helper 編譯。
 - 真實 ffprobe／ffmpeg／OpenCC 成功管線。
 - Mock ASR 失敗時的 `Temp-Recovery`、正確失敗階段與暫存清除。
-- 慢速 Mock ASR 取消與取消後暫存清除。
+- 慢速 Mock ASR 取消與取消後工作暫存清除；雲端已完成片段另以最小文字復原資料保留。
 - 可控短音檔模擬長錄音切分，驗證逐段順序合併與尾端唯一驗證句。
 - 模擬中段／尾段失敗、空白、token limit 與缺少 completed；皆不得產生部分正式 TXT。
 
@@ -230,7 +240,7 @@ swift test
 └── Temp-Recovery/
 ```
 
-轉錄內容、詞庫、檔名與路徑不會上傳。網路只預留給 Runtime／模型下載及使用者主動檢查更新。
+本機 Qwen 模式不上傳音訊、Prompt、詞庫或轉錄內容。Google AI Studio／Vertex AI 模式會把轉錄所需的音訊、Prompt 與詞彙送到 Google；來源本機路徑不應寫入雲端請求或診斷日誌。
 
 `recent-jobs.json` 只保存不含 Prompt、詞彙與日誌的摘要。可重試工作的完整 Snapshot 僅在 `job-ledger.json` 保存；queued／active／interrupted 工作不受 `recentJobLimit` 影響，只有 terminal history 會裁切，單筆日誌仍限制行數。
 

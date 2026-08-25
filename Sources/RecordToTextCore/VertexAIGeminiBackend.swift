@@ -6,6 +6,7 @@ public enum VertexAIError: LocalizedError, Equatable {
     case audioPayloadTooLarge(sizeBytes: Int, limitBytes: Int)
     case requestFailed(statusCode: Int, message: String)
     case prohibitedContent(String)
+    case incompleteResponse(finishReason: String, message: String?)
     case emptyResponse
     case invalidJSONResponse
     case transportMessageTooLarge
@@ -27,6 +28,10 @@ public enum VertexAIError: LocalizedError, Equatable {
             return "Vertex AI 請求失敗（HTTP \(statusCode)）：\(trimmed)"
         case let .prohibitedContent(message):
             return "Google 內容安全政策攔截：\(message)"
+        case let .incompleteResponse(finishReason, message):
+            let detail = message?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let suffix = detail.map { "：\($0)" } ?? ""
+            return "Vertex AI 回應未正常完成（\(finishReason)）\(suffix)。為避免輸出不完整逐字稿，本次工作已停止。"
         case .emptyResponse:
             return "Vertex AI 未回傳任何文字內容或候選結果。"
         case .invalidJSONResponse:
@@ -66,7 +71,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         public static let `default` = Configuration()
     }
 
-    private let authService: GCloudAuthService
+    private var authService: GCloudAuthService
     private let urlSession: URLSession
     private let lock = NSLock()
     private var config: Configuration
@@ -87,6 +92,18 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
     public func updateConfiguration(_ newConfig: Configuration) {
         lock.withLock {
             config = newConfig
+        }
+    }
+
+    public func updateAuthentication(
+        customGCloudPath: String?,
+        runner: ProcessRunner
+    ) {
+        lock.withLock {
+            authService = GCloudAuthService(
+                customGCloudPath: customGCloudPath,
+                runner: runner
+            )
         }
     }
 
@@ -136,6 +153,78 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         }
     }
 
+    /// 對已完成合併的逐字稿產生一次文字摘要。
+    ///
+    /// 這個 API 與音訊轉錄分開，避免每個音訊分段都各自摘要，
+    /// 也確保逐字稿回應不會被摘要內容混入。
+    func summarizeTranscript(
+        _ transcript: String,
+        workingDirectory: URL? = nil,
+        logger: ((_ level: String, _ message: String) -> Void)? = nil
+    ) async throws -> String {
+        let trimmedTranscript = transcript.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard !trimmedTranscript.isEmpty else {
+            throw VertexAIError.emptyResponse
+        }
+
+        let currentConfig = getConfiguration()
+        let authService = lock.withLock { self.authService }
+        let resolvedProjectID: String
+        if let explicitID = currentConfig.projectID,
+           !explicitID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            resolvedProjectID = explicitID.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+        } else {
+            do {
+                resolvedProjectID = try await authService.getDefaultProjectID()
+            } catch {
+                throw VertexAIError.authenticationFailed(
+                    "無法取得 GCP Project ID：\(error.localizedDescription)"
+                )
+            }
+        }
+
+        let accessToken: String
+        do {
+            accessToken = try await authService.getAccessToken()
+        } catch {
+            throw VertexAIError.authenticationFailed(error.localizedDescription)
+        }
+
+        let resolvedLocation = currentConfig.location
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let location = resolvedLocation.isEmpty ? "global" : resolvedLocation
+        let host = location == "global"
+            ? "aiplatform.googleapis.com"
+            : "\(location)-aiplatform.googleapis.com"
+        let endpointString = "https://\(host)/v1/projects/\(resolvedProjectID)/locations/\(location)/publishers/google/models/\(currentConfig.modelID):generateContent"
+        guard let endpointURL = URL(string: endpointString) else {
+            throw VertexAIError.invalidEndpointURL(endpointString)
+        }
+
+        let result = try await sendGenerateContentRequest(
+            modelID: currentConfig.modelID,
+            resolvedLocation: location,
+            endpointURL: endpointURL,
+            accessToken: accessToken,
+            authService: authService,
+            inputByteCount: trimmedTranscript.utf8.count,
+            inputPart: ["text": trimmedTranscript],
+            systemInstructionText: """
+你是逐字稿摘要工具。請根據完整逐字稿整理精簡、忠於原文的繁體中文摘要。不得補充原文沒有的事實，不使用 Markdown，不要輸出「摘要：」前綴。
+""",
+            userPromptText: "請直接輸出這份完整逐字稿的精簡摘要。",
+            requestDescription: "摘要",
+            maximumOutputTokens: 2_048,
+            workingDirectory: workingDirectory,
+            logger: logger
+        )
+        return result.text
+    }
+
     private func executeGenerateContent(
         modelID: String,
         audioData: Data,
@@ -147,6 +236,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         logger: ((_ level: String, _ message: String) -> Void)?
     ) async throws -> String {
         let currentConfig = getConfiguration()
+        let authService = lock.withLock { self.authService }
 
         // 1. 取得 Project ID
         let resolvedProjectID: String
@@ -176,8 +266,14 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             throw VertexAIError.invalidEndpointURL(endpointString)
         }
 
+        // 音訊分段永遠只回傳逐字稿。若使用者有勾選摘要，
+        // 由 TranscriptionEngine 在所有分段合併後再做一次文字摘要。
         let systemInstructionText = buildSystemInstruction()
-        let userPromptText = buildUserPrompt(terms: terms, customPrompt: customPrompt, timeOffsetSeconds: timeOffsetSeconds)
+        let userPromptText = buildUserPrompt(
+            terms: terms,
+            customPrompt: customPrompt,
+            timeOffsetSeconds: timeOffsetSeconds
+        )
 
         let audioPart: [String: Any]
         var uploadedGCSObjectName: String? = nil
@@ -189,15 +285,26 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             uploadedGCSObjectName = objectName
             logger?("info", "使用 GCS Bucket (\(bucket)) 串流上傳音訊...")
 
-            try await uploadToGCS(
-                bucket: bucket,
-                objectName: objectName,
-                audioData: audioData,
-                mimeType: mimeType,
-                accessToken: accessToken,
-                workingDirectory: workingDirectory,
-                logger: logger
-            )
+            do {
+                try await uploadToGCS(
+                    bucket: bucket,
+                    objectName: objectName,
+                    audioData: audioData,
+                    mimeType: mimeType,
+                    accessToken: accessToken,
+                    workingDirectory: workingDirectory,
+                    logger: logger
+                )
+            } catch {
+                await deleteGCSObjectShielded(
+                    bucket: bucket,
+                    objectName: objectName,
+                    accessToken: accessToken,
+                    authService: authService,
+                    logger: logger
+                )
+                throw error
+            }
 
             audioPart = [
                 "fileData": [
@@ -223,20 +330,63 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             ]
         }
 
-        defer {
-            // 清理 GCS 遠端暫存物件
+        do {
+            let result = try await sendGenerateContentRequest(
+                modelID: modelID,
+                resolvedLocation: resolvedLocation,
+                endpointURL: endpointURL,
+                accessToken: accessToken,
+                authService: authService,
+                inputByteCount: audioData.count,
+                inputPart: audioPart,
+                systemInstructionText: systemInstructionText,
+                userPromptText: userPromptText,
+                requestDescription: "轉錄",
+                maximumOutputTokens: 8_192,
+                workingDirectory: workingDirectory,
+                logger: logger
+            )
+            accessToken = result.accessToken
             if let bucket, !bucket.isEmpty, let objectName = uploadedGCSObjectName {
-                Task {
-                    await self.deleteGCSObject(
-                        bucket: bucket,
-                        objectName: objectName,
-                        accessToken: accessToken,
-                        logger: logger
-                    )
-                }
+                await deleteGCSObjectShielded(
+                    bucket: bucket,
+                    objectName: objectName,
+                    accessToken: accessToken,
+                    authService: authService,
+                    logger: logger
+                )
             }
+            return result.text
+        } catch {
+            if let bucket, !bucket.isEmpty, let objectName = uploadedGCSObjectName {
+                await deleteGCSObjectShielded(
+                    bucket: bucket,
+                    objectName: objectName,
+                    accessToken: accessToken,
+                    authService: authService,
+                    logger: logger
+                )
+            }
+            throw error
         }
+    }
 
+    private func sendGenerateContentRequest(
+        modelID: String,
+        resolvedLocation: String,
+        endpointURL: URL,
+        accessToken: String,
+        authService: GCloudAuthService,
+        inputByteCount: Int,
+        inputPart: [String: Any],
+        systemInstructionText: String,
+        userPromptText: String,
+        requestDescription: String,
+        maximumOutputTokens: Int,
+        workingDirectory: URL?,
+        logger: ((_ level: String, _ message: String) -> Void)?
+    ) async throws -> (text: String, accessToken: String) {
+        var resolvedAccessToken = accessToken
         let requestBody: [String: Any] = [
             "systemInstruction": [
                 "parts": [
@@ -247,7 +397,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                 [
                     "role": "user",
                     "parts": [
-                        audioPart,
+                        inputPart,
                         ["text": userPromptText]
                     ]
                 ]
@@ -261,7 +411,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             ],
             "generationConfig": [
                 "temperature": 0.2,
-                "maxOutputTokens": 8192
+                "maxOutputTokens": maximumOutputTokens
             ]
         ]
 
@@ -279,7 +429,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
 
         var urlRequest = URLRequest(url: endpointURL)
         urlRequest.httpMethod = "POST"
-        urlRequest.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        urlRequest.setValue("Bearer \(resolvedAccessToken)", forHTTPHeaderField: "Authorization")
         urlRequest.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
         urlRequest.timeoutInterval = 300 // 5 分鐘超時
 
@@ -293,8 +443,9 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         // 若遇 401 Token 過期，自動刷新並重試一次
         if httpResponse.statusCode == 401 {
             authService.invalidateToken()
-            if let freshToken = try? await authService.getAccessToken(forceRefresh: true) {
-                accessToken = freshToken
+            do {
+                let freshToken = try await authService.getAccessToken(forceRefresh: true)
+                resolvedAccessToken = freshToken
                 urlRequest.setValue("Bearer \(freshToken)", forHTTPHeaderField: "Authorization")
                 let retryResult = try await sendWithPOSIXRetry(
                     request: urlRequest,
@@ -304,12 +455,18 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                 )
                 data = retryResult.0
                 httpResponse = retryResult.1
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                throw VertexAIError.authenticationFailed(
+                    "Access Token 已失效，重新驗證仍失敗：\(error.localizedDescription)"
+                )
             }
         }
 
         logger?(
             "info",
-            "Vertex AI 請求回應：HTTP \(httpResponse.statusCode), MP3 \(audioData.count) bytes, JSON \(requestData.count) bytes, 模型 \(modelID), location \(resolvedLocation)"
+            "Vertex AI \(requestDescription)請求回應：HTTP \(httpResponse.statusCode), 輸入 \(inputByteCount) bytes, JSON \(requestData.count) bytes, 模型 \(modelID), location \(resolvedLocation)"
         )
 
         if httpResponse.statusCode != 200 {
@@ -320,7 +477,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             )
         }
 
-        return try parseCandidateText(from: data)
+        return (try parseCandidateText(from: data), resolvedAccessToken)
     }
 
     /// 透過串流上傳將請求送出，若遇到 POSIX 40 自動建立全新 Ephemeral Session 重試一次
@@ -411,15 +568,38 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
     }
 
     /// 刪除 GCS 遠端暫存物件
-    private func deleteGCSObject(
+    private func deleteGCSObjectShielded(
         bucket: String,
         objectName: String,
         accessToken: String,
+        authService: GCloudAuthService,
         logger: ((_ level: String, _ message: String) -> Void)?
     ) async {
+        let cleanupFailure = await Task.detached(priority: .utility) { [self] in
+            // A generateContent 401 may have refreshed the cached token before
+            // a later retry failed. Resolve inside the detached cleanup task so
+            // cancellation cannot force DELETE to reuse the stale token.
+            let cleanupToken = (try? await authService.getAccessToken())
+                ?? accessToken
+            return await deleteGCSObject(
+                bucket: bucket,
+                objectName: objectName,
+                accessToken: cleanupToken
+            )
+        }.value
+        if let cleanupFailure {
+            logger?("warning", "清理 GCS 暫存檔 (\(objectName)) 失敗：\(cleanupFailure)")
+        }
+    }
+
+    private func deleteGCSObject(
+        bucket: String,
+        objectName: String,
+        accessToken: String
+    ) async -> String? {
         guard let encodedName = objectName.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
               let deleteURL = URL(string: "https://storage.googleapis.com/storage/v1/b/\(bucket)/o/\(encodedName)") else {
-            return
+            return "無法建立 DELETE URL"
         }
 
         var request = URLRequest(url: deleteURL)
@@ -429,58 +609,45 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
 
         do {
             let (_, response) = try await urlSession.data(for: request)
-            if let httpResponse = response as? HTTPURLResponse, (httpResponse.statusCode == 200 || httpResponse.statusCode == 204 || httpResponse.statusCode == 404) {
-                // 刪除成功或已不存在
-                return
+            if let httpResponse = response as? HTTPURLResponse {
+                if httpResponse.statusCode == 200 || httpResponse.statusCode == 204 || httpResponse.statusCode == 404 {
+                    return nil
+                }
+                return "HTTP \(httpResponse.statusCode)"
             }
+            return "Google Cloud Storage 未回傳有效的 HTTP 回應"
         } catch {
-            logger?("warning", "清理 GCS 暫存檔 (\(objectName)) 失敗：\(error.localizedDescription)")
+            return error.localizedDescription
         }
     }
 
-    private func buildSystemInstruction() -> String {
-        return """
-你是一位專業的高精度語音逐字稿轉錄專家。請仔細聆聽這段音訊，直接將其轉錄為排版乾淨整齊的「純文字逐字稿 (Plain Text Transcript)」。
+    func buildSystemInstruction() -> String {
+        """
+你是一個高精度語音逐字稿工具。請忠實轉錄音訊中實際聽到的內容，保留原意、語序、口語重複與不完整語句，不要改寫、刪除或補充。
 
-【排版與輸出規範】
-1. 純文字輸出：嚴禁使用任何 Markdown 格式標記（禁止使用 **粗體**、### 標題、--- 分隔線、Markdown 標題文字等）。
-2. 時間標記：大約每 3 至 5 分鐘（或對話主題轉換時）標註一次時間區間，格式固定為：
-[00:00 - 05:00]
-3. 講者分辨與分段：
-   - 請根據不同說話者的聲音特徵區分講者（例如「講者 1：」、「講者 2：」；若音訊中或專有名詞詞庫有提及姓名則標註姓名，如「Tina：」、「David：」）。
-   - 禁止在講者名稱外包覆任何符號（嚴禁寫成 **講者**：）。
-   - 請依據講者輪替與語意對話自然分段換行。
-4. 語言與用詞：一律使用標準「台灣繁體中文 (zh-TW)」輸出，英文專有名詞維持正確大小寫與拼寫。
-5. 嚴禁多餘內容：從音訊第一秒直接開始輸出逐字內容，嚴禁輸出重複內容、前言草稿、開場白（如「好的，以下是逐字稿」）、結尾客套話、背景說明、會議摘要或待辦事項。
+只輸出純文字，不使用 Markdown，不加時間戳，不自行辨識、命名或標示講者。可依自然停頓與語意分段，但不可新增音訊中沒有的標題、前言、結語、待辦事項或背景說明。中文使用台灣繁體中文，英文專有名詞維持正確拼寫。
 
-【格式範例】
-[00:00 - 05:00]
-講師：大家早，今天我們主要是對齊進度...
-
-學員 1：我學到的是對話、聚焦、對策...
-
-[05:00 - 10:00]
-學員 2：我學到兩點，第一個是...
+不得輸出摘要。
 """
     }
 
-    private func buildUserPrompt(terms: [String], customPrompt: String, timeOffsetSeconds: Double) -> String {
+    func buildUserPrompt(
+        terms: [String],
+        customPrompt: String,
+        timeOffsetSeconds: Double
+    ) -> String {
         var parts: [String] = []
 
         if timeOffsetSeconds > 0 {
-            let startMin = Int(timeOffsetSeconds) / 60
-            let startSec = Int(timeOffsetSeconds) % 60
-            let startFormatted = String(format: "%02d:%02d", startMin, startSec)
-            parts.append("【時間基準通知】：本音訊片段在整場錄音中的起始時間為 \(startFormatted)（第 \(Int(timeOffsetSeconds)) 秒）。請將輸出中的所有時間碼依據此起始時間計算與標註（例如起始標記為 [\(startFormatted) - ...]）。")
+            parts.append("這是長錄音中從第 \(Int(timeOffsetSeconds)) 秒開始的獨立片段。只轉錄本片段實際聽到的內容，不要補寫、重複或猜測前後片段。")
         }
 
-        if !terms.isEmpty {
+        let trimmedPrompt = customPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedPrompt.isEmpty {
+            parts.append(trimmedPrompt)
+        } else if !terms.isEmpty {
             let termsFormatted = terms.map { "- \($0)" }.joined(separator: "\n")
-            parts.append("【專有名詞與詞庫參考（若音訊中有提及，請優先採用以下標準用字與講者姓名）】：\n\(termsFormatted)")
-        }
-
-        if !customPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            parts.append("【補充指示】：\n\(customPrompt)")
+            parts.append("以下詞彙可能出現在錄音中；只有音訊內容相符時才採用，不得自行加入：\n\(termsFormatted)")
         }
 
         parts.append("請直接開始轉錄上述音訊。")
@@ -496,25 +663,46 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         return String(decoding: data, as: UTF8.self)
     }
 
-    private func parseCandidateText(from data: Data) throws -> String {
+    func parseCandidateText(from data: Data) throws -> String {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw VertexAIError.invalidJSONResponse
         }
 
         if let promptFeedback = json["promptFeedback"] as? [String: Any],
-           let blockReason = promptFeedback["blockReason"] as? String {
+           let blockReason = promptFeedback["blockReason"] as? String,
+           blockReason != "BLOCK_REASON_UNSPECIFIED" {
             let msg = promptFeedback["blockReasonMessage"] as? String ?? blockReason
-            throw VertexAIError.requestFailed(statusCode: 400, message: "Google 內容安全政策攔截：\(msg)")
+            throw VertexAIError.prohibitedContent(msg)
         }
 
         guard let candidates = json["candidates"] as? [[String: Any]],
               let firstCandidate = candidates.first else {
-            return ""
+            throw VertexAIError.emptyResponse
+        }
+
+        guard let finishReason = firstCandidate["finishReason"] as? String,
+              !finishReason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            throw VertexAIError.incompleteResponse(
+                finishReason: "MISSING_FINISH_REASON",
+                message: firstCandidate["finishMessage"] as? String
+            )
+        }
+        let normalizedFinishReason = finishReason.uppercased()
+        guard normalizedFinishReason == "STOP" else {
+            let message = firstCandidate["finishMessage"] as? String
+            if ["SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "RECITATION"].contains(normalizedFinishReason) {
+                throw VertexAIError.prohibitedContent(message ?? normalizedFinishReason)
+            }
+            throw VertexAIError.incompleteResponse(
+                finishReason: normalizedFinishReason,
+                message: message
+            )
         }
 
         guard let content = firstCandidate["content"] as? [String: Any],
               let parts = content["parts"] as? [[String: Any]] else {
-            return ""
+            throw VertexAIError.emptyResponse
         }
 
         var textChunks: [String] = []
@@ -525,7 +713,11 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         }
 
         let combined = textChunks.joined().trimmingCharacters(in: .whitespacesAndNewlines)
-        return sanitizeTranscript(combined)
+        let sanitized = sanitizeTranscript(combined)
+        guard !sanitized.isEmpty else {
+            throw VertexAIError.emptyResponse
+        }
+        return sanitized
     }
 
     /// 淨化逐字稿：去除 Markdown 標題、粗體符號、分隔線及偶發之重複草稿開頭

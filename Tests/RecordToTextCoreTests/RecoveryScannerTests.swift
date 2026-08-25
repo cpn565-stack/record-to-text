@@ -74,6 +74,221 @@ final class RecoveryScannerTests: XCTestCase {
         XCTAssertTrue(report.items[0].hasRecoveryJSON)
     }
 
+    func testCloudCheckpointWithoutNormalizedWAVIsRecoverable() throws {
+        let jobID = UUID()
+        let dir = paths.tempRecovery.appendingPathComponent(jobID.uuidString)
+        let segments = dir.appendingPathComponent(
+            RecoveryScanner.segmentsDirectoryName,
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: segments,
+            withIntermediateDirectories: true
+        )
+        try Data("partial".utf8).write(
+            to: dir.appendingPathComponent(
+                RecoveryScanner.partialTranscriptFileName
+            )
+        )
+
+        let transcript = segments.appendingPathComponent("segment-0001.txt")
+        try Data("已完成的第一段".utf8).write(to: transcript)
+        let manifest = AudioSegmentManifest(
+            jobID: jobID,
+            sourceDurationSeconds: 2_400,
+            maximumSegmentDurationSeconds: 1_200,
+            expectedSegmentCount: 2,
+            segments: [
+                AudioSegmentRecord(
+                    segmentIndex: 1,
+                    segmentCount: 2,
+                    startSeconds: 0,
+                    endSeconds: 1_200,
+                    audioPath: "",
+                    outputPath: transcript.path,
+                    status: .completed,
+                    completedEventCount: 1
+                ),
+                AudioSegmentRecord(
+                    segmentIndex: 2,
+                    segmentCount: 2,
+                    startSeconds: 1_200,
+                    endSeconds: 2_400,
+                    audioPath: "",
+                    outputPath: segments.appendingPathComponent("segment-0002.txt").path,
+                    status: .failed,
+                    failureMessage: "mock failure"
+                )
+            ]
+        )
+        try JSONEncoder().encode(manifest).write(
+            to: dir.appendingPathComponent(
+                RecoveryScanner.segmentManifestFileName
+            )
+        )
+
+        let metadata = RecoveryScanner.RecoveryMetadata(
+            schemaVersion: 2,
+            jobID: jobID,
+            sourcePath: "/Users/mike/meeting.m4a",
+            failureStage: "transcribing",
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            technicalError: "mock cloud failure",
+            recoveryKind: "cloudCheckpoint",
+            backendType: .vertexAI,
+            checkpointFile: RecoveryScanner.segmentManifestFileName,
+            segmentsDirectory: RecoveryScanner.segmentsDirectoryName,
+            partialTranscriptFile: RecoveryScanner.partialTranscriptFileName
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(metadata).write(
+            to: dir.appendingPathComponent("recovery.json")
+        )
+
+        let report = RecoveryScanner.scan(
+            paths: paths,
+            systemTempRoot: tempJobs
+        )
+
+        XCTAssertEqual(report.recoverableCount, 1)
+        XCTAssertEqual(report.items[0].kind, .recoverable)
+        XCTAssertFalse(report.items[0].hasNormalizedWAV)
+        XCTAssertTrue(report.items[0].hasSegmentManifest)
+        XCTAssertTrue(
+            report.items[0].recognizedFileNames.contains(
+                RecoveryScanner.partialTranscriptFileName
+            )
+        )
+        XCTAssertTrue(report.items[0].hasPartialTranscript)
+        XCTAssertTrue(report.items[0].summary.contains("可取回"))
+        XCTAssertTrue(report.items[0].detail.contains("不會自動"))
+        XCTAssertTrue(report.items[0].detail.contains("從頭轉錄"))
+        XCTAssertTrue(report.items[0].unknownEntryNames.isEmpty)
+    }
+
+    func testCloudCheckpointWithoutCompletedTextDoesNotClaimPartialTranscript() throws {
+        let jobID = UUID()
+        let dir = paths.tempRecovery.appendingPathComponent(jobID.uuidString)
+        try FileManager.default.createDirectory(
+            at: dir,
+            withIntermediateDirectories: true
+        )
+        try Data("{}".utf8).write(
+            to: dir.appendingPathComponent(
+                RecoveryScanner.segmentManifestFileName
+            )
+        )
+        try Data().write(
+            to: dir.appendingPathComponent(
+                RecoveryScanner.partialTranscriptFileName
+            )
+        )
+        let metadata = RecoveryScanner.RecoveryMetadata(
+            schemaVersion: 2,
+            jobID: jobID,
+            sourcePath: "/Users/mike/meeting.m4a",
+            failureStage: "cancelled",
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            technicalError: "cancelled",
+            recoveryKind: "cloudCheckpoint",
+            backendType: .googleAIStudio,
+            checkpointFile: RecoveryScanner.segmentManifestFileName,
+            segmentsDirectory: RecoveryScanner.segmentsDirectoryName,
+            partialTranscriptFile: RecoveryScanner.partialTranscriptFileName
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(metadata).write(
+            to: dir.appendingPathComponent(
+                RecoveryScanner.recoveryJSONFileName
+            )
+        )
+
+        let item = try XCTUnwrap(
+            RecoveryScanner.scan(
+                paths: paths,
+                systemTempRoot: tempJobs
+            ).items.first
+        )
+
+        XCTAssertEqual(item.kind, .recoverable)
+        XCTAssertFalse(item.hasPartialTranscript)
+        XCTAssertTrue(item.summary.contains("沒有可取回文字"))
+        XCTAssertTrue(item.detail.contains("從頭轉錄"))
+        XCTAssertFalse(item.detail.contains("可人工取回已完成片段"))
+    }
+
+    func testInterruptedCloudWorkingCheckpointIsNotClassifiedAsDisposable() throws {
+        let jobID = UUID()
+        let directory = tempJobs.appendingPathComponent(
+            jobID.uuidString,
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: directory.appendingPathComponent(
+                RecoveryScanner.segmentsDirectoryName,
+                isDirectory: true
+            ),
+            withIntermediateDirectories: true
+        )
+        try Data("{已有 manifest}".utf8).write(
+            to: directory.appendingPathComponent(
+                RecoveryScanner.segmentManifestFileName
+            )
+        )
+        try Data("第一段已完成".utf8).write(
+            to: directory.appendingPathComponent(
+                RecoveryScanner.partialTranscriptFileName
+            )
+        )
+
+        let report = RecoveryScanner.scan(
+            paths: paths,
+            systemTempRoot: tempJobs
+        )
+
+        XCTAssertEqual(report.recoverableCount, 1)
+        XCTAssertEqual(report.orphanedCount, 0)
+        XCTAssertEqual(report.items.first?.kind, .recoverable)
+        XCTAssertEqual(report.items.first?.location, .systemTemp)
+        XCTAssertNil(report.items.first?.sourcePath)
+        XCTAssertEqual(report.items.first?.hasPartialTranscript, true)
+        XCTAssertTrue(report.items.first?.detail.contains("不會自動") == true)
+    }
+
+    func testEmptyInterruptedCloudPartialIsOrphanedRatherThanRetrievable() throws {
+        let jobID = UUID()
+        let directory = tempJobs.appendingPathComponent(
+            jobID.uuidString,
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        try Data("{}".utf8).write(
+            to: directory.appendingPathComponent(
+                RecoveryScanner.segmentManifestFileName
+            )
+        )
+        try Data(" \n".utf8).write(
+            to: directory.appendingPathComponent(
+                RecoveryScanner.partialTranscriptFileName
+            )
+        )
+
+        let item = try XCTUnwrap(
+            RecoveryScanner.scan(
+                paths: paths,
+                systemTempRoot: tempJobs
+            ).items.first
+        )
+
+        XCTAssertEqual(item.kind, .orphaned)
+        XCTAssertFalse(item.hasPartialTranscript)
+    }
+
     func testMismatchedJobIDInRecoveryJSONIsDamaged() throws {
         let folderID = UUID()
         let metadataID = UUID()

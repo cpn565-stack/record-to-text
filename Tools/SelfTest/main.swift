@@ -540,17 +540,33 @@ tests.check(
         }
 
         let settings = AppSettings.defaultValue(developerMode: false)
+        do {
+            _ = try RuntimeEnvironment.resolve(
+                paths: paths,
+                settings: settings,
+                bundledHelperURL: nil,
+                includeSystemAudioTools: false
+            )
+            return false
+        } catch RuntimeEnvironmentError.releaseRuntimeNotVerified {
+            // Expected: cloud jobs cannot silently trust audio tools selected
+            // from the unverified App-managed runtime.
+        }
+
+        var verifierWasCalled = false
         let runtime = try RuntimeEnvironment.resolve(
             paths: paths,
             settings: settings,
             bundledHelperURL: nil,
-            includeSystemAudioTools: false
+            includeSystemAudioTools: false,
+            releaseRuntimeVerifier: { _ in verifierWasCalled = true }
         )
         return !runtime.isDeveloperRuntime
+            && verifierWasCalled
             && FileManager.default.isExecutableFile(atPath: runtime.ffmpeg.path)
             && settings.backendType == .googleAIStudio
     }(),
-    "Google AI Studio resolves ffmpeg without Developer Mode or release verifier"
+    "Google AI Studio requires verification for managed ffmpeg fallback"
 )
 
 tests.check(
@@ -578,21 +594,40 @@ tests.check(
         var settings = AppSettings.defaultValue(developerMode: false)
         settings.backendType = .localQwen
         guard settings.backendType.displayName.contains("本機") else { return false }
+        do {
+            _ = try RuntimeEnvironment.resolve(
+                paths: paths,
+                settings: settings,
+                bundledHelperURL: nil,
+                includeSystemAudioTools: false
+            )
+            return false
+        } catch RuntimeEnvironmentError.releaseRuntimeNotVerified {
+            // Expected: managed local executables are not trusted by presence.
+        }
+
+        var verifierWasCalled = false
         let runtime = try RuntimeEnvironment.resolve(
             paths: paths,
             settings: settings,
             bundledHelperURL: nil,
-            includeSystemAudioTools: false
+            includeSystemAudioTools: false,
+            releaseRuntimeVerifier: { _ in verifierWasCalled = true }
         )
-        let report = RuntimeEnvironment.inspect(runtime, backendType: .localQwen)
+        let report = RuntimeEnvironment.inspect(
+            runtime,
+            backendType: .localQwen,
+            releaseRuntimeVerified: true
+        )
         let components = report.components.map(\.component)
         return !runtime.isDeveloperRuntime
+            && verifierWasCalled
             && report.isReady
             && components.contains(.python)
             && components.contains(.helper)
             && components.contains(.opencc)
     }(),
-    "Local Qwen backend resolves full runtime and inspection is ready without cloud"
+    "Local Qwen managed runtime fails closed until a verifier approves it"
 )
 
 tests.check(
@@ -858,14 +893,24 @@ tests.check(
             googleAIStudioModelID: "gemini-3.7-flash"
         )
         guard let data = try? JSONEncoder().encode(settings),
-              let decoded = try? JSONDecoder().decode(AppSettings.self, from: data) else {
+              let decoded = try? JSONDecoder().decode(AppSettings.self, from: data),
+              let legacyDecoded = try? JSONDecoder().decode(
+                AppSettings.self,
+                from: Data(
+                    #"{"defaultOutputDirectory":"/tmp/output","googleAIStudioAPIKey":"legacy-key"}"#.utf8
+                )
+              ) else {
             return false
         }
+        let json = String(decoding: data, as: UTF8.self)
         return decoded.backendType == .googleAIStudio
-            && decoded.googleAIStudioAPIKey == "AIzaSyTestKey123"
+            && decoded.googleAIStudioAPIKey == nil
             && decoded.googleAIStudioModelID == "gemini-3.7-flash"
+            && legacyDecoded.googleAIStudioAPIKey == "legacy-key"
+            && !json.contains("AIzaSyTestKey123")
+            && !json.contains("googleAIStudioAPIKey")
     }(),
-    "AppSettings persists Google AI Studio configuration"
+    "AppSettings persists Google AI Studio configuration without API key"
 )
 
 tests.check(
@@ -990,6 +1035,7 @@ tests.check(
             outputDirectory: settings.defaultOutputDirectory,
             keepRawTranscript: false,
             backendType: settings.backendType,
+            googleAIStudioAPIKey: "ledger-secret",
             vertexAIProjectID: settings.vertexAIProjectID,
             vertexAILocation: settings.vertexAILocation,
             vertexAIModelID: settings.vertexAIModelID,
@@ -1000,10 +1046,29 @@ tests.check(
               let snapDecoded = try? JSONDecoder().decode(JobSnapshot.self, from: snapData) else {
             return false
         }
+        let snapshotJSON = String(decoding: snapData, as: UTF8.self)
+        var currentSettings = AppSettings(
+            defaultOutputDirectory: "/tmp/current",
+            backendType: .localQwen,
+            customGCloudPath: "/current/gcloud"
+        )
+        currentSettings.developerMode = true
+        currentSettings.customPythonPath = "/current/python"
+        let runtimeSettings = currentSettings.applyingRuntimeConfiguration(
+            from: snapDecoded
+        )
         return decoded.vertexAIGCSBucket == "my-custom-bucket"
             && snapDecoded.vertexAIGCSBucket == "my-custom-bucket"
+            && snapDecoded.googleAIStudioAPIKey == nil
+            && !snapshotJSON.contains("ledger-secret")
+            && !snapshotJSON.contains("googleAIStudioAPIKey")
+            && runtimeSettings.backendType == .vertexAI
+            && runtimeSettings.vertexAILocation == "global"
+            && runtimeSettings.developerMode
+            && runtimeSettings.customPythonPath == "/current/python"
+            && runtimeSettings.customGCloudPath == "/current/gcloud"
     }(),
-    "AppSettings and JobSnapshot persist vertexAIGCSBucket"
+    "JobSnapshot persists transcription configuration but keeps runtime authorization live"
 )
 
 private final class MockTransportURLProtocol: URLProtocol {
@@ -1053,7 +1118,8 @@ tests.check(
                         "content": {
                             "parts": [{"text": "這是重試成功逐字稿"}],
                             "role": "model"
-                        }
+                        },
+                        "finishReason": "STOP"
                     }
                 ]
             }
@@ -1150,7 +1216,8 @@ tests.check(
                             "content": {
                                 "parts": [{"text": "由 Files API 轉錄成功之逐字稿"}],
                                 "role": "model"
-                            }
+                            },
+                            "finishReason": "STOP"
                         }
                     ]
                 }
@@ -1249,7 +1316,8 @@ tests.check(
                             "content": {
                                 "parts": [{"text": "由 Vertex AI GCS 轉錄成功之逐字稿"}],
                                 "role": "model"
-                            }
+                            },
+                            "finishReason": "STOP"
                         }
                     ]
                 }

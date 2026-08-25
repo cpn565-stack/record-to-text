@@ -4,16 +4,16 @@
 
 ## 產品定位
 
-把本機會議錄音轉為可交給後續 ChatAI／LLM 使用的台灣繁體原始逐字稿。App 不摘要、不改寫、不重新斷句、不刪語助詞、不做說話者辨識或時間戳。
+把會議錄音轉為可交給後續 ChatAI／LLM 使用的台灣繁體原始逐字稿。可選 Google AI Studio、Vertex AI 或本機 Qwen；雲端後端會上傳轉錄所需的音訊與 Prompt。預設不摘要、不改寫、不重新斷句、不刪語助詞、不做說話者辨識或時間戳。
 
 ## P0 使用者旅程
 
 1. 開啟 App，保留上次詞庫與本次補充。
 2. 準備共用詞彙、專案詞庫與本次詞彙。
 3. 拖入或選擇 M4A、MP3、WAV、AAC、FLAC。
-4. Enqueue 時凍結模型、語言、Prompt、詞庫、輸出與保留原始稿設定。
-5. 依序完成 ffprobe、ffmpeg、Qwen3-ASR、OpenCC、原子 TXT。
-6. 成功清 temp；失敗保留 normalized WAV；原始音檔不修改、不移動、不刪除。
+4. Enqueue 時凍結後端、模型、區域、語言、Prompt、詞庫與輸出設定；重試「原設定」時不得被目前 UI 設定取代。
+5. 依當前後端完成 ffprobe、ffmpeg／分段、雲端 Gemini 或 Qwen3-ASR、輸出驗證與原子 TXT。
+6. 成功清 temp；雲端分段失敗或取消且已有完成片段時，保留部分 TXT 與最小復原資料供人工取回。這不是自動斷點續跑；重新加入原始錄音會從頭轉錄。原始音檔不修改、不移動、不刪除。
 
 ## P0 追蹤
 
@@ -22,8 +22,9 @@
 | 五種格式與特殊路徑 | Implemented | ffprobe／ffmpeg service；mock E2E 已通過 M4A 特殊路徑，其餘格式待 fixture matrix |
 | 詞彙解析與 Snapshot | Implemented | Core tests / self-test |
 | Prompt 確實傳入 | Implemented, real inference pending | MLX helper 對 `system_prompt` 反射；mock capability；真實 Metal 實測待辦 |
+| Google AI Studio／Vertex AI | Implemented, live matrix pending | 雲端壓縮分段、後端 snapshot 與 fail-closed 輸出契約；各 finish reason／區域／長檔 live matrix 仍需實測 |
 | 多檔單工佇列 | Implemented, build verified | SwiftPM debug／release build 通過；互動仍待完整 App 驗收 |
-| 取消、liveness 與錯誤 | Implemented | SIGINT → SIGTERM → SIGKILL；30 秒無活動警告；mock failure／slow cancellation 通過 |
+| 取消、liveness 與錯誤 | Implemented | SIGINT → SIGTERM → SIGKILL；30 秒無活動警告；雲端取消若已有完成片段，可取回最小文字資料，但不會自動續跑；mock failure／slow cancellation 通過 |
 | OpenCC 台灣繁體 | Implemented | mock E2E 使用真實 `s2twp` 通過 |
 | UTF-8 / LF / 無 BOM | Implemented | self-test 通過 |
 | 原子輸出與不覆蓋 | Implemented | `renamex_np(RENAME_EXCL)`；self-test / XCTest |
@@ -48,10 +49,9 @@
 
 ## 第一版明確不做
 
-- LLM 摘要、改寫、斷句與會議記錄。
+- 預設不做 LLM 摘要、改寫或會議記錄；僅當使用者明確開啟 Vertex AI「附加內容摘要」時，才在完整逐字稿後附加摘要。
 - diarization、時間戳、字幕與 forced alignment。
 - 錄音、剪輯、降噪。
-- 雲端 API 轉錄。
 - Mac App Store、手機、Windows。
 - 多工作平行 ASR。
 

@@ -1,6 +1,6 @@
 import Foundation
 
-public enum RuntimeComponent: String, CaseIterable, Codable, Sendable {
+public enum RuntimeComponent: String, CaseIterable, Codable, Hashable, Sendable {
     case python
     case ffmpeg
     case ffprobe
@@ -32,7 +32,12 @@ public struct ResolvedRuntime: Equatable, Sendable {
     public let ffprobe: URL
     public let opencc: URL
     public let helper: URL
+    public let gcloud: URL?
     public let isDeveloperRuntime: Bool
+    /// Components selected from App-managed `Runtimes/current`. These paths
+    /// require manifest/signature verification even when only a cloud backend
+    /// needs ffmpeg/ffprobe.
+    public let managedComponents: Set<RuntimeComponent>
 
     public init(
         python: URL,
@@ -40,14 +45,40 @@ public struct ResolvedRuntime: Equatable, Sendable {
         ffprobe: URL,
         opencc: URL,
         helper: URL,
-        isDeveloperRuntime: Bool
+        gcloud: URL? = nil,
+        isDeveloperRuntime: Bool,
+        managedComponents: Set<RuntimeComponent> = []
     ) {
         self.python = python
         self.ffmpeg = ffmpeg
         self.ffprobe = ffprobe
         self.opencc = opencc
         self.helper = helper
+        self.gcloud = gcloud
         self.isDeveloperRuntime = isDeveloperRuntime
+        self.managedComponents = managedComponents
+    }
+}
+
+/// Result of locating the two developer-owned executables that are not shipped
+/// as ordinary App helpers. Discovery only chooses paths; it never executes
+/// either program.
+public struct DeveloperRuntimeDiscovery: Equatable, Sendable {
+    public let python: URL
+    public let openCC: URL
+    public let pythonWasDetected: Bool
+    public let openCCWasDetected: Bool
+
+    public init(
+        python: URL,
+        openCC: URL,
+        pythonWasDetected: Bool,
+        openCCWasDetected: Bool
+    ) {
+        self.python = python
+        self.openCC = openCC
+        self.pythonWasDetected = pythonWasDetected
+        self.openCCWasDetected = openCCWasDetected
     }
 }
 
@@ -97,6 +128,7 @@ public struct EnvironmentReport: Equatable, Sendable {
 public enum RuntimeEnvironmentError: LocalizedError {
     case missingComponents([EnvironmentComponentReport])
     case releaseRuntimeNotVerified
+    case releaseRuntimeVerificationFailed(String)
 
     public var errorDescription: String? {
         switch self {
@@ -104,7 +136,9 @@ public enum RuntimeEnvironmentError: LocalizedError {
             let names = components.map(\.component.displayName).joined(separator: "、")
             return "執行環境尚未準備完成：缺少 \(names)。"
         case .releaseRuntimeNotVerified:
-            return "正式 Runtime 尚未通過完整性與簽章驗證，因此拒絕執行。請完成受信任 Runtime 安裝，或明確開啟開發者模式。"
+            return "受管理 Runtime 尚未通過完整性與簽章驗證，因此拒絕執行。請安裝受信任 Runtime，或在設定中明確開啟「開發 Runtime」。"
+        case let .releaseRuntimeVerificationFailed(reason):
+            return "受管理 Runtime 完整性驗證失敗，因此拒絕執行：\(reason)"
         }
     }
 }
@@ -112,6 +146,67 @@ public enum RuntimeEnvironmentError: LocalizedError {
 public enum RuntimeEnvironment {
     public static func homebrewPrefix(for architecture: CPUArchitecture = .current) -> String {
         architecture == .x86_64 ? "/usr/local/bin" : "/opt/homebrew/bin"
+    }
+
+    /// Find the conventional record-to-text Python environment and OpenCC.
+    /// The dedicated virtual environment is preferred over ambient shell
+    /// environments so launching the App from Terminal cannot silently change
+    /// which Python is used.
+    public static func discoverDeveloperRuntime(
+        architecture: CPUArchitecture = .current,
+        homeDirectory: URL? = nil,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        includeStandardOpenCCLocations: Bool = true,
+        fileManager: FileManager = .default
+    ) -> DeveloperRuntimeDiscovery {
+        let home = homeDirectory ?? fileManager.homeDirectoryForCurrentUser
+        let environmentName = architecture == .x86_64
+            ? "record-to-text-intel-env"
+            : "mlx-audio-env"
+        let fallbackPython = home
+            .appendingPathComponent(environmentName, isDirectory: true)
+            .appendingPathComponent("bin/python", isDirectory: false)
+
+        var pythonCandidates = [fallbackPython]
+        for key in ["VIRTUAL_ENV", "CONDA_PREFIX"] {
+            guard let root = normalizedPath(environment[key]) else {
+                continue
+            }
+            pythonCandidates.append(
+                URL(fileURLWithPath: root, isDirectory: true)
+                    .appendingPathComponent("bin/python", isDirectory: false)
+            )
+        }
+
+        let primaryPrefix = homebrewPrefix(for: architecture)
+        let alternatePrefix = architecture == .x86_64
+            ? "/opt/homebrew/bin"
+            : "/usr/local/bin"
+        let fallbackOpenCC = URL(fileURLWithPath: "\(primaryPrefix)/opencc")
+        var openCCCandidates: [URL] = includeStandardOpenCCLocations
+            ? [
+                fallbackOpenCC,
+                URL(fileURLWithPath: "\(alternatePrefix)/opencc")
+            ]
+            : []
+        openCCCandidates.append(contentsOf: executableCandidates(
+            named: "opencc",
+            pathValue: environment["PATH"]
+        ))
+
+        let detectedPython = pythonCandidates.first {
+            fileManager.isExecutableFile(atPath: $0.path)
+        }
+        let detectedOpenCC = openCCCandidates.first {
+            fileManager.isExecutableFile(atPath: $0.path)
+        }
+
+        return DeveloperRuntimeDiscovery(
+            python: detectedPython ?? fallbackPython,
+            openCC: detectedOpenCC ?? fallbackOpenCC,
+            pythonWasDetected: detectedPython != nil,
+            openCCWasDetected: detectedOpenCC != nil
+        )
     }
 
     /// Locate ffmpeg / ffprobe / helper without executing them.
@@ -124,6 +219,7 @@ public enum RuntimeEnvironment {
         bundledFFmpegURL: URL? = nil,
         bundledFFprobeURL: URL? = nil,
         includeSystemAudioTools: Bool = true,
+        developerRuntimeDiscovery: DeveloperRuntimeDiscovery? = nil,
         fileManager: FileManager = .default
     ) -> ResolvedRuntime {
         let releaseBin = paths.runtimes
@@ -133,56 +229,81 @@ public enum RuntimeEnvironment {
             ? "qwen_asr_transformers_runner.py"
             : "qwen_asr_mlx_runner.py"
         let prefix = homebrewPrefix()
-        let home = fileManager.homeDirectoryForCurrentUser
-        let defaultEnvironmentName = CPUArchitecture.current == .x86_64
-            ? "record-to-text-intel-env"
-            : "mlx-audio-env"
 
         let python: URL
         let opencc: URL
         let helper: URL
         let isDeveloperRuntime: Bool
+        var managedComponents = Set<RuntimeComponent>()
 
         if settings.developerMode {
             isDeveloperRuntime = true
+            let discovery = developerRuntimeDiscovery ?? discoverDeveloperRuntime(
+                fileManager: fileManager
+            )
             python = URL(
-                fileURLWithPath: settings.customPythonPath
-                    ?? home.appendingPathComponent(
-                        "\(defaultEnvironmentName)/bin/python"
-                    ).path
+                fileURLWithPath: normalizedPath(settings.customPythonPath)
+                    ?? discovery.python.path
             )
-            opencc = URL(fileURLWithPath: "\(prefix)/opencc")
-            helper = URL(
-                fileURLWithPath: settings.customHelperPath
-                    ?? bundledHelperURL?.path
-                    ?? releaseBin.appendingPathComponent(releaseHelperName).path
-            )
+            opencc = discovery.openCC
+            if let customHelperPath = normalizedPath(settings.customHelperPath) {
+                helper = URL(fileURLWithPath: customHelperPath)
+            } else if let bundledHelperURL {
+                helper = bundledHelperURL
+            } else {
+                helper = releaseBin.appendingPathComponent(releaseHelperName)
+                managedComponents.insert(.helper)
+            }
         } else {
             isDeveloperRuntime = false
             python = releaseBin.appendingPathComponent("python")
             opencc = releaseBin.appendingPathComponent("opencc")
             helper = releaseBin.appendingPathComponent(releaseHelperName)
+            managedComponents.formUnion([.python, .opencc, .helper])
         }
 
-        var ffmpegCandidates: [URL?] = [bundledFFmpegURL]
-        var ffprobeCandidates: [URL?] = [bundledFFprobeURL]
+        var ffmpegCandidates: [(url: URL?, managed: Bool)] = [
+            (bundledFFmpegURL, false)
+        ]
+        var ffprobeCandidates: [(url: URL?, managed: Bool)] = [
+            (bundledFFprobeURL, false)
+        ]
         if includeSystemAudioTools {
-            ffmpegCandidates.append(URL(fileURLWithPath: "\(prefix)/ffmpeg"))
-            ffprobeCandidates.append(URL(fileURLWithPath: "\(prefix)/ffprobe"))
+            ffmpegCandidates.append((URL(fileURLWithPath: "\(prefix)/ffmpeg"), false))
+            ffprobeCandidates.append((URL(fileURLWithPath: "\(prefix)/ffprobe"), false))
         }
-        ffmpegCandidates.append(releaseBin.appendingPathComponent("ffmpeg"))
-        ffprobeCandidates.append(releaseBin.appendingPathComponent("ffprobe"))
+        ffmpegCandidates.append((releaseBin.appendingPathComponent("ffmpeg"), true))
+        ffprobeCandidates.append((releaseBin.appendingPathComponent("ffprobe"), true))
 
-        let ffmpeg = firstExecutable(ffmpegCandidates, fileManager: fileManager)
-        let ffprobe = firstExecutable(ffprobeCandidates, fileManager: fileManager)
+        let selectedFFmpeg = firstExecutable(
+            ffmpegCandidates,
+            fileManager: fileManager
+        )
+        let selectedFFprobe = firstExecutable(
+            ffprobeCandidates,
+            fileManager: fileManager
+        )
+        if selectedFFmpeg.managed {
+            managedComponents.insert(.ffmpeg)
+        }
+        if selectedFFprobe.managed {
+            managedComponents.insert(.ffprobe)
+        }
+
+        let gcloud = settings.backendType == .vertexAI
+            ? GCloudAuthService(customGCloudPath: settings.customGCloudPath)
+                .resolveGCloudURL(fileManager: fileManager)
+            : nil
 
         return ResolvedRuntime(
             python: python,
-            ffmpeg: ffmpeg,
-            ffprobe: ffprobe,
+            ffmpeg: selectedFFmpeg.url,
+            ffprobe: selectedFFprobe.url,
             opencc: opencc,
             helper: helper,
-            isDeveloperRuntime: isDeveloperRuntime
+            gcloud: gcloud,
+            isDeveloperRuntime: isDeveloperRuntime,
+            managedComponents: managedComponents
         )
     }
 
@@ -193,6 +314,7 @@ public enum RuntimeEnvironment {
         bundledFFmpegURL: URL? = nil,
         bundledFFprobeURL: URL? = nil,
         includeSystemAudioTools: Bool = true,
+        developerRuntimeDiscovery: DeveloperRuntimeDiscovery? = nil,
         releaseRuntimeVerifier: ((ResolvedRuntime) throws -> Void)? = nil,
         fileManager: FileManager = .default
     ) throws -> ResolvedRuntime {
@@ -203,21 +325,23 @@ public enum RuntimeEnvironment {
             bundledFFmpegURL: bundledFFmpegURL,
             bundledFFprobeURL: bundledFFprobeURL,
             includeSystemAudioTools: includeSystemAudioTools,
+            developerRuntimeDiscovery: developerRuntimeDiscovery,
             fileManager: fileManager
         )
 
-        let usesCloudAudioTools = settings.backendType == .googleAIStudio
-            || settings.backendType == .vertexAI
+        let requiredComponents = requiredComponents(for: settings.backendType)
+        let managedRequiredComponents = runtime.managedComponents.intersection(
+            requiredComponents
+        )
+        let requiresManagedRuntimeVerification = !managedRequiredComponents.isEmpty
 
+        // This first pass checks only the physical files. Trust is handled by
+        // the verifier immediately below for a managed local runtime.
         let report = inspect(
             runtime,
             backendType: settings.backendType,
             customGCloudPath: settings.customGCloudPath,
-            // 本機 Qwen 雖非雲端，但實體檔案已由 inspect 逐一檢查；
-            // 舊的 MLX release-runtime 驗證器在本分支已不存在，故同樣放行。
-            releaseRuntimeVerified: usesCloudAudioTools
-                || settings.backendType == .localQwen
-                || runtime.isDeveloperRuntime,
+            releaseRuntimeVerified: requiresManagedRuntimeVerification,
             fileManager: fileManager
         )
         let missing = report.components.filter { !$0.isAvailable }
@@ -225,13 +349,20 @@ public enum RuntimeEnvironment {
             throw RuntimeEnvironmentError.missingComponents(missing)
         }
 
-        // Cloud backends only need ffmpeg/ffprobe (plus gcloud for Vertex).
-        // 本機 Qwen 已通過上面的完整元件檢查（python/ffmpeg/ffprobe/opencc/helper）。
-        if !runtime.isDeveloperRuntime && !usesCloudAudioTools && settings.backendType != .localQwen {
+        // App-managed files are never trusted merely because they exist. This
+        // applies to local Qwen and to a cloud job that falls back to managed
+        // ffmpeg/ffprobe.
+        if requiresManagedRuntimeVerification {
             guard let releaseRuntimeVerifier else {
                 throw RuntimeEnvironmentError.releaseRuntimeNotVerified
             }
-            try releaseRuntimeVerifier(runtime)
+            do {
+                try releaseRuntimeVerifier(runtime)
+            } catch {
+                throw RuntimeEnvironmentError.releaseRuntimeVerificationFailed(
+                    error.localizedDescription
+                )
+            }
         }
         return runtime
     }
@@ -249,7 +380,9 @@ public enum RuntimeEnvironment {
         ]
 
         if backendType == .vertexAI {
-            let gcloudURL = GCloudAuthService(customGCloudPath: customGCloudPath).resolveGCloudURL(fileManager: fileManager)
+            let gcloudURL = runtime.gcloud
+                ?? GCloudAuthService(customGCloudPath: customGCloudPath)
+                    .resolveGCloudURL(fileManager: fileManager)
             pairs.append((.gcloud, gcloudURL))
         } else if backendType == .localQwen {
             // 本機 Qwen 需要完整 Runtime：python / ffmpeg / ffprobe / opencc / helper
@@ -259,8 +392,6 @@ public enum RuntimeEnvironment {
         } else if backendType == .googleAIStudio {
             // Google AI Studio API 僅需 ffmpeg/ffprobe 進行音訊壓縮與切片
         }
-
-        let usesCloudAudioTools = backendType == .googleAIStudio || backendType == .vertexAI
 
         let components = pairs.map { component, url in
             guard let url else {
@@ -275,12 +406,8 @@ public enum RuntimeEnvironment {
             let executable = component == .helper
                 ? exists
                 : fileManager.isExecutableFile(atPath: url.path)
-            // 本機 Qwen 沒有雲端憑證概念，實體檔案存在即可用。
-            let trusted = runtime.isDeveloperRuntime
+            let trusted = !runtime.managedComponents.contains(component)
                 || releaseRuntimeVerified
-                || usesCloudAudioTools
-                || backendType == .localQwen
-                || component == .gcloud
             let available = executable && trusted
             let detail: String
             if !executable {
@@ -288,7 +415,7 @@ public enum RuntimeEnvironment {
             } else if trusted {
                 detail = "可用"
             } else {
-                detail = "檔案存在，但正式 Runtime 尚未通過驗證"
+                detail = "檔案存在，但受管理 Runtime 尚未通過完整性驗證"
             }
             return EnvironmentComponentReport(
                 component: component,
@@ -307,13 +434,58 @@ public enum RuntimeEnvironment {
     }
 
     private static func firstExecutable(
-        _ candidates: [URL?],
+        _ candidates: [(url: URL?, managed: Bool)],
         fileManager: FileManager
-    ) -> URL {
-        let urls = candidates.compactMap { $0 }
-        if let match = urls.first(where: { fileManager.isExecutableFile(atPath: $0.path) }) {
+    ) -> (url: URL, managed: Bool) {
+        let candidates = candidates.compactMap { candidate -> (URL, Bool)? in
+            guard let url = candidate.url else {
+                return nil
+            }
+            return (url, candidate.managed)
+        }
+        if let match = candidates.first(where: {
+            fileManager.isExecutableFile(atPath: $0.0.path)
+        }) {
             return match
         }
-        return urls.last ?? URL(fileURLWithPath: "/usr/bin/false")
+        return candidates.last ?? (URL(fileURLWithPath: "/usr/bin/false"), false)
+    }
+
+    private static func requiredComponents(
+        for backendType: ASRBackendType
+    ) -> Set<RuntimeComponent> {
+        switch backendType {
+        case .googleAIStudio:
+            return [.ffmpeg, .ffprobe]
+        case .vertexAI:
+            return [.ffmpeg, .ffprobe, .gcloud]
+        case .localQwen:
+            return [.python, .ffmpeg, .ffprobe, .opencc, .helper]
+        }
+    }
+
+    private static func executableCandidates(
+        named executableName: String,
+        pathValue: String?
+    ) -> [URL] {
+        guard let pathValue else {
+            return []
+        }
+        return pathValue
+            .split(separator: ":", omittingEmptySubsequences: true)
+            .map {
+                URL(fileURLWithPath: String($0), isDirectory: true)
+                    .appendingPathComponent(executableName, isDirectory: false)
+            }
+    }
+
+    private static func normalizedPath(_ value: String?) -> String? {
+        guard let value else {
+            return nil
+        }
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty
+            ? nil
+            : (normalized as NSString).expandingTildeInPath
     }
 }

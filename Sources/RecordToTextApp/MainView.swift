@@ -542,98 +542,7 @@ private struct JobRowView: View {
     @State private var isDeleteJobPresented = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 11) {
-                Image(systemName: statusSymbol)
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(statusColor)
-                    .frame(width: 22, height: 22)
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(job.displayName)
-                        .font(.subheadline.weight(.semibold))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-
-                    HStack(spacing: 7) {
-                        Text(job.stage.displayName)
-                            .font(.caption)
-                            .foregroundStyle(statusColor)
-
-                        // Only show a live timer while the job is running.
-                        // Completed jobs stay as plain「完成」with no counting clock.
-                        if job.id == viewModel.activeJobID {
-                            JobElapsedView(startedAt: job.startedAt)
-                        }
-                    }
-                }
-
-                Spacer()
-                actionButtons
-            }
-
-            if let current = job.progressCurrent,
-               let total = job.progressTotal,
-               total > 0 {
-                ProgressView(value: min(current, total), total: total) {
-                    Text(progressLabel(current: current, total: total, unit: job.progressUnit))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                .animation(.easeInOut(duration: 0.2), value: current)
-            } else if job.id == viewModel.activeJobID {
-                ProgressView()
-                    .controlSize(.small)
-                    .accessibilityLabel(job.stage.displayName)
-            }
-
-            if let failure = job.failure {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(failure.userMessage)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                    if failure.recoveryDirectory != nil {
-                        HStack(spacing: 12) {
-                            if failure.partialTranscriptPath != nil {
-                                Button("打開未完成稿") {
-                                    viewModel.openPartialTranscript(for: job)
-                                }
-                            }
-
-                            Button("在 Finder 顯示復原資料") {
-                                viewModel.revealRecovery(for: job)
-                            }
-                            .buttonStyle(.link)
-
-                            Button("刪除保留資料…", role: .destructive) {
-                                isDeleteRecoveryPresented = true
-                            }
-                            .buttonStyle(.link)
-                        }
-                        .font(.caption)
-                    }
-                }
-                .padding(9)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.red.opacity(0.07), in: RoundedRectangle(cornerRadius: 7))
-            }
-
-            if !job.logLines.isEmpty {
-                DisclosureGroup("執行日誌", isExpanded: $isLogExpanded) {
-                    ScrollView {
-                        Text(job.logLines.joined(separator: "\n"))
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(8)
-                    }
-                    .frame(maxHeight: 150)
-                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
-                }
-                .font(.caption)
-            }
-        }
+        rowContent
         .padding(12)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
         .overlay {
@@ -687,6 +596,122 @@ private struct JobRowView: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("只會從佇列／最近工作移除紀錄，不會刪除原始錄音或已輸出的文字檔。")
+        }
+    }
+
+    @ViewBuilder
+    private var rowContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            rowHeader
+            progressSection
+            failureSection
+            logSection
+        }
+    }
+
+    private var rowHeader: some View {
+        HStack(alignment: .top, spacing: 11) {
+            Image(systemName: statusSymbol)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(statusColor)
+                .frame(width: 22, height: 22)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(job.displayName)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                HStack(spacing: 7) {
+                    Text(job.stage.displayName)
+                        .font(.caption)
+                        .foregroundStyle(statusColor)
+
+                    // Only show a live timer while the job is running.
+                    // Completed jobs stay as plain「完成」with no counting clock.
+                    if job.id == viewModel.activeJobID {
+                        JobElapsedView(startedAt: job.startedAt)
+                    }
+                }
+            }
+
+            Spacer()
+            actionButtons
+        }
+    }
+
+    @ViewBuilder
+    private var progressSection: some View {
+        if let current = job.progressCurrent,
+           let total = job.progressTotal,
+           total > 0 {
+            ProgressView(value: min(current, total), total: total) {
+                Text(progressLabel(current: current, total: total, unit: job.progressUnit))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .animation(.easeInOut(duration: 0.2), value: current)
+        } else if job.id == viewModel.activeJobID {
+            ProgressView()
+                .controlSize(.small)
+                .accessibilityLabel(job.stage.displayName)
+        }
+    }
+
+    @ViewBuilder
+    private var failureSection: some View {
+        if let failure = job.failure {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(failure.userMessage)
+                    .font(.caption)
+                    .foregroundStyle(job.stage == .cancelled ? Color.secondary : Color.red)
+                if failure.recoveryDirectory != nil {
+                    HStack(spacing: 12) {
+                        if failure.partialTranscriptPath != nil {
+                            Button("打開未完成稿") {
+                                viewModel.openPartialTranscript(for: job)
+                            }
+                        }
+
+                        Button("在 Finder 顯示復原資料") {
+                            viewModel.revealRecovery(for: job)
+                        }
+                        .buttonStyle(.link)
+
+                        Button("刪除保留資料…", role: .destructive) {
+                            isDeleteRecoveryPresented = true
+                        }
+                        .buttonStyle(.link)
+                    }
+                    .font(.caption)
+                }
+            }
+            .padding(9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                (job.stage == .cancelled ? Color.orange : Color.red)
+                    .opacity(0.07),
+                in: RoundedRectangle(cornerRadius: 7)
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var logSection: some View {
+        if !job.logLines.isEmpty {
+            DisclosureGroup("執行日誌", isExpanded: $isLogExpanded) {
+                ScrollView {
+                    Text(job.logLines.joined(separator: "\n"))
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                }
+                .frame(maxHeight: 150)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+            }
+            .font(.caption)
         }
     }
 

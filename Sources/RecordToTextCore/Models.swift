@@ -178,6 +178,39 @@ public struct GeminiModelDescriptor: Identifiable, Hashable, Sendable {
 public typealias VertexAIModelDescriptor = GeminiModelDescriptor
 
 public struct AppSettings: Codable, Equatable, Sendable {
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case defaultOutputDirectory
+        case outputLocationMode
+        case lastInputDirectory
+        case lastOutputDirectory
+        case lastSelectedGlossaryID
+        case lastTemporaryTerms
+        case selectedModels
+        case autoStartAfterSelection
+        case revealInFinderWhenCompleted
+        case openTextWhenCompleted
+        case showNotificationWhenCompleted
+        case keepRawTranscript
+        case outputFilenameSuffix
+        case rawFilenameSuffix
+        case recentJobLimit
+        case developerMode
+        case customPythonPath
+        case customHelperPath
+        case hasCompletedOnboarding
+        case backendType
+        // Decode-only migration key. `encode(to:)` deliberately omits it.
+        case googleAIStudioAPIKey
+        case googleAIStudioModelID
+        case vertexAIProjectID
+        case vertexAILocation
+        case vertexAIModelID
+        case vertexAIGCSBucket
+        case vertexAIIncludeSummary
+        case customGCloudPath
+    }
+
     public var schemaVersion: Int
     public var defaultOutputDirectory: String
     public var outputLocationMode: OutputLocationMode
@@ -203,6 +236,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
 
     // MARK: - Cloud Gemini Settings (Google AI Studio & Vertex AI)
     public var backendType: ASRBackendType
+    /// In-memory credential value. Old JSON can still decode this field for
+    /// Keychain migration, but new JSON never encodes it.
     public var googleAIStudioAPIKey: String?
     public var googleAIStudioModelID: String
     public var vertexAIProjectID: String?
@@ -312,6 +347,39 @@ public struct AppSettings: Codable, Equatable, Sendable {
         vertexAIGCSBucket = try container.decodeIfPresent(String.self, forKey: .vertexAIGCSBucket)
         vertexAIIncludeSummary = try container.decodeIfPresent(Bool.self, forKey: .vertexAIIncludeSummary) ?? false
         customGCloudPath = try container.decodeIfPresent(String.self, forKey: .customGCloudPath)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(defaultOutputDirectory, forKey: .defaultOutputDirectory)
+        try container.encode(outputLocationMode, forKey: .outputLocationMode)
+        try container.encodeIfPresent(lastInputDirectory, forKey: .lastInputDirectory)
+        try container.encodeIfPresent(lastOutputDirectory, forKey: .lastOutputDirectory)
+        try container.encodeIfPresent(lastSelectedGlossaryID, forKey: .lastSelectedGlossaryID)
+        try container.encode(lastTemporaryTerms, forKey: .lastTemporaryTerms)
+        try container.encode(selectedModels, forKey: .selectedModels)
+        try container.encode(autoStartAfterSelection, forKey: .autoStartAfterSelection)
+        try container.encode(revealInFinderWhenCompleted, forKey: .revealInFinderWhenCompleted)
+        try container.encode(openTextWhenCompleted, forKey: .openTextWhenCompleted)
+        try container.encode(showNotificationWhenCompleted, forKey: .showNotificationWhenCompleted)
+        try container.encode(keepRawTranscript, forKey: .keepRawTranscript)
+        try container.encodeIfPresent(outputFilenameSuffix, forKey: .outputFilenameSuffix)
+        try container.encodeIfPresent(rawFilenameSuffix, forKey: .rawFilenameSuffix)
+        try container.encode(recentJobLimit, forKey: .recentJobLimit)
+        try container.encode(developerMode, forKey: .developerMode)
+        try container.encodeIfPresent(customPythonPath, forKey: .customPythonPath)
+        try container.encodeIfPresent(customHelperPath, forKey: .customHelperPath)
+        try container.encode(hasCompletedOnboarding, forKey: .hasCompletedOnboarding)
+        try container.encode(backendType, forKey: .backendType)
+        // googleAIStudioAPIKey is intentionally stored only in Keychain.
+        try container.encode(googleAIStudioModelID, forKey: .googleAIStudioModelID)
+        try container.encodeIfPresent(vertexAIProjectID, forKey: .vertexAIProjectID)
+        try container.encode(vertexAILocation, forKey: .vertexAILocation)
+        try container.encode(vertexAIModelID, forKey: .vertexAIModelID)
+        try container.encodeIfPresent(vertexAIGCSBucket, forKey: .vertexAIGCSBucket)
+        try container.encode(vertexAIIncludeSummary, forKey: .vertexAIIncludeSummary)
+        try container.encodeIfPresent(customGCloudPath, forKey: .customGCloudPath)
     }
 
     public var resolvedOutputFilenameSuffix: String {
@@ -445,6 +513,38 @@ public enum TranscriptionStage: String, Codable, CaseIterable, Sendable {
 }
 
 public struct JobSnapshot: Codable, Equatable, Sendable {
+    private enum CodingKeys: String, CodingKey {
+        case modelID
+        case modelRevision
+        case language
+        case glossaryID
+        case glossaryName
+        case terms
+        case prompt
+        case outputLocationMode
+        case outputDirectory
+        case keepRawTranscript
+        case outputFilenameSuffix
+        case rawFilenameSuffix
+        case backendType
+        // Decode-only migration key. `encode(to:)` deliberately omits it.
+        case googleAIStudioAPIKey
+        case googleAIStudioModelID
+        case vertexAIProjectID
+        case vertexAILocation
+        case vertexAIModelID
+        case vertexAIGCSBucket
+        case vertexAIIncludeSummary
+        // Legacy runtime-selection keys are intentionally ignored. Runtime
+        // paths and the Developer Runtime consent are live authorization, not
+        // immutable transcription semantics.
+        case developerMode
+        case customPythonPath
+        case customHelperPath
+        case customGCloudPath
+        case runtimeSettingsCaptured
+    }
+
     public let modelID: String
     public let modelRevision: String?
     public let language: String
@@ -458,6 +558,8 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
     public let outputFilenameSuffix: String
     public let rawFilenameSuffix: String
     public let backendType: ASRBackendType
+    /// Transient execution credential. This is decoded from legacy ledgers for
+    /// migration only and is never encoded into a new ledger.
     public let googleAIStudioAPIKey: String?
     public let googleAIStudioModelID: String
     public let vertexAIProjectID: String?
@@ -547,6 +649,76 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
         vertexAIModelID = try container.decodeIfPresent(String.self, forKey: .vertexAIModelID) ?? "gemini-3.7-flash"
         vertexAIGCSBucket = try container.decodeIfPresent(String.self, forKey: .vertexAIGCSBucket)
         vertexAIIncludeSummary = try container.decodeIfPresent(Bool.self, forKey: .vertexAIIncludeSummary) ?? false
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(modelID, forKey: .modelID)
+        try container.encodeIfPresent(modelRevision, forKey: .modelRevision)
+        try container.encode(language, forKey: .language)
+        try container.encodeIfPresent(glossaryID, forKey: .glossaryID)
+        try container.encodeIfPresent(glossaryName, forKey: .glossaryName)
+        try container.encode(terms, forKey: .terms)
+        try container.encode(prompt, forKey: .prompt)
+        try container.encode(outputLocationMode, forKey: .outputLocationMode)
+        try container.encode(outputDirectory, forKey: .outputDirectory)
+        try container.encode(keepRawTranscript, forKey: .keepRawTranscript)
+        try container.encode(outputFilenameSuffix, forKey: .outputFilenameSuffix)
+        try container.encode(rawFilenameSuffix, forKey: .rawFilenameSuffix)
+        try container.encode(backendType, forKey: .backendType)
+        // googleAIStudioAPIKey is intentionally stored only in Keychain.
+        try container.encode(googleAIStudioModelID, forKey: .googleAIStudioModelID)
+        try container.encodeIfPresent(vertexAIProjectID, forKey: .vertexAIProjectID)
+        try container.encode(vertexAILocation, forKey: .vertexAILocation)
+        try container.encode(vertexAIModelID, forKey: .vertexAIModelID)
+        try container.encodeIfPresent(vertexAIGCSBucket, forKey: .vertexAIGCSBucket)
+        try container.encode(vertexAIIncludeSummary, forKey: .vertexAIIncludeSummary)
+    }
+
+    /// Returns a copy suitable for transient execution. The credential remains
+    /// excluded from Codable output even while present in memory.
+    public func withGoogleAIStudioAPIKey(_ apiKey: String?) -> JobSnapshot {
+        JobSnapshot(
+            modelID: modelID,
+            modelRevision: modelRevision,
+            language: language,
+            glossaryID: glossaryID,
+            glossaryName: glossaryName,
+            terms: terms,
+            prompt: prompt,
+            outputLocationMode: outputLocationMode,
+            outputDirectory: outputDirectory,
+            keepRawTranscript: keepRawTranscript,
+            outputFilenameSuffix: outputFilenameSuffix,
+            rawFilenameSuffix: rawFilenameSuffix,
+            backendType: backendType,
+            googleAIStudioAPIKey: apiKey,
+            googleAIStudioModelID: googleAIStudioModelID,
+            vertexAIProjectID: vertexAIProjectID,
+            vertexAILocation: vertexAILocation,
+            vertexAIModelID: vertexAIModelID,
+            vertexAIGCSBucket: vertexAIGCSBucket,
+            vertexAIIncludeSummary: vertexAIIncludeSummary
+        )
+    }
+}
+
+public extension AppSettings {
+    /// Applies immutable transcription choices captured by a queued job while
+    /// retaining current authorization and executable paths. In particular,
+    /// Developer Runtime consent must be revocable and environment repairs
+    /// must take effect for work that is already queued.
+    func applyingRuntimeConfiguration(from snapshot: JobSnapshot) -> AppSettings {
+        var resolved = self
+        resolved.backendType = snapshot.backendType
+        resolved.selectedModels[CPUArchitecture.current.rawValue] = snapshot.modelID
+        resolved.googleAIStudioModelID = snapshot.googleAIStudioModelID
+        resolved.vertexAIProjectID = snapshot.vertexAIProjectID
+        resolved.vertexAILocation = snapshot.vertexAILocation
+        resolved.vertexAIModelID = snapshot.vertexAIModelID
+        resolved.vertexAIGCSBucket = snapshot.vertexAIGCSBucket
+        resolved.vertexAIIncludeSummary = snapshot.vertexAIIncludeSummary
+        return resolved
     }
 }
 
@@ -662,7 +834,7 @@ public struct JobFailure: Codable, Equatable, Sendable {
 public struct TranscriptionJob: Codable, Equatable, Identifiable, Sendable {
     public let id: UUID
     public let sourcePath: String
-    public let snapshot: JobSnapshot
+    public var snapshot: JobSnapshot
     public let sourceSlice: TranscriptionSourceSlice?
     public var stage: TranscriptionStage
     public var progressCurrent: Double?

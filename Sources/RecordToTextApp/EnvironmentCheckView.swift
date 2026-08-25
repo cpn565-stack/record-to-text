@@ -24,6 +24,30 @@ struct EnvironmentCheckView: View {
 
             statusSummary
 
+            if viewModel.settings.backendType == .localQwen,
+               !viewModel.settings.developerMode
+            {
+                HStack(alignment: .top, spacing: 12) {
+                    Label(
+                        "目前選用受管理 Runtime。它必須通過完整性與簽章驗證；App 不會因檔案存在就直接執行。",
+                        systemImage: "lock.shield"
+                    )
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+
+                    Spacer()
+
+                    Button("改用開發 Runtime") {
+                        viewModel.setSetting(\.customPythonPath, to: nil)
+                        viewModel.setSetting(\.customHelperPath, to: nil)
+                        viewModel.setSetting(\.developerMode, to: true)
+                        viewModel.refreshEnvironment()
+                    }
+                }
+                .padding(10)
+                .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+            }
+
             GroupBox {
                 if let report = viewModel.environmentReport {
                     VStack(spacing: 0) {
@@ -48,7 +72,11 @@ struct EnvironmentCheckView: View {
             }
 
             HStack {
-                Text("後端：\(viewModel.settings.backendType.displayName)")
+                Text(
+                    viewModel.settings.backendType == .localQwen
+                        ? "後端：\(viewModel.settings.backendType.displayName) · \(viewModel.runtimeModeDescription)"
+                        : "後端：\(viewModel.settings.backendType.displayName)"
+                )
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -60,7 +88,7 @@ struct EnvironmentCheckView: View {
             }
         }
         .padding(22)
-        .frame(width: 690, height: 440)
+        .frame(width: 690, height: 500)
         .onAppear {
             viewModel.refreshEnvironment()
         }
@@ -84,7 +112,9 @@ struct EnvironmentCheckView: View {
                                 : report.backendType == .vertexAI
                                     ? "可以開始使用 Google Cloud Vertex AI (Gemini) 轉錄。"
                                     : "可以開始使用本機 Qwen ASR 轉錄。")
-                            : "缺少的元件會在下方標示。"
+                            : report.backendType == .localQwen && !report.isDeveloperRuntime
+                                ? "受管理 Runtime 尚未驗證，或仍缺少必要元件；在通過驗證前不會執行。"
+                                : "缺少的元件會在下方標示。"
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)

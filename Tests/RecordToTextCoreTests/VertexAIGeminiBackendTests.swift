@@ -98,8 +98,8 @@ final class VertexAIGeminiBackendTests: XCTestCase {
 
         let backend = VertexAIGeminiBackend(
             authService: authService,
-            configuration: config,
-            urlSession: mockSession
+            urlSession: mockSession,
+            configuration: config
         )
 
         let dummyLargeAudio = Data(count: 25 * 1024 * 1024)
@@ -161,8 +161,8 @@ final class VertexAIGeminiBackendTests: XCTestCase {
         )
         let backend = VertexAIGeminiBackend(
             authService: GCloudAuthService(customGCloudPath: "/nonexistent/gcloud"),
-            configuration: config,
-            urlSession: mockSession
+            urlSession: mockSession,
+            configuration: config
         )
 
         let dummyAudio = "mock audio bytes".data(using: .utf8)!
@@ -201,8 +201,8 @@ final class VertexAIGeminiBackendTests: XCTestCase {
         )
         let backend = VertexAIGeminiBackend(
             authService: GCloudAuthService(customGCloudPath: "/nonexistent/gcloud"),
-            configuration: config,
-            urlSession: mockSession
+            urlSession: mockSession,
+            configuration: config
         )
 
         let dummyAudio = "mock audio bytes".data(using: .utf8)!
