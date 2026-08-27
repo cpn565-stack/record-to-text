@@ -1994,9 +1994,10 @@ extension TranscriptionEngine {
             attributes: [.posixPermissions: 0o700]
         )
 
-        // Recovery keeps only completed text. MP3 segments are intentionally
-        // excluded because the original sourcePath can recreate them and audio
-        // retention would unnecessarily duplicate sensitive data.
+        // Recovery keeps completed text and optional structured metadata.
+        // MP3 segments are intentionally excluded because the original
+        // sourcePath can recreate them and audio retention would unnecessarily
+        // duplicate sensitive data.
         var recoveredRecords: [AudioSegmentRecord] = []
         for sourceRecord in sourceManifest.segments {
             let transcriptName = String(
@@ -2013,6 +2014,29 @@ extension TranscriptionEngine {
                     to: recoveredTranscript
                 )
             }
+
+            let recoveredMetadataPath: String?
+            if let sourceMetadataPath = sourceRecord.metadataPath {
+                let sourceMetadata = URL(fileURLWithPath: sourceMetadataPath)
+                let recoveredMetadata = recoveredSegments.appendingPathComponent(
+                    String(
+                        format: "segment-%04d.metadata.json",
+                        sourceRecord.segmentIndex
+                    )
+                )
+                if fileManager.fileExists(atPath: sourceMetadata.path) {
+                    try fileManager.copyItem(
+                        at: sourceMetadata,
+                        to: recoveredMetadata
+                    )
+                    recoveredMetadataPath = recoveredMetadata.path
+                } else {
+                    recoveredMetadataPath = nil
+                }
+            } else {
+                recoveredMetadataPath = nil
+            }
+
             recoveredRecords.append(
                 AudioSegmentRecord(
                     segmentIndex: sourceRecord.segmentIndex,
@@ -2021,6 +2045,7 @@ extension TranscriptionEngine {
                     endSeconds: sourceRecord.endSeconds,
                     audioPath: "",
                     outputPath: recoveredTranscript.path,
+                    metadataPath: recoveredMetadataPath,
                     status: sourceRecord.status,
                     completedEventCount: sourceRecord.completedEventCount,
                     failureMessage: sourceRecord.failureMessage

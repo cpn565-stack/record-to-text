@@ -355,44 +355,10 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                     }
 
-                    Picker(
-                        "模型選擇",
-                        selection: Binding(
-                            get: {
-                                if GeminiModelDescriptor.presetModels.contains(where: { $0.id == viewModel.settings.googleAIStudioModelID }) {
-                                    return viewModel.settings.googleAIStudioModelID
-                                }
-                                return "custom"
-                            },
-                            set: { newValue in
-                                if newValue != "custom" {
-                                    viewModel.setSetting(\.googleAIStudioModelID, to: newValue)
-                                }
-                            }
-                        )
-                    ) {
-                        ForEach(GeminiModelDescriptor.presetModels) { preset in
-                            Text(preset.displayName).tag(preset.id)
-                        }
-                        Text("自訂模型 ID…").tag("custom")
-                    }
-
-                    if !GeminiModelDescriptor.presetModels.contains(where: { $0.id == viewModel.settings.googleAIStudioModelID }) {
-                        TextField(
-                            "自訂模型 ID (Model ID)",
-                            text: Binding(
-                                get: { viewModel.settings.googleAIStudioModelID },
-                                set: { viewModel.setSetting(\.googleAIStudioModelID, to: $0.isEmpty ? "gemini-3.7-flash" : $0) }
-                            )
-                        )
-                        .textFieldStyle(.roundedBorder)
-                    }
-
-                    if let selectedPreset = GeminiModelDescriptor.presetModels.first(where: { $0.id == viewModel.settings.googleAIStudioModelID }) {
-                        Text(selectedPreset.note)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                    CloudModelSettingsView(
+                        viewModel: viewModel,
+                        provider: .googleAIStudio
+                    )
 
                     Text("Google AI Studio API 採用標準 Gemini API Key，免裝 gcloud、免設定 GCP 專案。長錄音會自動分段上傳並依順序合併，輸出台灣繁體中文。其餘設定會自動儲存；API Key 需按「儲存到 Keychain」。")
                         .font(.caption)
@@ -418,6 +384,9 @@ struct SettingsView: View {
                         )
                     )
                     .textFieldStyle(.roundedBorder)
+                    .disabled(
+                        viewModel.selectedCloudModelDescriptor?.requiredLocation != nil
+                    )
 
                     TextField(
                         "GCS Bucket 名稱（可選）",
@@ -429,50 +398,34 @@ struct SettingsView: View {
                     )
                     .textFieldStyle(.roundedBorder)
 
-                    Picker(
-                        "模型選擇",
-                        selection: Binding(
-                            get: {
-                                if GeminiModelDescriptor.presetModels.contains(where: { $0.id == viewModel.settings.vertexAIModelID }) {
-                                    return viewModel.settings.vertexAIModelID
-                                }
-                                return "custom"
-                            },
-                            set: { newValue in
-                                if newValue != "custom" {
-                                    viewModel.setSetting(\.vertexAIModelID, to: newValue)
-                                }
-                            }
-                        )
-                    ) {
-                        ForEach(GeminiModelDescriptor.presetModels) { preset in
-                            Text(preset.displayName).tag(preset.id)
-                        }
-                        Text("自訂模型 ID…").tag("custom")
-                    }
-
-                    if !GeminiModelDescriptor.presetModels.contains(where: { $0.id == viewModel.settings.vertexAIModelID }) {
-                        TextField(
-                            "自訂模型 ID (Model ID)",
-                            text: Binding(
-                                get: { viewModel.settings.vertexAIModelID },
-                                set: { viewModel.setSetting(\.vertexAIModelID, to: $0.isEmpty ? "gemini-3.7-flash" : $0) }
-                            )
-                        )
-                        .textFieldStyle(.roundedBorder)
-                    }
-
-                    if let selectedPreset = GeminiModelDescriptor.presetModels.first(where: { $0.id == viewModel.settings.vertexAIModelID }) {
-                        Text(selectedPreset.note)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                    CloudModelSettingsView(
+                        viewModel: viewModel,
+                        provider: .vertexAI
+                    )
 
                     Toggle(
                         "附加內容摘要（輸出不再是純逐字稿）",
                         isOn: setting(\.vertexAIIncludeSummary)
                     )
-                    Text("預設關閉。開啟後，Vertex AI 會在逐字稿後附加摘要；若要保留純原始逐字稿，請維持關閉。")
+                    if viewModel.settings.vertexAIIncludeSummary {
+                        Picker(
+                            "摘要模型",
+                            selection: setting(\.vertexAISummaryModelID)
+                        ) {
+                            ForEach(GCloudModelCatalog.summaryModels) { model in
+                                Text(model.displayName).tag(model.id)
+                            }
+                            if !GCloudModelCatalog.summaryModels.contains(where: {
+                                $0.id == viewModel.settings.vertexAISummaryModelID
+                            }) {
+                                Text(
+                                    "不支援：\(viewModel.settings.vertexAISummaryModelID)"
+                                )
+                                .tag(viewModel.settings.vertexAISummaryModelID)
+                            }
+                        }
+                    }
+                    Text("預設關閉。摘要一律在所有片段合併後只產生一次；選擇專用 Transcribe 時，摘要會改由上方指定的一般 Gemini 模型執行。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
@@ -489,7 +442,7 @@ struct SettingsView: View {
                     )
                     .textFieldStyle(.roundedBorder)
 
-                    Text("Vertex AI 使用本機 `gcloud` 認證與 GCP 專案。所有設定皆會即時自動儲存。")
+                    Text("Google Cloud 模式使用本機 `gcloud` 認證與 GCP 專案。一般 Gemini 走 Vertex generateContent；Gemini 3.5 Transcribe Preview 走 Agent Platform 專用契約。所有設定皆會即時自動儲存。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

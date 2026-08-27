@@ -999,6 +999,7 @@ public struct TranscriptionJob: Codable, Equatable, Identifiable, Sendable {
     public var progressUnit: String?
     public var outputPath: String?
     public var rawOutputPath: String?
+    public var metadataOutputPath: String?
     public var createdAt: Date
     public var startedAt: Date?
     public var completedAt: Date?
@@ -1023,6 +1024,7 @@ public struct TranscriptionJob: Codable, Equatable, Identifiable, Sendable {
         self.progressUnit = nil
         self.outputPath = nil
         self.rawOutputPath = nil
+        self.metadataOutputPath = nil
         self.createdAt = createdAt
         self.startedAt = nil
         self.completedAt = nil
@@ -1047,6 +1049,7 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
     public let sourcePath: String
     public let sourceSlice: TranscriptionSourceSlice?
     public let outputPath: String?
+    public let metadataOutputPath: String?
     public let stage: TranscriptionStage
     public let startedAt: Date?
     public let completedAt: Date?
@@ -1058,6 +1061,7 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
         sourcePath: String,
         sourceSlice: TranscriptionSourceSlice? = nil,
         outputPath: String?,
+        metadataOutputPath: String? = nil,
         stage: TranscriptionStage,
         startedAt: Date?,
         completedAt: Date?,
@@ -1068,6 +1072,7 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
         self.sourcePath = sourcePath
         self.sourceSlice = sourceSlice
         self.outputPath = outputPath
+        self.metadataOutputPath = metadataOutputPath
         self.stage = stage
         self.startedAt = startedAt
         self.completedAt = completedAt
@@ -1081,6 +1086,7 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
             sourcePath: job.sourcePath,
             sourceSlice: job.sourceSlice,
             outputPath: job.outputPath,
+            metadataOutputPath: job.metadataOutputPath,
             stage: job.stage,
             startedAt: job.startedAt,
             completedAt: job.completedAt,

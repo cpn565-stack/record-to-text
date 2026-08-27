@@ -268,15 +268,17 @@ final class AppViewModel: ObservableObject {
     var selectedModelName: String {
         switch settings.backendType {
         case .googleAIStudio:
-            if let preset = GeminiModelDescriptor.presetModels.first(where: { $0.id == settings.googleAIStudioModelID }) {
-                return "Google AI Studio (\(preset.displayName))"
-            }
-            return "Google AI Studio (\(settings.googleAIStudioModelID))"
+            let descriptor = CloudModelCatalog.resolvedDescriptor(
+                provider: .googleAIStudio,
+                modelID: settings.googleAIStudioModelID
+            )
+            return "Google AI Studio (\(descriptor.displayName))"
         case .vertexAI:
-            if let preset = GeminiModelDescriptor.presetModels.first(where: { $0.id == settings.vertexAIModelID }) {
-                return "Vertex AI (\(preset.displayName))"
-            }
-            return "Vertex AI (\(settings.vertexAIModelID))"
+            let descriptor = CloudModelCatalog.resolvedDescriptor(
+                provider: .vertexAI,
+                modelID: settings.vertexAIModelID
+            )
+            return "Google Cloud (\(descriptor.displayName))"
         case .localQwen:
             return ASRModelDescriptor.descriptor(id: settings.selectedModelID)?.displayName
                 ?? settings.selectedModelID
@@ -292,8 +294,14 @@ final class AppViewModel: ObservableObject {
     var appSubtitle: String {
         switch settings.backendType {
         case .googleAIStudio:
+            if selectedCloudModelIsDedicatedTranscribe {
+                return "透過 Google AI Studio 專用 Gemini Transcribe 產出台灣繁體逐字稿。"
+            }
             return "透過 Google AI Studio (Gemini) 產出台灣繁體逐字稿。"
         case .vertexAI:
+            if selectedCloudModelIsDedicatedTranscribe {
+                return "透過 gcloud / Agent Platform 專用 Gemini Transcribe 產出台灣繁體逐字稿。"
+            }
             return "透過 Google Cloud Vertex AI (Gemini)，直接產出台灣繁體逐字稿。"
         case .localQwen:
             return "把會議錄音留在這台 Mac，產生可繼續整理的台灣繁體文字稿。"
@@ -302,10 +310,8 @@ final class AppViewModel: ObservableObject {
 
     var selectedModelDetail: String? {
         switch settings.backendType {
-        case .googleAIStudio:
-            return GeminiModelDescriptor.presetModels.first(where: { $0.id == settings.googleAIStudioModelID })?.note
-        case .vertexAI:
-            return GeminiModelDescriptor.presetModels.first(where: { $0.id == settings.vertexAIModelID })?.note
+        case .googleAIStudio, .vertexAI:
+            return selectedCloudModelDescriptor?.note
         case .localQwen:
             return ASRModelDescriptor.descriptor(id: settings.selectedModelID)?.detail
         }
@@ -1376,6 +1382,19 @@ final class AppViewModel: ObservableObject {
             return
         }
 
+        let cloudConfiguration: ResolvedCloudJobConfiguration?
+        do {
+            cloudConfiguration = try resolveCloudJobConfiguration(
+                terms: promptResult.terms
+            )
+        } catch {
+            alert = UserFacingAlert(
+                title: "專用轉錄設定無效",
+                message: error.localizedDescription
+            )
+            return
+        }
+
         let outputDirectory: String
         if settings.outputLocationMode == .askEveryTime {
             guard let selected = chooseDirectory(
@@ -1411,7 +1430,21 @@ final class AppViewModel: ObservableObject {
                 vertexAILocation: settings.vertexAILocation,
                 vertexAIModelID: settings.vertexAIModelID,
                 vertexAIGCSBucket: settings.vertexAIGCSBucket,
-                vertexAIIncludeSummary: settings.vertexAIIncludeSummary
+                vertexAIIncludeSummary: settings.vertexAIIncludeSummary,
+                cloudTransport: cloudConfiguration?.descriptor.transport
+                    ?? .geminiGenerateContent,
+                transcriptionOptions: cloudConfiguration?.options ?? .default,
+                resolvedLanguageCodes:
+                    cloudConfiguration?.resolvedLanguageCodes ?? [],
+                resolvedCustomVocabulary:
+                    cloudConfiguration?.resolvedCustomVocabulary ?? [],
+                modelMaximumDurationSeconds:
+                    cloudConfiguration?.maximumAudioDurationSeconds,
+                modelRecommendedSegmentDurationSeconds:
+                    cloudConfiguration?.recommendedSegmentDurationSeconds,
+                vertexAISummaryModelID: settings.vertexAISummaryModelID,
+                allowDedicatedTranscribeFallbackToGeneralGemini:
+                    settings.allowDedicatedTranscribeFallbackToGeneralGemini
             )
             var job = TranscriptionJob(
                 sourcePath: url.standardizedFileURL.path,
@@ -1422,6 +1455,17 @@ final class AppViewModel: ObservableObject {
                 job.logLines.append(
                     "來源切片：\(sourceSlice.displayName)，將依佇列順序逐段處理。"
                 )
+            }
+            if let cloudConfiguration,
+               cloudConfiguration.descriptor.isDedicatedTranscription {
+                job.logLines.append(
+                    "專用轉錄：\(cloudConfiguration.descriptor.displayName)，transport \(cloudConfiguration.descriptor.transport.displayName)，單段 \(Int(cloudConfiguration.recommendedSegmentDurationSeconds / 60)) 分鐘。"
+                )
+                if cloudConfiguration.usesLargeVocabulary {
+                    job.logLines.append(
+                        "提醒：Custom Vocabulary 共 \(cloudConfiguration.resolvedCustomVocabulary.count) 個詞，超過建議的 \(CloudTranscriptionPolicy.recommendedCustomVocabularyCount) 個；可執行，但品質可能受影響。"
+                    )
+                }
             }
             jobs.append(job)
         }
@@ -1526,6 +1570,7 @@ final class AppViewModel: ObservableObject {
                 jobs[index].progressTotal = nil
                 jobs[index].outputPath = result.outputURL.path
                 jobs[index].rawOutputPath = result.rawOutputURL?.path
+                jobs[index].metadataOutputPath = result.metadataOutputURL?.path
                 jobs[index].completedAt = Date()
                 let duration = Self.durationFormatter.string(from: result.duration) ?? "—"
                 if result.containsSkippedAudio {
@@ -1534,6 +1579,11 @@ final class AppViewModel: ObservableObject {
                     )
                 } else {
                     jobs[index].logLines.append("完成，耗時 \(duration)。")
+                }
+                if let metadataURL = result.metadataOutputURL {
+                    jobs[index].logLines.append(
+                        "詳細轉錄 JSON：\(metadataURL.lastPathComponent)"
+                    )
                 }
                 if cancellationArrivedTooLate {
                     jobs[index].logLines.append("取消要求送達時輸出已完成，因此保留完成結果。")

@@ -182,7 +182,8 @@ final class GoogleAIStudioInteractionsContractTests: XCTestCase {
         XCTAssertEqual(result.providerResponseID, "interaction-123")
         XCTAssertEqual(result.words.count, 2)
         XCTAssertEqual(result.words[0].speaker, "speaker-1")
-        XCTAssertEqual(result.words[0].startSeconds, 0.4, accuracy: 0.0001)
+        let firstStart = try XCTUnwrap(result.words[0].startSeconds)
+        XCTAssertEqual(firstStart, 0.4, accuracy: 0.0001)
         XCTAssertEqual(result.speakerTurns.count, 1)
         XCTAssertEqual(result.speakerTurns[0].text, "今天討論")
     }
