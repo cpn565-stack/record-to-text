@@ -3,6 +3,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+models_test_state = (ROOT / "Tests/RecordToTextCoreTests/ModelsDefaultsTests.swift").read_text()
+migration_test_state = (ROOT / "Tests/RecordToTextCoreTests/AppCredentialMigrationTests.swift").read_text()
+vertex_test_state = (ROOT / "Tests/RecordToTextCoreTests/VertexAIGeminiBackendTests.swift").read_text()
+if (
+    "XCTAssertEqual(settings.schemaVersion, 2)" in models_test_state
+    and 'XCTAssertEqual(viewModel.alert?.title, "部分資料未能載入")' in migration_test_state
+    and "private var fakeGCloudDirectory" in vertex_test_state
+):
+    print("phase 0f already applied")
+    raise SystemExit(0)
+
 
 def replace_once(path: Path, old: str, new: str) -> None:
     text = path.read_text()

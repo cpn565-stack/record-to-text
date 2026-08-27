@@ -85,7 +85,9 @@ public final class TranscriptionEngine {
     private let openCCService: OpenCCService
     private let backend: HelperASRBackend
     private let googleAIStudioBackend: GoogleAIStudioBackend
+    private let googleAIStudioTranscribeBackend: GoogleAIStudioTranscribeBackend
     private let vertexAIBackend: VertexAIGeminiBackend
+    private let agentPlatformTranscribeBackend: AgentPlatformTranscribeBackend
     private let sleepPrevention: SleepPreventionService
     private let maximumASRSegmentDuration: TimeInterval
     private let cancellationLock = NSLock()
@@ -153,7 +155,9 @@ public final class TranscriptionEngine {
         paths: ApplicationPaths,
         runner: ProcessRunner = ProcessRunner(),
         googleAIStudioBackend: GoogleAIStudioBackend? = nil,
+        googleAIStudioTranscribeBackend: GoogleAIStudioTranscribeBackend? = nil,
         vertexAIBackend: VertexAIGeminiBackend? = nil,
+        agentPlatformTranscribeBackend: AgentPlatformTranscribeBackend? = nil,
         sleepPrevention: SleepPreventionService = SleepPreventionService(),
         maximumASRSegmentDuration: TimeInterval =
             AudioSegmentPlanner.productionMaximumDuration
@@ -166,7 +170,14 @@ public final class TranscriptionEngine {
         self.openCCService = OpenCCService(executableURL: runtime.opencc, runner: runner)
         self.backend = HelperASRBackend(runtime: runtime, paths: paths, runner: runner)
         self.googleAIStudioBackend = googleAIStudioBackend ?? GoogleAIStudioBackend()
-        self.vertexAIBackend = vertexAIBackend ?? VertexAIGeminiBackend(authService: GCloudAuthService(runner: runner))
+        self.googleAIStudioTranscribeBackend = googleAIStudioTranscribeBackend
+            ?? GoogleAIStudioTranscribeBackend()
+        self.vertexAIBackend = vertexAIBackend
+            ?? VertexAIGeminiBackend(authService: GCloudAuthService(runner: runner))
+        self.agentPlatformTranscribeBackend = agentPlatformTranscribeBackend
+            ?? AgentPlatformTranscribeBackend(
+                authService: GCloudAuthService(runner: runner)
+            )
         self.sleepPrevention = sleepPrevention
         self.maximumASRSegmentDuration = maximumASRSegmentDuration
     }
@@ -870,6 +881,26 @@ public final class TranscriptionEngine {
         return "\(base)_第\(sourceSlice.partIndex)-\(sourceSlice.partCount)段"
     }
 
+    static func effectiveCloudSegmentDuration(
+        for snapshot: JobSnapshot,
+        productMaximum: TimeInterval =
+            AudioSegmentPlanner.productionMaximumDuration
+    ) -> TimeInterval {
+        let modelID = snapshot.backendType == .googleAIStudio
+            ? snapshot.googleAIStudioModelID
+            : snapshot.vertexAIModelID
+        let descriptor = CloudModelCatalog.resolvedDescriptor(
+            provider: snapshot.backendType,
+            modelID: modelID
+        )
+        let captured = snapshot.modelRecommendedSegmentDurationSeconds
+            ?? descriptor.recommendedSegmentDurationSeconds
+        guard captured.isFinite, captured > 0 else {
+            return productMaximum
+        }
+        return min(productMaximum, captured)
+    }
+
     private func runGoogleAIStudioPipeline(
         job: TranscriptionJob,
         startedAt: Date,
@@ -880,15 +911,36 @@ public final class TranscriptionEngine {
         currentStage: PipelineStageTracker,
         update: @escaping (PipelineUpdate) -> Void
     ) async throws -> PipelineResult {
-        googleAIStudioBackend.updateConfiguration(
-            GoogleAIStudioBackend.Configuration(
-                apiKey: job.snapshot.googleAIStudioAPIKey,
-                modelID: job.snapshot.googleAIStudioModelID
-            )
+        let descriptor = CloudModelCatalog.resolvedDescriptor(
+            provider: .googleAIStudio,
+            modelID: job.snapshot.googleAIStudioModelID
         )
-        let modelDisplay = job.snapshot.googleAIStudioModelID
+        switch job.snapshot.cloudTransport {
+        case .geminiInteractionsTranscribe:
+            googleAIStudioTranscribeBackend.updateConfiguration(
+                GoogleAIStudioTranscribeBackend.Configuration(
+                    apiKey: job.snapshot.googleAIStudioAPIKey,
+                    modelID: job.snapshot.googleAIStudioModelID,
+                    options: job.snapshot.transcriptionOptions
+                )
+            )
+        case .geminiGenerateContent:
+            googleAIStudioBackend.updateConfiguration(
+                GoogleAIStudioBackend.Configuration(
+                    apiKey: job.snapshot.googleAIStudioAPIKey,
+                    modelID: job.snapshot.googleAIStudioModelID
+                )
+            )
+        case .agentPlatformTranscribe:
+            throw GoogleAIStudioTranscribeError.invalidConfiguration(
+                "Google AI Studio 工作不能使用 Agent Platform transport。"
+            )
+        }
+
+        let modelDisplay = descriptor.displayName
         return try await runCloudPipeline(
             job: job,
+            descriptor: descriptor,
             startedAt: startedAt,
             sourceURL: sourceURL,
             workingDirectory: workingDirectory,
@@ -921,44 +973,46 @@ public final class TranscriptionEngine {
         maxPercent: Double,
         workingDirectory: URL? = nil,
         update: @escaping (PipelineUpdate) -> Void
-    ) async throws -> String {
-        let progressUpdater = Task {
-            var currentPercent = basePercent
-            var elapsedSeconds = 0
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                if Task.isCancelled { break }
-                elapsedSeconds += 2
-                currentPercent = min(currentPercent + 3.0, maxPercent)
-                update(.progress(current: currentPercent, total: 100, unit: "percent"))
-                update(
-                    .log(
-                        level: "info",
-                        message: "正在由 \(modelDisplay) 轉錄中... (已耗時 \(elapsedSeconds) 秒)"
-                    )
+    ) async throws -> CloudTranscriptionResult {
+        try await withCloudLiveProgress(
+            modelDisplay: modelDisplay,
+            basePercent: basePercent,
+            maxPercent: maxPercent,
+            update: update
+        ) {
+            switch job.snapshot.cloudTransport {
+            case .geminiInteractionsTranscribe:
+                return try await self.googleAIStudioTranscribeBackend.transcribe(
+                    audioData: audioData,
+                    mimeType: "audio/mp3",
+                    customVocabulary: job.snapshot.resolvedCustomVocabulary,
+                    workingDirectory: workingDirectory,
+                    logger: { level, message in
+                        update(.log(level: level, message: message))
+                    }
+                )
+            case .geminiGenerateContent:
+                let text = try await self.googleAIStudioBackend.transcribe(
+                    audioData: audioData,
+                    mimeType: "audio/mp3",
+                    terms: job.snapshot.terms,
+                    customPrompt: job.snapshot.prompt,
+                    timeOffsetSeconds: timeOffset,
+                    workingDirectory: workingDirectory,
+                    logger: { level, message in
+                        update(.log(level: level, message: message))
+                    }
+                )
+                return CloudTranscriptionResult(
+                    text: text,
+                    modelID: job.snapshot.googleAIStudioModelID,
+                    transport: .geminiGenerateContent
+                )
+            case .agentPlatformTranscribe:
+                throw GoogleAIStudioTranscribeError.invalidConfiguration(
+                    "Google AI Studio 工作不能使用 Agent Platform transport。"
                 )
             }
-        }
-
-        do {
-            let text = try await googleAIStudioBackend.transcribe(
-                audioData: audioData,
-                mimeType: "audio/mp3",
-                terms: job.snapshot.terms,
-                customPrompt: job.snapshot.prompt,
-                timeOffsetSeconds: timeOffset,
-                workingDirectory: workingDirectory,
-                logger: { level, message in
-                    update(.log(level: level, message: message))
-                }
-            )
-            progressUpdater.cancel()
-            await progressUpdater.value
-            return text
-        } catch {
-            progressUpdater.cancel()
-            await progressUpdater.value
-            throw error
         }
     }
 
@@ -972,33 +1026,60 @@ public final class TranscriptionEngine {
         currentStage: PipelineStageTracker,
         update: @escaping (PipelineUpdate) -> Void
     ) async throws -> PipelineResult {
-        let resolvedLocation = Self.resolvedVertexLocation(
-            job.snapshot.vertexAILocation
+        let descriptor = CloudModelCatalog.resolvedDescriptor(
+            provider: .vertexAI,
+            modelID: job.snapshot.vertexAIModelID
+        )
+        let resolvedLocation = descriptor.effectiveLocation(
+            requestedLocation: job.snapshot.vertexAILocation
         )
 
         vertexAIBackend.updateAuthentication(
             customGCloudPath: runtime.gcloud?.path,
             runner: runner
         )
-        vertexAIBackend.updateConfiguration(
-            VertexAIGeminiBackend.Configuration(
-                projectID: job.snapshot.vertexAIProjectID,
-                location: resolvedLocation,
-                modelID: job.snapshot.vertexAIModelID,
-                gcsBucket: job.snapshot.vertexAIGCSBucket,
-                includeSummary: job.snapshot.vertexAIIncludeSummary
-            )
+        agentPlatformTranscribeBackend.updateAuthentication(
+            customGCloudPath: runtime.gcloud?.path,
+            runner: runner
         )
-        let modelDisplay = job.snapshot.vertexAIModelID
+
+        switch job.snapshot.cloudTransport {
+        case .agentPlatformTranscribe:
+            agentPlatformTranscribeBackend.updateConfiguration(
+                AgentPlatformTranscribeBackend.Configuration(
+                    projectID: job.snapshot.vertexAIProjectID,
+                    modelID: job.snapshot.vertexAIModelID,
+                    gcsBucket: job.snapshot.vertexAIGCSBucket,
+                    options: job.snapshot.transcriptionOptions
+                )
+            )
+        case .geminiGenerateContent:
+            vertexAIBackend.updateConfiguration(
+                VertexAIGeminiBackend.Configuration(
+                    projectID: job.snapshot.vertexAIProjectID,
+                    location: resolvedLocation,
+                    modelID: job.snapshot.vertexAIModelID,
+                    gcsBucket: job.snapshot.vertexAIGCSBucket,
+                    includeSummary: job.snapshot.vertexAIIncludeSummary
+                )
+            )
+        case .geminiInteractionsTranscribe:
+            throw AgentPlatformTranscribeError.invalidConfiguration(
+                "gcloud 工作不能使用 Gemini API Interactions transport。"
+            )
+        }
+
+        let modelDisplay = descriptor.displayName
         return try await runCloudPipeline(
             job: job,
+            descriptor: descriptor,
             startedAt: startedAt,
             sourceURL: sourceURL,
             workingDirectory: workingDirectory,
             outputDirectory: outputDirectory,
             metadata: metadata,
             currentStage: currentStage,
-            serviceDisplay: "Google Cloud Vertex AI (\(resolvedLocation))",
+            serviceDisplay: "Google Cloud (\(resolvedLocation))",
             modelDisplay: modelDisplay,
             update: update,
             finalizeTranscript: { segmentTexts in
@@ -1006,10 +1087,31 @@ public final class TranscriptionEngine {
                     segmentTexts: segmentTexts,
                     includeSummary: job.snapshot.vertexAIIncludeSummary,
                     summarize: { completeTranscript in
+                        let summaryDescriptor = CloudModelCatalog.resolvedDescriptor(
+                            provider: .vertexAI,
+                            modelID: job.snapshot.vertexAISummaryModelID
+                        )
+                        guard summaryDescriptor.supportsSummary else {
+                            throw VertexAIError.requestFailed(
+                                statusCode: 400,
+                                message: "摘要模型 \(summaryDescriptor.id) 不支援一般文字生成。"
+                            )
+                        }
                         update(
                             .log(
                                 level: "info",
-                                message: "逐字稿已完整合併，正在產生一次全文摘要。"
+                                message: "逐字稿已完整合併，正使用 \(summaryDescriptor.displayName) 產生一次全文摘要。"
+                            )
+                        )
+                        self.vertexAIBackend.updateConfiguration(
+                            VertexAIGeminiBackend.Configuration(
+                                projectID: job.snapshot.vertexAIProjectID,
+                                location: summaryDescriptor.effectiveLocation(
+                                    requestedLocation: job.snapshot.vertexAILocation
+                                ),
+                                modelID: summaryDescriptor.id,
+                                gcsBucket: job.snapshot.vertexAIGCSBucket,
+                                includeSummary: false
                             )
                         )
                         return try await self.vertexAIBackend.summarizeTranscript(
@@ -1024,7 +1126,7 @@ public final class TranscriptionEngine {
                 )
             },
             transcribe: { audioData, timeOffset, basePercent, maxPercent, segmentLabel in
-                try await self.transcribeWithLiveProgress(
+                try await self.transcribeVertexWithLiveProgress(
                     audioData: audioData,
                     job: job,
                     modelDisplay: "\(modelDisplay)\(segmentLabel)",
@@ -1038,7 +1140,7 @@ public final class TranscriptionEngine {
         )
     }
 
-    private func transcribeWithLiveProgress(
+    private func transcribeVertexWithLiveProgress(
         audioData: Data,
         job: TranscriptionJob,
         modelDisplay: String,
@@ -1047,7 +1149,56 @@ public final class TranscriptionEngine {
         maxPercent: Double,
         workingDirectory: URL? = nil,
         update: @escaping (PipelineUpdate) -> Void
-    ) async throws -> String {
+    ) async throws -> CloudTranscriptionResult {
+        try await withCloudLiveProgress(
+            modelDisplay: modelDisplay,
+            basePercent: basePercent,
+            maxPercent: maxPercent,
+            update: update
+        ) {
+            switch job.snapshot.cloudTransport {
+            case .agentPlatformTranscribe:
+                return try await self.agentPlatformTranscribeBackend.transcribe(
+                    audioData: audioData,
+                    mimeType: "audio/mp3",
+                    customVocabulary: job.snapshot.resolvedCustomVocabulary,
+                    workingDirectory: workingDirectory,
+                    logger: { level, message in
+                        update(.log(level: level, message: message))
+                    }
+                )
+            case .geminiGenerateContent:
+                let text = try await self.vertexAIBackend.transcribe(
+                    audioData: audioData,
+                    mimeType: "audio/mp3",
+                    terms: job.snapshot.terms,
+                    customPrompt: job.snapshot.prompt,
+                    timeOffsetSeconds: timeOffset,
+                    workingDirectory: workingDirectory,
+                    logger: { level, message in
+                        update(.log(level: level, message: message))
+                    }
+                )
+                return CloudTranscriptionResult(
+                    text: text,
+                    modelID: job.snapshot.vertexAIModelID,
+                    transport: .geminiGenerateContent
+                )
+            case .geminiInteractionsTranscribe:
+                throw AgentPlatformTranscribeError.invalidConfiguration(
+                    "gcloud 工作不能使用 Gemini API Interactions transport。"
+                )
+            }
+        }
+    }
+
+    private func withCloudLiveProgress<T>(
+        modelDisplay: String,
+        basePercent: Double,
+        maxPercent: Double,
+        update: @escaping (PipelineUpdate) -> Void,
+        operation: () async throws -> T
+    ) async throws -> T {
         let progressUpdater = Task {
             var currentPercent = basePercent
             var elapsedSeconds = 0
@@ -1056,7 +1207,13 @@ public final class TranscriptionEngine {
                 if Task.isCancelled { break }
                 elapsedSeconds += 2
                 currentPercent = min(currentPercent + 3.0, maxPercent)
-                update(.progress(current: currentPercent, total: 100, unit: "percent"))
+                update(
+                    .progress(
+                        current: currentPercent,
+                        total: 100,
+                        unit: "percent"
+                    )
+                )
                 update(
                     .log(
                         level: "info",
@@ -1067,20 +1224,10 @@ public final class TranscriptionEngine {
         }
 
         do {
-            let text = try await vertexAIBackend.transcribe(
-                audioData: audioData,
-                mimeType: "audio/mp3",
-                terms: job.snapshot.terms,
-                customPrompt: job.snapshot.prompt,
-                timeOffsetSeconds: timeOffset,
-                workingDirectory: workingDirectory,
-                logger: { level, message in
-                    update(.log(level: level, message: message))
-                }
-            )
+            let result = try await operation()
             progressUpdater.cancel()
             await progressUpdater.value
-            return text
+            return result
         } catch {
             progressUpdater.cancel()
             await progressUpdater.value
@@ -1090,6 +1237,7 @@ public final class TranscriptionEngine {
 
     private func runCloudPipeline(
         job: TranscriptionJob,
+        descriptor: CloudModelDescriptor,
         startedAt: Date,
         sourceURL: URL,
         workingDirectory: URL,
@@ -1106,12 +1254,16 @@ public final class TranscriptionEngine {
             _ basePercent: Double,
             _ maxPercent: Double,
             _ segmentLabel: String
-        ) async throws -> String
+        ) async throws -> CloudTranscriptionResult
     ) async throws -> PipelineResult {
         let fileManager = FileManager.default
+        let effectiveSegmentDuration = Self.effectiveCloudSegmentDuration(
+            for: job.snapshot,
+            productMaximum: maximumASRSegmentDuration
+        )
         let segmentPlan = try AudioSegmentPlanner.makePlan(
             sourceDuration: metadata.duration,
-            maximumSegmentDuration: maximumASRSegmentDuration
+            maximumSegmentDuration: effectiveSegmentDuration
         )
         let totalSegments = segmentPlan.expectedSegmentCount
         let sourceTimeOffset = Self.cloudSegmentStart(
@@ -1136,6 +1288,8 @@ public final class TranscriptionEngine {
             ofItemAtPath: segmentsDirectory.path
         )
 
+        let writesMetadata = descriptor.isDedicatedTranscription
+            && job.snapshot.transcriptionOptions.writeMetadataJSON
         var segmentManifest = AudioSegmentManifest(
             jobID: job.id,
             sourceDurationSeconds: segmentPlan.sourceDurationSeconds,
@@ -1148,27 +1302,41 @@ public final class TranscriptionEngine {
                 let transcriptURL = segmentsDirectory.appendingPathComponent(
                     segment.transcriptFileName
                 )
+                let metadataURL = segmentsDirectory.appendingPathComponent(
+                    String(
+                        format: "segment-%04d.metadata.json",
+                        segment.index
+                    )
+                )
                 return AudioSegmentRecord(
                     segmentIndex: segment.index,
                     segmentCount: totalSegments,
                     startSeconds: sourceTimeOffset + segment.startSeconds,
                     endSeconds: sourceTimeOffset + segment.endSeconds,
                     audioPath: audioURL.path,
-                    outputPath: transcriptURL.path
+                    outputPath: transcriptURL.path,
+                    metadataPath: writesMetadata ? metadataURL.path : nil
                 )
             }
         )
         try writeSegmentManifest(segmentManifest, to: segmentManifestURL)
 
+        update(
+            .log(
+                level: "info",
+                message: "雲端模型契約：\(descriptor.transport.displayName)，API \(descriptor.apiVersion)，單段安全上限 \(Int(effectiveSegmentDuration / 60)) 分鐘。"
+            )
+        )
         if segmentPlan.requiresSplitting {
             update(
                 .log(
                     level: "info",
-                    message: "音檔超過單段上限，將以最多 \(Int(maximumASRSegmentDuration / 60)) 分鐘切成 \(totalSegments) 段；每段完成後會立即建立可取回的救援檢查點。"
+                    message: "音檔超過單段上限，將以最多 \(Int(effectiveSegmentDuration / 60)) 分鐘切成 \(totalSegments) 段；每段完成後會立即建立可取回的救援檢查點。"
                 )
             )
         }
 
+        var structuredResults: [Int: CloudTranscriptionResult] = [:]
         for (zeroBasedIndex, segment) in segmentPlan.segments.enumerated() {
             try Task.checkCancellation()
             let segmentIndex = segment.index
@@ -1226,15 +1394,11 @@ public final class TranscriptionEngine {
                 }
 
                 let preparedMetadata = try await probeService.probe(audioURL)
-                // MP3 encoder delay/padding can make the probed container up to
-                // roughly a second longer than the requested source interval.
-                guard preparedMetadata.duration
-                    <= maximumASRSegmentDuration + 1.0
-                else {
+                guard preparedMetadata.duration <= effectiveSegmentDuration + 1.0 else {
                     throw AudioSegmentationError.segmentOutputTooLong(
                         index: segmentIndex,
                         duration: preparedMetadata.duration,
-                        maximum: maximumASRSegmentDuration
+                        maximum: effectiveSegmentDuration
                     )
                 }
                 try segmentManifest.mark(
@@ -1258,19 +1422,54 @@ public final class TranscriptionEngine {
                 )
                 try writeSegmentManifest(segmentManifest, to: segmentManifestURL)
 
-                let text = try await transcribe(
+                let rawResult = try await transcribe(
                     try Data(contentsOf: audioURL),
                     absoluteStart,
                     baseProgress,
                     maxProgress,
                     segmentLabel
                 )
-                let validatedText = try OutputContractValidator.validate(
-                    text: text,
-                    path: transcriptURL.path,
-                    prompt: job.snapshot.prompt
+                let offsetResult = rawResult.applyingSegmentOffset(
+                    absoluteStart,
+                    segmentIndex: segmentIndex
                 )
-                try AtomicFileWriter.writeText(validatedText, to: transcriptURL)
+                var convertedResult = try await convertCloudResultToTraditional(
+                    offsetResult,
+                    workingDirectory: segmentsDirectory
+                )
+                let validationPrompt = descriptor.isDedicatedTranscription
+                    ? nil
+                    : job.snapshot.prompt
+                convertedResult.text = try OutputContractValidator.validate(
+                    text: convertedResult.text,
+                    path: transcriptURL.path,
+                    prompt: validationPrompt
+                )
+                try AtomicFileWriter.writeText(
+                    convertedResult.text,
+                    to: transcriptURL
+                )
+                structuredResults[segmentIndex] = convertedResult
+
+                if let metadataPath = record.metadataPath {
+                    let segmentMetadata = CloudTranscriptSegmentMetadata(
+                        index: segmentIndex,
+                        startSeconds: record.startSeconds,
+                        endSeconds: record.endSeconds,
+                        result: convertedResult
+                    )
+                    let encoder = JSONEncoder()
+                    encoder.outputFormatting = [
+                        .prettyPrinted,
+                        .sortedKeys,
+                        .withoutEscapingSlashes
+                    ]
+                    try AtomicFileWriter.write(
+                        try encoder.encode(segmentMetadata),
+                        to: URL(fileURLWithPath: metadataPath)
+                    )
+                }
+
                 try segmentManifest.mark(
                     segmentIndex: segmentIndex,
                     status: .completed,
@@ -1358,6 +1557,38 @@ public final class TranscriptionEngine {
             )
         )
 
+        let metadataOutputURL: URL?
+        if writesMetadata {
+            let segments = completedSegments.compactMap { record -> CloudTranscriptSegmentMetadata? in
+                guard let result = structuredResults[record.segmentIndex] else {
+                    return nil
+                }
+                return CloudTranscriptSegmentMetadata(
+                    index: record.segmentIndex,
+                    startSeconds: record.startSeconds,
+                    endSeconds: record.endSeconds,
+                    result: result
+                )
+            }
+            guard segments.count == completedSegments.count else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            let sidecar = CloudTranscriptMetadata(
+                provider: job.snapshot.backendType,
+                modelID: descriptor.id,
+                transport: descriptor.transport,
+                mode: job.snapshot.transcriptionOptions.mode,
+                requestedLanguageCodes: job.snapshot.resolvedLanguageCodes,
+                segments: segments
+            )
+            metadataOutputURL = try writeUniqueMetadata(
+                sidecar,
+                alongside: finalOutputURL
+            )
+        } else {
+            metadataOutputURL = nil
+        }
+
         update(.progress(current: 100, total: 100, unit: "percent"))
         update(
             .log(
@@ -1365,13 +1596,122 @@ public final class TranscriptionEngine {
                 message: "轉錄完成！已儲存至：\(finalOutputURL.lastPathComponent)"
             )
         )
+        if let metadataOutputURL {
+            update(
+                .log(
+                    level: "info",
+                    message: "詳細說話者／時間資料已儲存至：\(metadataOutputURL.lastPathComponent)"
+                )
+            )
+        }
         update(.stage(.completed))
         return PipelineResult(
             outputURL: finalOutputURL,
             rawOutputURL: nil,
+            metadataOutputURL: metadataOutputURL,
             duration: Date().timeIntervalSince(startedAt),
             containsSkippedAudio: false
         )
+    }
+
+    private func convertCloudResultToTraditional(
+        _ result: CloudTranscriptionResult,
+        workingDirectory: URL
+    ) async throws -> CloudTranscriptionResult {
+        let sourceStrings = [result.text]
+            + result.words.map(\.text)
+            + result.speakerTurns.map(\.text)
+        let converted = try await convertStringsToTraditional(
+            sourceStrings,
+            workingDirectory: workingDirectory
+        )
+        guard converted.count == sourceStrings.count,
+              let transcript = converted.first else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+
+        var cursor = 1
+        var copy = result
+        copy.text = transcript
+        copy.words = result.words.map { word in
+            defer { cursor += 1 }
+            return TimedWord(
+                text: converted[cursor],
+                speaker: word.speaker,
+                startSeconds: word.startSeconds,
+                endSeconds: word.endSeconds,
+                segmentIndex: word.segmentIndex
+            )
+        }
+        copy.speakerTurns = result.speakerTurns.map { turn in
+            defer { cursor += 1 }
+            return SpeakerTurn(
+                speaker: turn.speaker,
+                text: converted[cursor],
+                startSeconds: turn.startSeconds,
+                endSeconds: turn.endSeconds,
+                segmentIndex: turn.segmentIndex
+            )
+        }
+        return copy
+    }
+
+    private func convertStringsToTraditional(
+        _ values: [String],
+        workingDirectory: URL
+    ) async throws -> [String] {
+        guard !values.isEmpty else { return [] }
+        let identifier = UUID().uuidString
+        let source = workingDirectory.appendingPathComponent(
+            "cloud-opencc-\(identifier).json"
+        )
+        let destination = workingDirectory.appendingPathComponent(
+            "cloud-opencc-\(identifier)-traditional.json"
+        )
+        defer {
+            try? FileManager.default.removeItem(at: source)
+            try? FileManager.default.removeItem(at: destination)
+        }
+        try AtomicFileWriter.write(
+            try JSONEncoder().encode(values),
+            to: source
+        )
+        try await openCCService.convert(
+            sourceURL: source,
+            destinationURL: destination
+        )
+        return try JSONDecoder().decode(
+            [String].self,
+            from: Data(contentsOf: destination)
+        )
+    }
+
+    private func writeUniqueMetadata(
+        _ metadata: CloudTranscriptMetadata,
+        alongside transcriptURL: URL
+    ) throws -> URL {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [
+            .prettyPrinted,
+            .sortedKeys,
+            .withoutEscapingSlashes
+        ]
+        let data = try encoder.encode(metadata)
+        let directory = transcriptURL.deletingLastPathComponent()
+        let base = transcriptURL.deletingPathExtension().lastPathComponent
+        var index = 1
+        while true {
+            let name = index == 1
+                ? "\(base).json"
+                : "\(base)_metadata_\(index).json"
+            let candidate = directory.appendingPathComponent(name)
+            do {
+                try AtomicFileWriter.writeNew(data, to: candidate)
+                return candidate
+            } catch AtomicFileWriterError.destinationExists {
+                index += 1
+            }
+        }
     }
 
     private func writeUniqueText(
