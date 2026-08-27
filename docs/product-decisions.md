@@ -326,6 +326,25 @@ Core policy 測試涵蓋 limit 0、佇列長於上限、interrupted 保存、ter
 
 已寫入 `docs/NEXT_STEPS.md` 與 `docs/product-spec.md`；**程式尚未實作**。
 
+### PD-016：Gemini 3.5 Transcribe 的 Provider／Transport 分離
+
+**決策**
+
+- `ASRBackendType` 只代表 credential／provider 邊界：Google AI Studio API Key、Google Cloud gcloud／ADC、本機 Qwen。
+- Model descriptor 決定 transport：一般 Gemini `generateContent`、AI Studio Interactions Transcribe、Google Cloud Agent Platform Transcribe。
+- AI Studio 與 Google Cloud 使用獨立 model catalog；相同產品名稱不能假設 Model ID、API version、location、request／response schema 相同。
+- `gemini-3.5-transcribe` 使用 Gemini Interactions `v1beta`；`gemini-3.5-transcribe-preview` 使用 Agent Platform `v1beta1` 且 effective location 固定為 `global`。
+- 專用 Transcribe 失敗時預設不跨到一般 Gemini。429／500／502／503 只在同一模型內重試，避免語意、speaker／timestamp、成本與 A/B 數據被隱性改變。
+- gcloud Preview 以 14 分鐘切片保留官方 15 分鐘上限的容器／編碼餘裕；一般 Gemini 與 AI Studio 專用模型維持 20 分鐘產品切片。
+- Job Snapshot 固定 transport、options、resolved vocabulary、語言提示與切片參數，避免佇列等待期間的設定變更改寫既有工作的執行語意。
+- transcript、word text 與 speaker turn 一起經 OpenCC 轉成台灣繁體；speaker identity 只保證 segment-local，不宣稱跨切片一致。
+- Vertex 全文摘要與轉錄模型解耦；專用 Transcribe 完成合併後，最多再由指定的一般 Gemini 摘要一次，摘要失敗不得丟失逐字稿。
+
+**證據邊界**
+
+- Swift Core、SwiftUI App、mock pipeline、request／response contract、settings／ledger migration、recovery 與 XCTest 已自動化驗證。
+- CI 不保存真實 API Key／ADC／Preview entitlement；目標 Project 的 live endpoint、quota、IAM、GCS cleanup 與實際音訊品質仍依 `docs/GEMINI_3_5_TRANSCRIBE_VERIFICATION.md` 驗證。
+
 ## 4. Phase 0 決策閘門
 
 Phase 0 完成時必須回答：

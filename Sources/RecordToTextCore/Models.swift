@@ -138,44 +138,12 @@ public enum ASRBackendType: String, Codable, CaseIterable, Sendable {
         case .googleAIStudio:
             return "Google AI Studio (Gemini API Key)"
         case .vertexAI:
-            return "Google Cloud Vertex AI (GCP / ADC)"
+            return "Google Cloud (gcloud / ADC)"
         case .localQwen:
             return "本機 Qwen ASR（不上雲）"
         }
     }
 }
-
-public struct GeminiModelDescriptor: Identifiable, Hashable, Sendable {
-    public let id: String
-    public let displayName: String
-    public let note: String
-
-    public init(id: String, displayName: String, note: String) {
-        self.id = id
-        self.displayName = displayName
-        self.note = note
-    }
-
-    public static let presetModels: [GeminiModelDescriptor] = [
-        GeminiModelDescriptor(
-            id: "gemini-3.7-flash",
-            displayName: "Gemini 3.7 Flash",
-            note: "極速轉錄、中文語音理解力頂級，適合日常會議與課程（推薦）"
-        ),
-        GeminiModelDescriptor(
-            id: "gemini-3.6-flash",
-            displayName: "Gemini 3.6 Flash",
-            note: "速度極快且高可用，當 3.7 遇到尖峰負載 (503) 時的絕佳替代選擇"
-        ),
-        GeminiModelDescriptor(
-            id: "gemini-3.1-pro-preview",
-            displayName: "Gemini 3.1 Pro",
-            note: "高智能推論能力，適合深度專業術語與複雜中英文混講"
-        )
-    ]
-}
-
-public typealias VertexAIModelDescriptor = GeminiModelDescriptor
 
 public struct AppSettings: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {

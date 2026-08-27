@@ -315,6 +315,9 @@ public final class AgentPlatformTranscribeBackend: @unchecked Sendable {
         if !customVocabulary.isEmpty {
             transcriptionConfig["customVocabulary"] = customVocabulary
         }
+        transcriptionConfig["mode"] = options.mode == .smart
+            ? "SMART"
+            : "VERBATIM"
         transcriptionConfig["wordTimestamp"] = options.wordTimestampsEnabled
         transcriptionConfig["diarization"] = options.diarizationEnabled
 

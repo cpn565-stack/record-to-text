@@ -256,7 +256,7 @@ replace_once(
 replace_once(
     next_steps,
     '更新日期：2026-08-02  ',
-    '更新日期：2026-08-27  '
+    '更新日期：2026-08-27'
 )
 new_checkpoint = '''## 已完成（feature/gemini-3.5-transcribe）
 

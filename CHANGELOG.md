@@ -6,6 +6,13 @@
 
 ### Added
 
+- Google AI Studio 新增 `gemini-3.5-transcribe`：使用 Gemini Interactions `v1beta`、Files API upload-once、Custom Vocabulary、Verbatim／Smart、speaker diarization、word timestamps 與 optional JSON sidecar。
+- Google Cloud 新增 `gemini-3.5-transcribe-preview`：使用 gcloud／ADC、Agent Platform `v1beta1`、`global`、GCS／inline 音訊、Verbatim／Smart、14 分鐘安全切片與 structured `audioTranscription` parser。
+- AI Studio 與 Google Cloud 改用 provider-specific model catalogs；自訂未知 Model ID 仍明確走既有一般 `generateContent`，不靠字串猜測 transport。
+- 雲端工作 Snapshot 固定 transport、語言提示、去重後 Custom Vocabulary、模型時長、切片政策、metadata 選項與獨立摘要模型；舊 settings／ledger 可向後解碼。
+- 專用轉錄的 transcript、speaker turns 與 word text 會一致轉成台灣繁體；可輸出帶絕對時間與 segment-local speaker label 的 JSON sidecar。
+- 新增完整 API contract、切片、offset、speaker scope、設定 migration 與 recovery metadata 測試，以及 `docs/GEMINI_3_5_TRANSCRIBE_VERIFICATION.md`。
+
 - Gemini 雲端傳輸強固化（雙層架構）：
   - 傳輸層改造：全面以工作暫存檔串流上傳 (`upload(for:fromFile:)`) 替代 in-memory `httpBody`，遞迴檢測並攔截 POSIX 40 (`EMSGSIZE`) 與 `_kCFStreamErrorCodeKey: 40`，自動以 Ephemeral TCP Session 重試 1 次。
   - 音訊上傳分離：Google AI Studio 預設啟用官方 Files API 串流傳輸音訊，Vertex AI 支援 GCS Bucket 參照（`gs://...`），大幅降低推論 API 的 Payload 體積與斷線風險。
@@ -61,6 +68,9 @@
 - 自動檢查更新（PD-015）：預設約每 7 天檢查 GitHub Releases；有新版再提示；可手動檢查；細節見 `docs/NEXT_STEPS.md`。
 
 ### Known limitations
+
+- Gemini 3.5 Transcribe 兩條路徑已通過 mock／contract／pipeline／App build 測試，但 CI 不持有使用者的 AI Studio Key、GCP Project entitlement 或 GCS 權限；真實 Preview 可用性與 response contract 仍須依驗證手冊在目標專案 smoke test。
+- 長音檔 speaker label 目前是 `segmentLocal`；不同分段的 `speaker-1` 不宣稱是同一人。
 
 - 已在本機 Apple Silicon + 真實 Qwen3-ASR（MLX）路徑驗證長音訊流程；仍非正式公證／可分發 Stable 版。
 - 極密語或異常音訊可能使最短約 30 秒葉節仍達 token 上限：會以明確缺口標記處理，不保證該區間文字完整。

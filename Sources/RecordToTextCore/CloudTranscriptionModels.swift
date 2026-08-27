@@ -241,7 +241,7 @@ public enum GCloudModelCatalog {
         CloudModelDescriptor(
             id: "gemini-3.5-transcribe-preview",
             displayName: "Gemini 3.5 Transcribe Preview",
-            note: "gcloud / Agent Platform 專用轉錄模型；固定使用 global，單段以 14 分鐘安全切片。",
+            note: "gcloud / Agent Platform 專用轉錄模型；支援忠實逐字／智慧整理，固定使用 global，單段以 14 分鐘安全切片。",
             provider: .vertexAI,
             transport: .agentPlatformTranscribe,
             isPreview: true,
@@ -249,7 +249,7 @@ public enum GCloudModelCatalog {
             recommendedSegmentDurationSeconds: 840,
             supportsCustomVocabulary: true,
             supportsLanguageHints: true,
-            supportsSmartMode: false,
+            supportsSmartMode: true,
             supportsDiarization: true,
             supportsWordTimestamps: true,
             supportsSystemInstruction: false,

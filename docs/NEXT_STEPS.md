@@ -1,6 +1,6 @@
 # 下一次接續
 
-更新日期：2026-08-02  
+更新日期：2026-08-27
 基準 commit：`38de33b`（main）  
 目前 checkpoint：**Phase 0 / Apple Silicon Developer Mode MVP** — 不是可交付一般使用者的 Stable DMG。
 
@@ -56,6 +56,22 @@
 | 7 | **手動 TXT 合併** | 可選取多份 TXT，依分段編號排序合併成新檔；原始檔案不覆寫，後續 LLM 可直接使用。 |
 | 15 | **前端等分切片佇列** | 錄音加入佇列後，可在「開始轉文字」旁將單一來源切成前後兩個時間範圍工作；第一段先處理，第二段留在佇列，各自產生有順序的 TXT。 |
 | 7 | **手動 TXT 合併** | 可選取多份 TXT，依分段編號排序合併成新檔；原始檔案不覆寫，後續 LLM 可直接使用。 |
+
+## 已完成（feature/gemini-3.5-transcribe）
+
+- Google AI Studio `gemini-3.5-transcribe` Interactions API transport。
+- Google Cloud `gemini-3.5-transcribe-preview` Agent Platform transport（`global`／14 分鐘切片）。
+- Provider-specific model catalogs、Job Snapshot migration、Custom Vocabulary、語言提示、Smart／speaker／timestamp compatibility validation。
+- Structured speaker／word metadata、絕對時間 offset、segment-local speaker scope、台灣繁體轉換、optional JSON sidecar 與 recovery metadata。
+- 轉錄／摘要模型分離；專用模型不做隱性 general-model fallback。
+- 完整 mock／contract／pipeline／SwiftUI App build／XCTest 自動驗證。
+- 本機與真實 API 驗證步驟：`docs/GEMINI_3_5_TRANSCRIBE_VERIFICATION.md`。
+
+**仍需外部證據**
+
+- 使用實際 AI Studio Key 確認 Preview entitlement 與 Interactions response。
+- 使用目標 GCP Project 確認 Agent Platform Preview、`v1beta1` endpoint、IAM／quota 與 GCS cleanup。
+- 同一批真實會議與 3.7 Flash／Local Qwen 做 A/B 品質、速度與成本比較。
 
 ## 待修改／尚未做（優先序）
 

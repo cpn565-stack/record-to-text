@@ -622,9 +622,15 @@ final class CloudCheckpointRecoveryTests: XCTestCase {
         let secondAudio = workingSegments.appendingPathComponent("segment-0002.mp3")
         let firstText = workingSegments.appendingPathComponent("segment-0001.txt")
         let secondText = workingSegments.appendingPathComponent("segment-0002.txt")
+        let firstMetadata = workingSegments.appendingPathComponent(
+            "segment-0001.metadata.json"
+        )
         try Data("sensitive audio".utf8).write(to: firstAudio)
         try Data("sensitive audio".utf8).write(to: secondAudio)
         try Data("第一段已完成".utf8).write(to: firstText)
+        try Data("{\"speakerScope\":\"segmentLocal\"}".utf8).write(
+            to: firstMetadata
+        )
 
         let jobID = UUID()
         let manifest = AudioSegmentManifest(
@@ -640,6 +646,7 @@ final class CloudCheckpointRecoveryTests: XCTestCase {
                     endSeconds: 1_200,
                     audioPath: firstAudio.path,
                     outputPath: firstText.path,
+                    metadataPath: firstMetadata.path,
                     status: .completed,
                     completedEventCount: 1
                 ),
@@ -714,6 +721,19 @@ final class CloudCheckpointRecoveryTests: XCTestCase {
         XCTAssertTrue(recovered.segments.allSatisfy {
             $0.outputPath.hasPrefix(recovery.path)
         })
+        let recoveredMetadataPath = try XCTUnwrap(
+            recovered.segments[0].metadataPath
+        )
+        XCTAssertTrue(recoveredMetadataPath.hasPrefix(recovery.path))
+        XCTAssertFalse(recoveredMetadataPath.contains(working.path))
+        XCTAssertEqual(
+            try String(
+                contentsOf: URL(fileURLWithPath: recoveredMetadataPath),
+                encoding: .utf8
+            ),
+            "{\"speakerScope\":\"segmentLocal\"}"
+        )
+        XCTAssertNil(recovered.segments[1].metadataPath)
         XCTAssertEqual(
             try String(
                 contentsOf: URL(fileURLWithPath: recovered.segments[0].outputPath),

@@ -2,9 +2,9 @@
 
 會議錄音 → 台灣繁體逐字稿。
 
-`record-to-text` 是原生 macOS App：把 M4A / MP3 / WAV / AAC / FLAC 拖進去，先整理專有名詞，再選擇 Google AI Studio、Vertex AI 或本機 Qwen3-ASR 轉錄，輸出 UTF-8 繁體 TXT。
+`record-to-text` 是原生 macOS App：把 M4A / MP3 / WAV / AAC / FLAC 拖進去，先整理專有名詞，再選擇 Google AI Studio、Google Cloud（gcloud / ADC）或本機 Qwen3-ASR 轉錄，輸出 UTF-8 台灣繁體 TXT。
 
-> **隱私邊界取決於你選的後端。** Google AI Studio 與 Vertex AI 會上傳經壓縮／分段的音訊、Prompt 與詞彙給 Google；只有「本機 Qwen」模式不會上傳音訊或轉錄內容。
+> **隱私邊界取決於你選的後端。** 一般 Gemini 路徑會上傳壓縮／分段音訊、Prompt 與詞彙；Gemini 3.5 Transcribe 專用路徑只上傳音訊、語言提示、Custom Vocabulary 與轉錄選項，不傳送自由文字 Prompt。只有「本機 Qwen」模式不會上傳音訊或轉錄內容。
 
 | | |
 | --- | --- |
@@ -20,9 +20,20 @@
 
 三種後端需要的環境不同：
 
-- **Google AI Studio**：在設定中儲存 Gemini API Key。音訊工具由 App 或本機環境提供。
-- **Vertex AI**：需可用的 `gcloud` 登入狀態、GCP 專案與有權限的 Vertex AI 區域。
+- **Google AI Studio**：在設定中儲存 Gemini API Key；一般 Gemini 走 `generateContent`，`gemini-3.5-transcribe` 走 Interactions API。
+- **Google Cloud**：需可用的 `gcloud`／ADC、GCP 專案；一般 Gemini 走 Vertex `generateContent`，`gemini-3.5-transcribe-preview` 走 Agent Platform 專用契約並固定使用 `global`。
 - **本機 Qwen**：目前需開啟 Developer Mode，並準備 Python／MLX-Audio、OpenCC 與 helper。App 管理的完整 Runtime installer 尚未完成。
+
+### Gemini 3.5 Transcribe 路徑
+
+| Provider | 模型 | Transport | 產品安全切片 | 主要能力 |
+| --- | --- | --- | ---: | --- |
+| Google AI Studio | `gemini-3.5-transcribe` | Gemini Interactions `v1beta` | 20 分鐘 | Verbatim／Smart、Custom Vocabulary、speaker、word timestamp |
+| Google Cloud | `gemini-3.5-transcribe-preview` | Agent Platform `v1beta1` | 14 分鐘 | Verbatim／Smart、Custom Vocabulary、speaker、word timestamp、`global` only |
+
+專用 Transcribe 預設不會在失敗時偷偷改走一般 Gemini；429／500／502／503 只在同一模型內退避重試。說話者標籤只保證同一分段內一致，長音檔 JSON 會明確標成 `segmentLocal`。
+
+完整的本機、真實 API、清理、取消與 A/B 驗證步驟見 [Gemini 3.5 Transcribe 驗證手冊](docs/GEMINI_3_5_TRANSCRIBE_VERIFICATION.md)。
 
 下列環境需求主要適用於「本機 Qwen」。
 
@@ -122,9 +133,9 @@ open /path/to/record-to-text.app
 - 先加入錄音，再在「開始轉文字」旁選「切分再依序轉」：前半段先處理，後半段排隊，兩段各自輸出有順序的文字稿；App 不自動合併。
 - 可用「合併文字稿」選取多份 TXT，依分段編號排序產生新檔；原始 TXT 不會被覆寫。
 - 本機管線：`ffprobe → ffmpeg → Qwen ASR helper → OpenCC → 原子寫入 TXT`。
-- 雲端管線：`ffprobe → ffmpeg 壓縮／分段 → Gemini API → 原子寫入 TXT`。
-- 超過 **20 分鐘**：coordinator 切成編號片段、逐段獨立 ASR（預設 token 預算 16384）；全部通過 manifest gate 後才交付正式逐字稿。
-- 雲端分段工作失敗或取消時，若已有完成片段，`Temp-Recovery` 會只保留部分 TXT、manifest 與最小 metadata（不保留 MP3），供人工取回。這不是自動斷點續跑；重新加入原始錄音會從頭轉錄。若還沒有任何完成片段，就不會誤稱有部分稿可取回。
+- 雲端管線：`ffprobe → 模型能力決定 14／20 分鐘切片 → ffmpeg 壓縮 → provider-specific Gemini transport → OpenCC → 原子寫入 TXT`；可選擇另存 speaker／word timestamp JSON。
+- 雲端切片由工作 Snapshot 固定：一般 Gemini 與 AI Studio Transcribe 最多 **20 分鐘**；gcloud Transcribe Preview 使用 **14 分鐘**安全切片。任一路徑都要全部通過 manifest gate 才交付正式逐字稿。
+- 雲端分段工作失敗或取消時，若已有完成片段，`Temp-Recovery` 會保留部分 TXT、manifest、最小 recovery metadata，以及已完成片段的 optional structured metadata JSON；不保留 MP3。這不是自動斷點續跑；重新加入原始錄音會從頭轉錄。
 - Apple Silicon：MLX-Audio helper；Prompt 走 `system_prompt`，不支援則 fail closed。
 - 設定／詞庫 JSON、本機失敗 WAV 與雲端部分稿 `Temp-Recovery`、來源檔不修改。
 - Job ledger：queued／active／interrupted 為 durable，不受「最近工作」上限裁切。
@@ -145,6 +156,8 @@ open /path/to/record-to-text.app
 - [產品與技術決策](docs/product-decisions.md)
 - [需求追蹤](docs/product-spec.md)
 - [下一次接續](docs/NEXT_STEPS.md)
+- [Gemini 3.5 Transcribe 實作對照](docs/GEMINI_3_5_TRANSCRIBE_IMPLEMENTATION.md)
+- [Gemini 3.5 Transcribe 驗證手冊](docs/GEMINI_3_5_TRANSCRIBE_VERIFICATION.md)
 - [交班單](HANDOFF.md)
 
 ## 開發環境

@@ -516,7 +516,23 @@ location global
 
 ---
 
-## 6.5 14／15 分鐘切片邊界
+## 6.5 gcloud Smart Mode 測試
+
+Google Cloud 官方契約同樣提供 `VERBATIM` 與 `SMART`。選：
+
+```text
+轉錄模式：智慧整理
+```
+
+App 送出的 `audioTranscriptionConfig.mode` 應為：
+
+```text
+SMART
+```
+
+UI 會自動關閉並停用 speaker diarization 與 word timestamp，因為 Smart 模式與這兩項 structured metadata 不相容。使用同一份音檔比較 Verbatim／Smart，確認 Smart 會移除部分贅詞、重複與 false start，但不適合作為嚴格逐字引述版本。
+
+## 6.6 14／15 分鐘切片邊界
 
 依序測試：
 
@@ -538,7 +554,7 @@ maximumSegmentDurationSeconds = 840
 
 ---
 
-## 6.6 gcloud Speaker／Timestamp／JSON
+## 6.7 gcloud Speaker／Timestamp／JSON
 
 使用音檔 D，開啟：
 
@@ -560,7 +576,7 @@ transport = agentPlatformTranscribe
 
 ---
 
-## 6.7 專用 Transcribe + 全文摘要
+## 6.8 專用 Transcribe + 全文摘要
 
 開啟：
 
@@ -802,6 +818,7 @@ segmentLocal
 
 - [ ] 一般 Vertex Gemini 回歸正常
 - [ ] Transcribe Preview 使用 global／v1beta1
+- [ ] gcloud Verbatim／Smart 都能執行，Smart 會停用 speaker／timestamp
 - [ ] 13 分鐘 1 段
 - [ ] 15–16 分鐘 2 段
 - [ ] 31 分鐘 3 段

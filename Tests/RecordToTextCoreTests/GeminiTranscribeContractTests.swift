@@ -26,7 +26,7 @@ final class GeminiTranscribeCatalogTests: XCTestCase {
         XCTAssertEqual(gcloud.requiredLocation, "global")
         XCTAssertEqual(gcloud.maximumAudioDurationSeconds, 900)
         XCTAssertEqual(gcloud.recommendedSegmentDurationSeconds, 840)
-        XCTAssertFalse(gcloud.supportsSmartMode)
+        XCTAssertTrue(gcloud.supportsSmartMode)
     }
 
     func testUnknownCustomModelRemainsGeneralGenerateContent() {
@@ -257,9 +257,41 @@ final class AgentPlatformTranscribeContractTests: XCTestCase {
             transcription["customVocabulary"] as? [String],
             ["SPECIFIQUE"]
         )
+        XCTAssertEqual(transcription["mode"] as? String, "VERBATIM")
         XCTAssertEqual(transcription["wordTimestamp"] as? Bool, true)
         XCTAssertEqual(transcription["diarization"] as? Bool, true)
         XCTAssertNil(generation["audio_transcription_config"])
+    }
+
+    func testSmartRequestUsesUppercaseEnumAndDisablesStructuredOptions() throws {
+        let options = DedicatedTranscriptionOptions(
+            mode: .smart,
+            languagePreference: .automatic,
+            diarizationEnabled: true,
+            wordTimestampsEnabled: true
+        ).normalizedForUI()
+        XCTAssertFalse(options.diarizationEnabled)
+        XCTAssertFalse(options.wordTimestampsEnabled)
+
+        let body = AgentPlatformTranscribeBackend().buildRequestBody(
+            inputPart: [
+                "inlineData": [
+                    "mimeType": "audio/mp3",
+                    "data": "YXVkaW8="
+                ]
+            ],
+            options: options,
+            customVocabulary: []
+        )
+        let generation = try XCTUnwrap(
+            body["generationConfig"] as? [String: Any]
+        )
+        let transcription = try XCTUnwrap(
+            generation["audioTranscriptionConfig"] as? [String: Any]
+        )
+        XCTAssertEqual(transcription["mode"] as? String, "SMART")
+        XCTAssertEqual(transcription["wordTimestamp"] as? Bool, false)
+        XCTAssertEqual(transcription["diarization"] as? Bool, false)
     }
 
     func testResponsePrefersStructuredAudioTranscription() throws {
