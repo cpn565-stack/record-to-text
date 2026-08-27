@@ -494,6 +494,50 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                if viewModel.settings.backendType != .localQwen {
+                    Divider()
+
+                    Picker(
+                        "Gemini 3.7 思考強度",
+                        selection: setting(\.geminiThinkingLevel)
+                    ) {
+                        ForEach(GeminiThinkingLevel.allCases, id: \.self) { level in
+                            Text(level.displayName).tag(level)
+                        }
+                    }
+                    Text("預設使用 Medium。Low 可用來做速度／品質 A/B；每個工作加入佇列時會鎖定當下設定。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Picker(
+                        "模型不可用時",
+                        selection: setting(\.cloudFallbackPolicy)
+                    ) {
+                        ForEach(CloudFallbackPolicy.allCases, id: \.self) { policy in
+                            Text(policy.displayName).tag(policy)
+                        }
+                    }
+                    Text("預設不自動換模型，避免同一份長錄音混用不同模型。允許 fallback 時只會從 3.7 改用 3.6 Flash，不會自動改用 Pro。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Toggle(
+                        "在 20 分鐘上限前優先尋找靜音切點",
+                        isOn: setting(\.silenceAwareCloudSegmentation)
+                    )
+                    Text("目前先保存此工作設定；靜音偵測與切點調整會在本分支下一階段接入。沒有可用靜音時仍採 20 分鐘硬切。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    LabeledContent("雲端單段輸出上限") {
+                        Text("16,384 tokens")
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("Cloud 最終稿會在本機經 OpenCC s2twp 統一成台灣繁體，因此環境檢查會要求 OpenCC。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 if viewModel.settings.backendType == .localQwen {
                     localQwenModelSettings
                 }

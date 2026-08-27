@@ -604,6 +604,7 @@ private struct JobRowView: View {
         VStack(alignment: .leading, spacing: 10) {
             rowHeader
             progressSection
+            cloudMetadataSection
             failureSection
             logSection
         }
@@ -642,9 +643,19 @@ private struct JobRowView: View {
 
     @ViewBuilder
     private var progressSection: some View {
-        if let current = job.progressCurrent,
-           let total = job.progressTotal,
-           total > 0 {
+        if job.progressUnit?.hasPrefix("waiting") == true,
+           job.id == viewModel.activeJobID {
+            VStack(alignment: .leading, spacing: 4) {
+                ProgressView()
+                    .controlSize(.small)
+                Text(waitingProgressLabel(job.progressUnit))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityLabel(waitingProgressLabel(job.progressUnit))
+        } else if let current = job.progressCurrent,
+                  let total = job.progressTotal,
+                  total > 0 {
             ProgressView(value: min(current, total), total: total) {
                 Text(progressLabel(current: current, total: total, unit: job.progressUnit))
                     .font(.caption2)
@@ -655,6 +666,46 @@ private struct JobRowView: View {
             ProgressView()
                 .controlSize(.small)
                 .accessibilityLabel(job.stage.displayName)
+        }
+    }
+
+    private func waitingProgressLabel(_ unit: String?) -> String {
+        let parts = (unit ?? "").split(separator: "|")
+        if parts.count == 3 {
+            return "等待 Gemini 回應 · 第 \(parts[1])／\(parts[2]) 段（無虛構百分比）"
+        }
+        return "等待 Gemini 回應（無虛構百分比）"
+    }
+
+    @ViewBuilder
+    private var cloudMetadataSection: some View {
+        if job.snapshot.backendType != .localQwen {
+            let metadata = job.resolvedCloudSegmentMetadata
+            VStack(alignment: .leading, spacing: 3) {
+                Text(job.cloudModelSummary ?? job.snapshot.requestedModelID)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                if !metadata.isEmpty {
+                    let usage = CloudTranscriptionMetadataAggregator
+                        .totalUsage(metadata)
+                    let retries = CloudTranscriptionMetadataAggregator
+                        .totalRetryCount(metadata)
+                    HStack(spacing: 8) {
+                        if let total = usage?.totalTokenCount {
+                            Text("總 token \(total)")
+                        }
+                        if let thoughts = usage?.thoughtsTokenCount {
+                            Text("thinking \(thoughts)")
+                        }
+                        if retries > 0 {
+                            Text("重試 \(retries)")
+                        }
+                    }
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                }
+            }
         }
     }
 
@@ -890,6 +941,12 @@ private struct RecentJobRow: View {
                         Text("・\(glossaryName)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                    }
+                    if let cloudModel = summary.cloudModelSummary {
+                        Text("・\(cloudModel)")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
                     }
                 }
             }

@@ -236,11 +236,12 @@ public enum RuntimeEnvironment {
         let isDeveloperRuntime: Bool
         var managedComponents = Set<RuntimeComponent>()
 
+        let discovery = developerRuntimeDiscovery ?? discoverDeveloperRuntime(
+            fileManager: fileManager
+        )
+
         if settings.developerMode {
             isDeveloperRuntime = true
-            let discovery = developerRuntimeDiscovery ?? discoverDeveloperRuntime(
-                fileManager: fileManager
-            )
             python = URL(
                 fileURLWithPath: normalizedPath(settings.customPythonPath)
                     ?? discovery.python.path
@@ -257,9 +258,16 @@ public enum RuntimeEnvironment {
         } else {
             isDeveloperRuntime = false
             python = releaseBin.appendingPathComponent("python")
-            opencc = releaseBin.appendingPathComponent("opencc")
             helper = releaseBin.appendingPathComponent(releaseHelperName)
-            managedComponents.formUnion([.python, .opencc, .helper])
+            if settings.backendType == .localQwen {
+                opencc = releaseBin.appendingPathComponent("opencc")
+                managedComponents.formUnion([.python, .opencc, .helper])
+            } else {
+                // Cloud backends use the locally discovered OpenCC only for
+                // deterministic Taiwan-Traditional post-processing.
+                opencc = discovery.openCC
+                managedComponents.formUnion([.python, .helper])
+            }
         }
 
         var ffmpegCandidates: [(url: URL?, managed: Bool)] = [
@@ -380,6 +388,7 @@ public enum RuntimeEnvironment {
         ]
 
         if backendType == .vertexAI {
+            pairs.append((.opencc, runtime.opencc))
             let gcloudURL = runtime.gcloud
                 ?? GCloudAuthService(customGCloudPath: customGCloudPath)
                     .resolveGCloudURL(fileManager: fileManager)
@@ -390,7 +399,8 @@ public enum RuntimeEnvironment {
             pairs.append((.opencc, runtime.opencc))
             pairs.append((.helper, runtime.helper))
         } else if backendType == .googleAIStudio {
-            // Google AI Studio API 僅需 ffmpeg/ffprobe 進行音訊壓縮與切片
+            // Cloud response is post-processed with OpenCC s2twp before output.
+            pairs.append((.opencc, runtime.opencc))
         }
 
         let components = pairs.map { component, url in
@@ -456,9 +466,9 @@ public enum RuntimeEnvironment {
     ) -> Set<RuntimeComponent> {
         switch backendType {
         case .googleAIStudio:
-            return [.ffmpeg, .ffprobe]
+            return [.ffmpeg, .ffprobe, .opencc]
         case .vertexAI:
-            return [.ffmpeg, .ffprobe, .gcloud]
+            return [.ffmpeg, .ffprobe, .opencc, .gcloud]
         case .localQwen:
             return [.python, .ffmpeg, .ffprobe, .opencc, .helper]
         }

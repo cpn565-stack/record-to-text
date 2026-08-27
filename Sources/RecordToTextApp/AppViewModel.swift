@@ -1411,7 +1411,11 @@ final class AppViewModel: ObservableObject {
                 vertexAILocation: settings.vertexAILocation,
                 vertexAIModelID: settings.vertexAIModelID,
                 vertexAIGCSBucket: settings.vertexAIGCSBucket,
-                vertexAIIncludeSummary: settings.vertexAIIncludeSummary
+                vertexAIIncludeSummary: settings.vertexAIIncludeSummary,
+                geminiThinkingLevel: settings.geminiThinkingLevel,
+                cloudFallbackPolicy: settings.cloudFallbackPolicy,
+                silenceAwareCloudSegmentation:
+                    settings.silenceAwareCloudSegmentation
             )
             var job = TranscriptionJob(
                 sourcePath: url.standardizedFileURL.path,
@@ -1526,7 +1530,13 @@ final class AppViewModel: ObservableObject {
                 jobs[index].progressTotal = nil
                 jobs[index].outputPath = result.outputURL.path
                 jobs[index].rawOutputPath = result.rawOutputURL?.path
+                jobs[index].cloudSegmentMetadata =
+                    result.cloudSegmentMetadata.isEmpty
+                        ? nil
+                        : result.cloudSegmentMetadata
                 jobs[index].completedAt = Date()
+                jobs[index].progressUnit = nil
+                appendCloudResultSummary(result, to: index)
                 let duration = Self.durationFormatter.string(from: result.duration) ?? "—"
                 if result.containsSkippedAudio {
                     jobs[index].logLines.append(
@@ -1602,6 +1612,32 @@ final class AppViewModel: ObservableObject {
         case let .warning(_, message):
             appendLog("警告：\(message)", to: jobID)
         }
+    }
+
+    private func appendCloudResultSummary(
+        _ result: PipelineResult,
+        to index: Int
+    ) {
+        let metadata = result.cloudSegmentMetadata
+        guard !metadata.isEmpty else {
+            return
+        }
+        let effectiveModels = CloudTranscriptionMetadataAggregator
+            .uniqueEffectiveModelIDs(metadata)
+        let retries = CloudTranscriptionMetadataAggregator
+            .totalRetryCount(metadata)
+        let usage = CloudTranscriptionMetadataAggregator.totalUsage(metadata)
+        var parts = ["實際模型：\(effectiveModels.joined(separator: ", "))"]
+        if retries > 0 {
+            parts.append("總重試 \(retries) 次")
+        }
+        if let total = usage?.totalTokenCount {
+            parts.append("總 token \(total)")
+        }
+        if let thoughts = usage?.thoughtsTokenCount {
+            parts.append("thinking token \(thoughts)")
+        }
+        jobs[index].logLines.append(parts.joined(separator: "；") + "。")
     }
 
     private func markCancelled(_ id: UUID, error: Error) {

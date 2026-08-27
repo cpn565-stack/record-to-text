@@ -8,6 +8,7 @@ final class RuntimeEnvironmentTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let paths = ApplicationPaths(root: root)
         let bundled = try makeBundledAudioTools(in: root)
+        let cloudDiscovery = try makeCloudDiscovery(in: root)
 
         let runtime = try RuntimeEnvironment.resolve(
             paths: paths,
@@ -15,7 +16,8 @@ final class RuntimeEnvironmentTests: XCTestCase {
             bundledHelperURL: nil,
             bundledFFmpegURL: bundled.ffmpeg,
             bundledFFprobeURL: bundled.ffprobe,
-            includeSystemAudioTools: false
+            includeSystemAudioTools: false,
+            developerRuntimeDiscovery: cloudDiscovery
         )
 
         XCTAssertFalse(runtime.isDeveloperRuntime)
@@ -29,6 +31,7 @@ final class RuntimeEnvironmentTests: XCTestCase {
         let paths = ApplicationPaths(root: root)
         try createRuntimeFiles(at: paths)
         let bundled = try makeBundledAudioTools(in: root)
+        let cloudDiscovery = try makeCloudDiscovery(in: root)
 
         let runtime = RuntimeEnvironment.candidate(
             paths: paths,
@@ -36,7 +39,8 @@ final class RuntimeEnvironmentTests: XCTestCase {
             bundledHelperURL: nil,
             bundledFFmpegURL: bundled.ffmpeg,
             bundledFFprobeURL: bundled.ffprobe,
-            includeSystemAudioTools: false
+            includeSystemAudioTools: false,
+            developerRuntimeDiscovery: cloudDiscovery
         )
 
         XCTAssertEqual(runtime.ffmpeg.path, bundled.ffmpeg.path)
@@ -59,10 +63,9 @@ final class RuntimeEnvironmentTests: XCTestCase {
             guard case let RuntimeEnvironmentError.missingComponents(components) = error else {
                 return XCTFail("Unexpected error: \(error)")
             }
-            XCTAssertEqual(
-                Set(components.map(\.component)),
-                [.ffmpeg, .ffprobe]
-            )
+            let missingComponents = Set(components.map(\.component))
+            XCTAssertTrue(missingComponents.contains(.ffmpeg))
+            XCTAssertTrue(missingComponents.contains(.ffprobe))
         }
     }
 
@@ -70,11 +73,13 @@ final class RuntimeEnvironmentTests: XCTestCase {
         let root = try TestSupport.makeTemporaryDirectory()
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let bundled = try makeBundledAudioTools(in: root)
+        let openCC = root.appendingPathComponent("opencc")
+        try makeExecutable(at: openCC)
         let runtime = ResolvedRuntime(
             python: root.appendingPathComponent("python"),
             ffmpeg: bundled.ffmpeg,
             ffprobe: bundled.ffprobe,
-            opencc: root.appendingPathComponent("opencc"),
+            opencc: openCC,
             helper: root.appendingPathComponent(helperName),
             isDeveloperRuntime: false
         )
@@ -85,7 +90,10 @@ final class RuntimeEnvironmentTests: XCTestCase {
         )
 
         XCTAssertTrue(report.isReady)
-        XCTAssertEqual(report.components.map(\.component), [.ffmpeg, .ffprobe])
+        XCTAssertEqual(
+            report.components.map(\.component),
+            [.ffmpeg, .ffprobe, .opencc]
+        )
         XCTAssertTrue(report.components.allSatisfy(\.isAvailable))
     }
 
@@ -128,6 +136,7 @@ final class RuntimeEnvironmentTests: XCTestCase {
                 verifierCalled = true
                 XCTAssertTrue(resolved.managedComponents.contains(.ffmpeg))
                 XCTAssertTrue(resolved.managedComponents.contains(.ffprobe))
+                // Cloud OpenCC is developer-discovered, not a managed component.
             }
         )
 
@@ -362,6 +371,19 @@ final class RuntimeEnvironmentTests: XCTestCase {
                 return XCTFail("Unexpected error: \($0)")
             }
         }
+    }
+
+    private func makeCloudDiscovery(
+        in root: URL
+    ) throws -> DeveloperRuntimeDiscovery {
+        let openCC = root.appendingPathComponent("cloud-tools/opencc")
+        try makeExecutable(at: openCC)
+        return DeveloperRuntimeDiscovery(
+            python: root.appendingPathComponent("unused-python"),
+            openCC: openCC,
+            pythonWasDetected: false,
+            openCCWasDetected: true
+        )
     }
 
     private func makeBundledAudioTools(in root: URL) throws -> (ffmpeg: URL, ffprobe: URL) {

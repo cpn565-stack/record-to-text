@@ -883,7 +883,9 @@ public final class TranscriptionEngine {
         googleAIStudioBackend.updateConfiguration(
             GoogleAIStudioBackend.Configuration(
                 apiKey: job.snapshot.googleAIStudioAPIKey,
-                modelID: job.snapshot.googleAIStudioModelID
+                modelID: job.snapshot.googleAIStudioModelID,
+                thinkingLevel: job.snapshot.geminiThinkingLevel,
+                fallbackPolicy: job.snapshot.cloudFallbackPolicy
             )
         )
         let modelDisplay = job.snapshot.googleAIStudioModelID
@@ -898,50 +900,32 @@ public final class TranscriptionEngine {
             serviceDisplay: "Google AI Studio",
             modelDisplay: modelDisplay,
             update: update
-        ) { audioData, timeOffset, basePercent, maxPercent, segmentLabel in
-            try await self.transcribeGoogleAIStudioWithLiveProgress(
+        ) { audioData, timeOffset, segmentLabel in
+            try await self.transcribeGoogleAIStudioWithStatus(
                 audioData: audioData,
                 job: job,
                 modelDisplay: "\(modelDisplay)\(segmentLabel)",
                 timeOffset: timeOffset,
-                basePercent: basePercent,
-                maxPercent: maxPercent,
                 workingDirectory: workingDirectory,
                 update: update
             )
         }
     }
 
-    private func transcribeGoogleAIStudioWithLiveProgress(
+    private func transcribeGoogleAIStudioWithStatus(
         audioData: Data,
         job: TranscriptionJob,
         modelDisplay: String,
         timeOffset: Double,
-        basePercent: Double,
-        maxPercent: Double,
         workingDirectory: URL? = nil,
         update: @escaping (PipelineUpdate) -> Void
-    ) async throws -> String {
-        let progressUpdater = Task {
-            var currentPercent = basePercent
-            var elapsedSeconds = 0
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                if Task.isCancelled { break }
-                elapsedSeconds += 2
-                currentPercent = min(currentPercent + 3.0, maxPercent)
-                update(.progress(current: currentPercent, total: 100, unit: "percent"))
-                update(
-                    .log(
-                        level: "info",
-                        message: "正在由 \(modelDisplay) 轉錄中... (已耗時 \(elapsedSeconds) 秒)"
-                    )
-                )
-            }
-        }
-
+    ) async throws -> CloudTranscriptionResult {
+        let statusUpdater = makeCloudStatusTask(
+            modelDisplay: modelDisplay,
+            update: update
+        )
         do {
-            let text = try await googleAIStudioBackend.transcribe(
+            let result = try await googleAIStudioBackend.transcribeDetailed(
                 audioData: audioData,
                 mimeType: "audio/mp3",
                 terms: job.snapshot.terms,
@@ -952,12 +936,12 @@ public final class TranscriptionEngine {
                     update(.log(level: level, message: message))
                 }
             )
-            progressUpdater.cancel()
-            await progressUpdater.value
-            return text
+            statusUpdater.cancel()
+            await statusUpdater.value
+            return result
         } catch {
-            progressUpdater.cancel()
-            await progressUpdater.value
+            statusUpdater.cancel()
+            await statusUpdater.value
             throw error
         }
     }
@@ -986,7 +970,9 @@ public final class TranscriptionEngine {
                 location: resolvedLocation,
                 modelID: job.snapshot.vertexAIModelID,
                 gcsBucket: job.snapshot.vertexAIGCSBucket,
-                includeSummary: job.snapshot.vertexAIIncludeSummary
+                includeSummary: job.snapshot.vertexAIIncludeSummary,
+                thinkingLevel: job.snapshot.geminiThinkingLevel,
+                fallbackPolicy: job.snapshot.cloudFallbackPolicy
             )
         )
         let modelDisplay = job.snapshot.vertexAIModelID
@@ -1023,14 +1009,12 @@ public final class TranscriptionEngine {
                     update: update
                 )
             },
-            transcribe: { audioData, timeOffset, basePercent, maxPercent, segmentLabel in
-                try await self.transcribeWithLiveProgress(
+            transcribe: { audioData, timeOffset, segmentLabel in
+                try await self.transcribeVertexWithStatus(
                     audioData: audioData,
                     job: job,
                     modelDisplay: "\(modelDisplay)\(segmentLabel)",
                     timeOffset: timeOffset,
-                    basePercent: basePercent,
-                    maxPercent: maxPercent,
                     workingDirectory: workingDirectory,
                     update: update
                 )
@@ -1038,36 +1022,20 @@ public final class TranscriptionEngine {
         )
     }
 
-    private func transcribeWithLiveProgress(
+    private func transcribeVertexWithStatus(
         audioData: Data,
         job: TranscriptionJob,
         modelDisplay: String,
         timeOffset: Double,
-        basePercent: Double,
-        maxPercent: Double,
         workingDirectory: URL? = nil,
         update: @escaping (PipelineUpdate) -> Void
-    ) async throws -> String {
-        let progressUpdater = Task {
-            var currentPercent = basePercent
-            var elapsedSeconds = 0
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                if Task.isCancelled { break }
-                elapsedSeconds += 2
-                currentPercent = min(currentPercent + 3.0, maxPercent)
-                update(.progress(current: currentPercent, total: 100, unit: "percent"))
-                update(
-                    .log(
-                        level: "info",
-                        message: "正在由 \(modelDisplay) 轉錄中... (已耗時 \(elapsedSeconds) 秒)"
-                    )
-                )
-            }
-        }
-
+    ) async throws -> CloudTranscriptionResult {
+        let statusUpdater = makeCloudStatusTask(
+            modelDisplay: modelDisplay,
+            update: update
+        )
         do {
-            let text = try await vertexAIBackend.transcribe(
+            let result = try await vertexAIBackend.transcribeDetailed(
                 audioData: audioData,
                 mimeType: "audio/mp3",
                 terms: job.snapshot.terms,
@@ -1078,13 +1046,42 @@ public final class TranscriptionEngine {
                     update(.log(level: level, message: message))
                 }
             )
-            progressUpdater.cancel()
-            await progressUpdater.value
-            return text
+            statusUpdater.cancel()
+            await statusUpdater.value
+            return result
         } catch {
-            progressUpdater.cancel()
-            await progressUpdater.value
+            statusUpdater.cancel()
+            await statusUpdater.value
             throw error
+        }
+    }
+
+    /// Cloud APIs do not expose reliable generation progress. Keep an
+    /// indeterminate segment state and report elapsed time without fabricating
+    /// percentages that imply server-side progress.
+    private func makeCloudStatusTask(
+        modelDisplay: String,
+        update: @escaping (PipelineUpdate) -> Void
+    ) -> Task<Void, Never> {
+        Task {
+            var elapsedSeconds = 0
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: 30_000_000_000)
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled else {
+                    return
+                }
+                elapsedSeconds += 30
+                update(
+                    .log(
+                        level: "info",
+                        message: "\(modelDisplay) 仍在處理中（已耗時 \(elapsedSeconds) 秒；Google 未提供實際完成百分比）。"
+                    )
+                )
+            }
         }
     }
 
@@ -1103,10 +1100,8 @@ public final class TranscriptionEngine {
         transcribe: (
             _ audioData: Data,
             _ timeOffset: Double,
-            _ basePercent: Double,
-            _ maxPercent: Double,
             _ segmentLabel: String
-        ) async throws -> String
+        ) async throws -> CloudTranscriptionResult
     ) async throws -> PipelineResult {
         let fileManager = FileManager.default
         let segmentPlan = try AudioSegmentPlanner.makePlan(
@@ -1124,6 +1119,12 @@ public final class TranscriptionEngine {
         )
         let segmentManifestURL = workingDirectory.appendingPathComponent(
             RecoveryScanner.segmentManifestFileName
+        )
+        let cloudRawURL = workingDirectory.appendingPathComponent(
+            "cloud-merged-raw.txt"
+        )
+        let cloudTraditionalURL = workingDirectory.appendingPathComponent(
+            "cloud-merged-taiwan.txt"
         )
 
         try fileManager.createDirectory(
@@ -1186,6 +1187,9 @@ public final class TranscriptionEngine {
             let segmentLabel = totalSegments > 1
                 ? " 第 \(segmentIndex)/\(totalSegments) 段"
                 : ""
+            let waitingUnit = totalSegments > 1
+                ? "waiting|\(segmentIndex)|\(totalSegments)"
+                : "waiting"
 
             do {
                 currentStage.set(.convertingAudio)
@@ -1226,8 +1230,6 @@ public final class TranscriptionEngine {
                 }
 
                 let preparedMetadata = try await probeService.probe(audioURL)
-                // MP3 encoder delay/padding can make the probed container up to
-                // roughly a second longer than the requested source interval.
                 guard preparedMetadata.duration
                     <= maximumASRSegmentDuration + 1.0
                 else {
@@ -1247,9 +1249,16 @@ public final class TranscriptionEngine {
                 currentStage.set(.transcribing)
                 update(.stage(.transcribing))
                 update(
+                    .progress(
+                        current: baseProgress,
+                        total: 100,
+                        unit: waitingUnit
+                    )
+                )
+                update(
                     .log(
                         level: "info",
-                        message: "正在由 \(modelDisplay)\(segmentLabel) 忠實轉錄。"
+                        message: "正在由 \(modelDisplay)\(segmentLabel) 忠實轉錄；等待期間顯示不確定進度，不虛構完成百分比。"
                     )
                 )
                 try segmentManifest.mark(
@@ -1258,25 +1267,31 @@ public final class TranscriptionEngine {
                 )
                 try writeSegmentManifest(segmentManifest, to: segmentManifestURL)
 
-                let text = try await transcribe(
+                let result = try await transcribe(
                     try Data(contentsOf: audioURL),
                     absoluteStart,
-                    baseProgress,
-                    maxProgress,
                     segmentLabel
                 )
                 let validatedText = try OutputContractValidator.validate(
-                    text: text,
+                    text: result.text,
                     path: transcriptURL.path,
                     prompt: job.snapshot.prompt
                 )
                 try AtomicFileWriter.writeText(validatedText, to: transcriptURL)
+                segmentManifest.segments[segmentIndex - 1].cloudMetadata =
+                    result.metadata
                 try segmentManifest.mark(
                     segmentIndex: segmentIndex,
                     status: .completed,
                     completedEventCount: 1
                 )
                 try writeSegmentManifest(segmentManifest, to: segmentManifestURL)
+                emitCloudMetadataLog(
+                    result.metadata,
+                    segmentIndex: segmentIndex,
+                    segmentCount: totalSegments,
+                    update: update
+                )
 
                 let checkpointStatus = NSError(
                     domain: "RecordToText.CloudCheckpoint",
@@ -1337,15 +1352,42 @@ public final class TranscriptionEngine {
                 at: URL(fileURLWithPath: record.outputPath)
             )
         }
-        let finalTranscribedText: String
+        let segmentMetadata = completedSegments.compactMap(\.cloudMetadata)
+        let mergedText: String
         if let finalizeTranscript {
-            finalTranscribedText = await finalizeTranscript(completedSegmentTexts)
+            mergedText = await finalizeTranscript(completedSegmentTexts)
         } else {
-            finalTranscribedText = completedSegmentTexts.joined(separator: "\n\n")
+            mergedText = completedSegmentTexts.joined(separator: "\n\n")
         }
+
+        let validatedRaw = try OutputContractValidator.validate(
+            text: mergedText,
+            path: cloudRawURL.path,
+            prompt: job.snapshot.prompt
+        )
+        try AtomicFileWriter.writeText(validatedRaw, to: cloudRawURL)
 
         try Task.checkCancellation()
         update(.progress(current: 92, total: 100, unit: "percent"))
+        currentStage.set(.convertingTraditionalChinese)
+        update(.stage(.convertingTraditionalChinese))
+        update(
+            .log(
+                level: "info",
+                message: "正在以 OpenCC s2twp 統一轉為台灣繁體。"
+            )
+        )
+        try await openCCService.convert(
+            sourceURL: cloudRawURL,
+            destinationURL: cloudTraditionalURL
+        )
+        let finalTranscribedText = try OutputContractValidator.readTranscript(
+            at: cloudTraditionalURL,
+            prompt: job.snapshot.prompt
+        )
+
+        try Task.checkCancellation()
+        update(.progress(current: 98, total: 100, unit: "percent"))
         currentStage.set(.writingOutput)
         update(.stage(.writingOutput))
         let finalOutputURL = try writeUniqueText(
@@ -1370,8 +1412,50 @@ public final class TranscriptionEngine {
             outputURL: finalOutputURL,
             rawOutputURL: nil,
             duration: Date().timeIntervalSince(startedAt),
-            containsSkippedAudio: false
+            containsSkippedAudio: false,
+            cloudSegmentMetadata: segmentMetadata
         )
+    }
+
+    private func emitCloudMetadataLog(
+        _ metadata: CloudTranscriptionMetadata,
+        segmentIndex: Int,
+        segmentCount: Int,
+        update: (PipelineUpdate) -> Void
+    ) {
+        var details = [
+            "第 \(segmentIndex)/\(segmentCount) 段實際模型 \(metadata.effectiveModelID)"
+        ]
+        if let version = metadata.modelVersion, !version.isEmpty {
+            details.append("版本 \(version)")
+        }
+        if let responseID = metadata.responseID, !responseID.isEmpty {
+            details.append("response \(responseID)")
+        }
+        if metadata.retryCount > 0 {
+            details.append("重試 \(metadata.retryCount) 次")
+        }
+        if let usage = metadata.usage {
+            if let total = usage.totalTokenCount {
+                details.append("總 token \(total)")
+            }
+            if let thoughts = usage.thoughtsTokenCount {
+                details.append("thinking token \(thoughts)")
+            }
+        }
+        if let latency = metadata.latencySeconds {
+            details.append(String(format: "API %.1f 秒", latency))
+        }
+        update(.log(level: "info", message: details.joined(separator: "；") + "。"))
+
+        if metadata.usedFallback {
+            update(
+                .warning(
+                    code: "cloud_model_fallback_used",
+                    message: "本段要求 \(metadata.requestedModelID)，實際由 \(metadata.effectiveModelID) 完成。\(metadata.fallbackReason ?? "")"
+                )
+            )
+        }
     }
 
     private func writeUniqueText(
