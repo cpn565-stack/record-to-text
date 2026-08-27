@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: feature/gemini-3.7-quality-hardening
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Apply silence-aware segmentation
