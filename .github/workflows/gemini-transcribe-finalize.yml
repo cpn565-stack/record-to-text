@@ -1,0 +1,63 @@
+name: Gemini Transcribe Finalize
+
+on:
+  push:
+    branches:
+      - feature/gemini-3.5-transcribe
+    paths:
+      - scripts/gemini-transcribe-finalize.py
+      - .github/workflows/gemini-transcribe-finalize.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure commit identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Apply final contract corrections
+        run: python3 scripts/gemini-transcribe-finalize.py
+
+      - name: Check patch formatting
+        run: git diff --check
+
+      - name: Install integration-test tools
+        run: brew install ffmpeg opencc
+
+      - name: Run XCTest and executable checks
+        env:
+          REQUIRE_XCTEST: "1"
+        run: scripts/run-checks.sh
+
+      - name: Build unsigned App bundle
+        env:
+          ADHOC_SIGN: "0"
+        run: scripts/build-app.sh
+
+      - name: Verify functional App bundle contents
+        env:
+          ALLOW_UNSIGNED: "1"
+          CHECK_APP_SIZE: "0"
+        run: scripts/verify-release.sh dist/record-to-text.app
+
+      - name: Commit verified corrections
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "fix: align Gemini Transcribe contracts with published APIs"
+          git push origin HEAD:${GITHUB_REF_NAME}
