@@ -1592,7 +1592,7 @@ tests.check(
         var generateCalls = 0
         MockTransportURLProtocol.requestHandler = { request in
             generateCalls += 1
-            if generateCalls <= 3 {
+            if generateCalls <= 4 {
                 // Primary model exhausts its retry budget with server errors.
                 let busy = #"{"error":{"code":503,"message":"high demand"}}"#
                 return (
@@ -1616,7 +1616,8 @@ tests.check(
             configuration: GoogleAIStudioBackend.Configuration(
                 apiKey: "AIzaTestKey",
                 modelID: "gemini-3.7-flash",
-                useFilesAPI: false
+                useFilesAPI: false,
+                fallbackPolicy: .flashOnly
             )
         )
 

@@ -4,6 +4,8 @@ public enum GoogleAIStudioError: LocalizedError, Equatable {
     case missingAPIKey
     case invalidAPIKey(String)
     case requestFailed(statusCode: Int, message: String)
+    case rateLimited(message: String, retryAfterSeconds: Double?)
+    case quotaExceeded(String)
     case prohibitedContent(String)
     case incompleteResponse(finishReason: String, message: String?)
     case emptyResponse
@@ -23,6 +25,11 @@ public enum GoogleAIStudioError: LocalizedError, Equatable {
         case let .requestFailed(statusCode, message):
             let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
             return "Google AI Studio 請求失敗（HTTP \(statusCode)）：\(trimmed)"
+        case let .rateLimited(message, retryAfterSeconds):
+            let delay = retryAfterSeconds.map { "，建議至少等待 \(String(format: "%.1f", $0)) 秒" } ?? ""
+            return "Google AI Studio 暫時達到速率限制\(delay)：\(message)"
+        case let .quotaExceeded(message):
+            return "Google AI Studio 當日配額已用完，短時間重試不會成功：\(message)"
         case let .prohibitedContent(message):
             return "Google 內容安全政策攔截：\(message)"
         case let .incompleteResponse(finishReason, message):
@@ -54,15 +61,21 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         public var apiKey: String?
         public var modelID: String
         public var useFilesAPI: Bool
+        public var thinkingLevel: GeminiThinkingLevel
+        public var fallbackPolicy: CloudFallbackPolicy
 
         public init(
             apiKey: String? = nil,
             modelID: String = "gemini-3.7-flash",
-            useFilesAPI: Bool = true
+            useFilesAPI: Bool = true,
+            thinkingLevel: GeminiThinkingLevel = .medium,
+            fallbackPolicy: CloudFallbackPolicy = .disabled
         ) {
             self.apiKey = apiKey
             self.modelID = modelID
             self.useFilesAPI = useFilesAPI
+            self.thinkingLevel = thinkingLevel
+            self.fallbackPolicy = fallbackPolicy
         }
 
         public static let `default` = Configuration()
@@ -146,8 +159,8 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         }
     }
 
-    /// 執行語音轉文字
-    public func transcribe(
+    /// Executes transcription while preserving model/version/token provenance.
+    public func transcribeDetailed(
         audioData: Data,
         mimeType: String = "audio/mp3",
         terms: [String] = [],
@@ -155,7 +168,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         timeOffsetSeconds: Double = 0,
         workingDirectory: URL? = nil,
         logger: ((_ level: String, _ message: String) -> Void)? = nil
-    ) async throws -> String {
+    ) async throws -> CloudTranscriptionResult {
         let currentConfig = getConfiguration()
 
         guard let apiKey = currentConfig.apiKey?
@@ -165,8 +178,6 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             throw GoogleAIStudioError.missingAPIKey
         }
 
-        // Upload exactly once. Every retry and model fallback reuses the same
-        // audio reference, so a flaky server never multiplies paid uploads.
         let preparedAudio = try await prepareAudioPart(
             apiKey: apiKey,
             audioData: audioData,
@@ -176,9 +187,9 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             logger: logger
         )
 
-        let text: String
+        let result: CloudTranscriptionResult
         do {
-            text = try await runTranscriptionAttempts(
+            result = try await runTranscriptionAttempts(
                 preferredModelID: currentConfig.modelID,
                 preparedAudio: preparedAudio.audioPart,
                 apiKey: apiKey,
@@ -186,15 +197,46 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                 terms: terms,
                 customPrompt: customPrompt,
                 timeOffsetSeconds: timeOffsetSeconds,
+                thinkingLevel: currentConfig.thinkingLevel,
+                fallbackPolicy: currentConfig.fallbackPolicy,
                 workingDirectory: workingDirectory,
                 logger: logger
             )
         } catch {
-            await deletePreparedRemoteFile(preparedAudio, apiKey: apiKey, logger: logger)
+            await deletePreparedRemoteFile(
+                preparedAudio,
+                apiKey: apiKey,
+                logger: logger
+            )
             throw error
         }
-        await deletePreparedRemoteFile(preparedAudio, apiKey: apiKey, logger: logger)
-        return text
+        await deletePreparedRemoteFile(
+            preparedAudio,
+            apiKey: apiKey,
+            logger: logger
+        )
+        return result
+    }
+
+    /// Backward-compatible text-only entry point used by existing callers.
+    public func transcribe(
+        audioData: Data,
+        mimeType: String = "audio/mp3",
+        terms: [String] = [],
+        customPrompt: String = "",
+        timeOffsetSeconds: Double = 0,
+        workingDirectory: URL? = nil,
+        logger: ((_ level: String, _ message: String) -> Void)? = nil
+    ) async throws -> String {
+        try await transcribeDetailed(
+            audioData: audioData,
+            mimeType: mimeType,
+            terms: terms,
+            customPrompt: customPrompt,
+            timeOffsetSeconds: timeOffsetSeconds,
+            workingDirectory: workingDirectory,
+            logger: logger
+        ).text
     }
 
     private func runTranscriptionAttempts(
@@ -205,98 +247,73 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         terms: [String],
         customPrompt: String,
         timeOffsetSeconds: Double,
+        thinkingLevel: GeminiThinkingLevel,
+        fallbackPolicy: CloudFallbackPolicy,
         workingDirectory: URL?,
         logger: ((_ level: String, _ message: String) -> Void)?
-    ) async throws -> String {
+    ) async throws -> CloudTranscriptionResult {
         do {
             return try await executeWithRetries(
-                modelID: preferredModelID,
+                requestedModelID: preferredModelID,
+                effectiveModelID: preferredModelID,
+                fallbackReason: nil,
+                priorRetryCount: 0,
                 preparedAudio: preparedAudio,
                 apiKey: apiKey,
                 audioByteCount: audioByteCount,
                 terms: terms,
                 customPrompt: customPrompt,
                 timeOffsetSeconds: timeOffsetSeconds,
+                thinkingLevel: thinkingLevel,
                 workingDirectory: workingDirectory,
                 logger: logger
             )
-        } catch GoogleAIStudioError.prohibitedContent {
-            // 若遇到音訊假陽性安全阻擋，自動 Fallback 至 3.1 Pro 重試
-            if !preferredModelID.contains("pro") {
-                logger?("info", "遇到內容安全政策誤判，自動 Fallback 至 Gemini 3.1 Pro 重試。")
-                return try await executeWithRetries(
-                    modelID: "gemini-3.1-pro-preview",
-                    preparedAudio: preparedAudio,
-                    apiKey: apiKey,
-                    audioByteCount: audioByteCount,
-                    terms: terms,
-                    customPrompt: customPrompt,
-                    timeOffsetSeconds: timeOffsetSeconds,
-                    workingDirectory: workingDirectory,
-                    logger: logger
-                )
-            }
-            throw GoogleAIStudioError.prohibitedContent("Google 內容安全誤判，建議切換至 Gemini 3.1 Pro。")
+        } catch is CancellationError {
+            throw CancellationError()
         } catch let error as GoogleAIStudioError {
-            // 若 3.7 Flash 在多次重試後依然遇到 503 High Demand，自動 Fallback 至 3.6 Flash 或 3.1 Pro
-            if case let .requestFailed(statusCode, _) = error,
-               Self.isRetryableServerFailure(error)
-            {
-                if preferredModelID.contains("3.7") {
-                    let fallbackModel = "gemini-3.6-flash"
-                    logger?("info", "Gemini 3.7 伺服器尖峰 (HTTP \(statusCode))，自動 Fallback 至 \(fallbackModel) 重試。")
-                    do {
-                        return try await executeWithRetries(
-                            modelID: fallbackModel,
-                            preparedAudio: preparedAudio,
-                            apiKey: apiKey,
-                            audioByteCount: audioByteCount,
-                            terms: terms,
-                            customPrompt: customPrompt,
-                            timeOffsetSeconds: timeOffsetSeconds,
-                            workingDirectory: workingDirectory,
-                            logger: logger
-                        )
-                    } catch is CancellationError {
-                        // A user cancellation must never be interpreted as a
-                        // reason to send the same paid segment to yet another
-                        // fallback model.
-                        throw CancellationError()
-                    } catch let escalationError as GoogleAIStudioError
-                        where Self.isRetryableServerFailure(escalationError)
-                    {
-                        // 若 3.6 也是可重試的伺服器尖峰，再嘗試 3.1 Pro。
-                        logger?("info", "\(fallbackModel) 重試失敗，再次 Fallback 至 gemini-3.1-pro-preview 重試。")
-                        return try await executeWithRetries(
-                            modelID: "gemini-3.1-pro-preview",
-                            preparedAudio: preparedAudio,
-                            apiKey: apiKey,
-                            audioByteCount: audioByteCount,
-                            terms: terms,
-                            customPrompt: customPrompt,
-                            timeOffsetSeconds: timeOffsetSeconds,
-                            workingDirectory: workingDirectory,
-                            logger: logger
-                        )
-                    } catch let fallbackNonRetryable {
-                        // Validation, policy and other non-retryable failures
-                        // of the fallback attempt surface themselves (fail-
-                        // closed) instead of silently changing models again;
-                        // they also mask the original 503 on purpose because
-                        // they describe what actually happened last.
-                        throw fallbackNonRetryable
-                    }
-                }
+            guard
+                fallbackPolicy == .flashOnly,
+                preferredModelID.contains("3.7"),
+                Self.isRetryableServerFailure(error)
+            else {
+                throw error
             }
-            throw error
+
+            let fallbackModel = "gemini-3.6-flash"
+            let reason = error.localizedDescription
+            logger?(
+                "warning",
+                "Gemini 3.7 重試後仍不可用；依使用者設定改用 \(fallbackModel)。原始原因：\(reason)"
+            )
+            return try await executeWithRetries(
+                requestedModelID: preferredModelID,
+                effectiveModelID: fallbackModel,
+                fallbackReason: reason,
+                priorRetryCount:
+                    GeminiTransportHelper.RetryPolicy.maximumAttempts - 1,
+                preparedAudio: preparedAudio,
+                apiKey: apiKey,
+                audioByteCount: audioByteCount,
+                terms: terms,
+                customPrompt: customPrompt,
+                timeOffsetSeconds: timeOffsetSeconds,
+                thinkingLevel: thinkingLevel,
+                workingDirectory: workingDirectory,
+                logger: logger
+            )
         }
     }
 
     static func isRetryableServerFailure(_ error: GoogleAIStudioError) -> Bool {
-        guard case let .requestFailed(statusCode, _) = error else {
+        switch error {
+        case .rateLimited:
+            return true
+        case let .requestFailed(statusCode, _):
+            return GeminiTransportHelper.RetryPolicy
+                .isRetryableStatusCode(statusCode)
+        default:
             return false
         }
-        return GeminiTransportHelper.RetryPolicy.isRetryableStatusCode(statusCode)
     }
 
     private struct PreparedAudio {
@@ -373,111 +390,159 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
     }
 
     private func executeWithRetries(
-        modelID: String,
+        requestedModelID: String,
+        effectiveModelID: String,
+        fallbackReason: String?,
+        priorRetryCount: Int,
         preparedAudio: [String: Any],
         apiKey: String,
         audioByteCount: Int,
         terms: [String],
         customPrompt: String,
         timeOffsetSeconds: Double,
+        thinkingLevel: GeminiThinkingLevel,
         workingDirectory: URL?,
         logger: ((_ level: String, _ message: String) -> Void)?
-    ) async throws -> String {
+    ) async throws -> CloudTranscriptionResult {
         let policy = GeminiTransportHelper.RetryPolicy.self
         var lastError: Error?
 
         for attempt in 1...policy.maximumAttempts {
             do {
                 return try await generateTranscript(
-                    modelID: modelID,
+                    requestedModelID: requestedModelID,
+                    effectiveModelID: effectiveModelID,
+                    retryCount: priorRetryCount + attempt - 1,
+                    fallbackReason: fallbackReason,
                     preparedAudio: preparedAudio,
                     apiKey: apiKey,
                     audioByteCount: audioByteCount,
                     terms: terms,
                     customPrompt: customPrompt,
                     timeOffsetSeconds: timeOffsetSeconds,
+                    thinkingLevel: thinkingLevel,
                     workingDirectory: workingDirectory,
                     logger: logger
                 )
+            } catch is CancellationError {
+                throw CancellationError()
             } catch let error as GoogleAIStudioError {
-                guard case let .requestFailed(statusCode, _) = error,
-                      policy.isRetryableStatusCode(statusCode)
-                else {
+                let retryAfter: Double?
+                let retryable: Bool
+                switch error {
+                case let .rateLimited(_, delay):
+                    retryAfter = delay
+                    retryable = true
+                case let .requestFailed(statusCode, _):
+                    retryAfter = nil
+                    retryable = policy.isRetryableStatusCode(statusCode)
+                default:
+                    retryAfter = nil
+                    retryable = false
+                }
+                guard retryable else {
                     throw error
                 }
                 lastError = error
-                if attempt < policy.maximumAttempts {
-                    let backoffSeconds = policy.backoffSeconds(forAttempt: attempt)
-                    logger?("info", "HTTP \(statusCode) 伺服器忙碌，等候 \(Int(backoffSeconds)) 秒後進行第 \(attempt + 1) 次重試...")
-                    try await Task.sleep(nanoseconds: UInt64(backoffSeconds * 1_000_000_000))
+                guard attempt < policy.maximumAttempts else {
+                    break
                 }
-            } catch is CancellationError {
-                throw CancellationError()
+                let delay = policy.backoffSeconds(
+                    forAttempt: attempt,
+                    retryAfterSeconds: retryAfter
+                )
+                logger?(
+                    "info",
+                    "Gemini \(effectiveModelID) 暫時忙碌，\(String(format: "%.1f", delay)) 秒後進行第 \(attempt + 1) 次嘗試。"
+                )
+                try await Task.sleep(
+                    nanoseconds: UInt64(delay * 1_000_000_000)
+                )
             }
         }
 
         if let lastError {
             throw lastError
         }
-        throw GoogleAIStudioError.requestFailed(statusCode: 503, message: "伺服器忙碌，重試後仍失敗。")
+        throw GoogleAIStudioError.requestFailed(
+            statusCode: 503,
+            message: "伺服器忙碌，重試後仍失敗。"
+        )
     }
 
     private func generateTranscript(
-        modelID: String,
+        requestedModelID: String,
+        effectiveModelID: String,
+        retryCount: Int,
+        fallbackReason: String?,
         preparedAudio: [String: Any],
         apiKey: String,
         audioByteCount: Int,
         terms: [String],
         customPrompt: String,
         timeOffsetSeconds: Double,
+        thinkingLevel: GeminiThinkingLevel,
         workingDirectory: URL?,
         logger: ((_ level: String, _ message: String) -> Void)?
-    ) async throws -> String {
-        let endpointString = "https://generativelanguage.googleapis.com/v1beta/models/\(modelID):generateContent"
+    ) async throws -> CloudTranscriptionResult {
+        let endpointString = "https://generativelanguage.googleapis.com/v1beta/models/\(effectiveModelID):generateContent"
         guard let endpointURL = URL(string: endpointString) else {
             throw GoogleAIStudioError.invalidJSONResponse
         }
 
-        let systemInstructionText = buildSystemInstruction()
-        let userPromptText = buildUserPrompt(terms: terms, customPrompt: customPrompt, timeOffsetSeconds: timeOffsetSeconds)
-
         return try await sendGenerateContentRequest(
-            modelID: modelID,
+            requestedModelID: requestedModelID,
+            effectiveModelID: effectiveModelID,
+            retryCount: retryCount,
+            fallbackReason: fallbackReason,
             endpointURL: endpointURL,
             apiKey: apiKey,
             audioByteCount: audioByteCount,
             audioPart: preparedAudio,
-            systemInstructionText: systemInstructionText,
-            userPromptText: userPromptText,
+            systemInstructionText: buildSystemInstruction(),
+            userPromptText: buildUserPrompt(
+                terms: terms,
+                customPrompt: customPrompt,
+                timeOffsetSeconds: timeOffsetSeconds
+            ),
+            thinkingLevel: thinkingLevel,
             workingDirectory: workingDirectory,
             logger: logger
         )
     }
 
     private func sendGenerateContentRequest(
-        modelID: String,
+        requestedModelID: String,
+        effectiveModelID: String,
+        retryCount: Int,
+        fallbackReason: String?,
         endpointURL: URL,
         apiKey: String,
         audioByteCount: Int,
         audioPart: [String: Any],
         systemInstructionText: String,
         userPromptText: String,
+        thinkingLevel: GeminiThinkingLevel,
         workingDirectory: URL?,
         logger: ((_ level: String, _ message: String) -> Void)?
-    ) async throws -> String {
+    ) async throws -> CloudTranscriptionResult {
+        var generationConfig: [String: Any] = [
+            "maxOutputTokens": 16_384
+        ]
+        if effectiveModelID.contains("3.7") {
+            generationConfig["thinkingConfig"] = [
+                "thinkingLevel": thinkingLevel.rawValue
+            ]
+        }
+
         let requestBody: [String: Any] = [
             "systemInstruction": [
-                "parts": [
-                    ["text": systemInstructionText]
-                ]
+                "parts": [["text": systemInstructionText]]
             ],
             "contents": [
                 [
                     "role": "user",
-                    "parts": [
-                        audioPart,
-                        ["text": userPromptText]
-                    ]
+                    "parts": [audioPart, ["text": userPromptText]]
                 ]
             ],
             "safetySettings": [
@@ -487,49 +552,74 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                 ["category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"],
                 ["category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"]
             ],
-            "generationConfig": [
-                "maxOutputTokens": 8192
-            ]
+            "generationConfig": generationConfig
         ]
 
         let requestData = try JSONSerialization.data(withJSONObject: requestBody)
-
         let tempRequestFile = try GeminiTransportHelper.writeTemporaryRequestFile(
             data: requestData,
             in: workingDirectory,
             prefix: "aistudio_generate"
         )
-        defer {
-            try? FileManager.default.removeItem(at: tempRequestFile)
-        }
+        defer { try? FileManager.default.removeItem(at: tempRequestFile) }
 
         var urlRequest = URLRequest(url: endpointURL)
         urlRequest.httpMethod = "POST"
         urlRequest.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
-        urlRequest.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
-        urlRequest.timeoutInterval = 300 // 5 分鐘超時
+        urlRequest.setValue(
+            "application/json; charset=utf-8",
+            forHTTPHeaderField: "Content-Type"
+        )
+        urlRequest.timeoutInterval = 300
 
+        let startedAt = Date()
         let (data, httpResponse) = try await sendWithPOSIXRetry(
             request: urlRequest,
             fileURL: tempRequestFile,
             session: urlSession,
             logger: logger
         )
+        let latency = Date().timeIntervalSince(startedAt)
 
         logger?(
             "info",
-            "Google AI Studio 請求回應：HTTP \(httpResponse.statusCode), MP3 \(audioByteCount) bytes, JSON \(requestData.count) bytes, 模型 \(modelID)"
+            "Google AI Studio 回應：HTTP \(httpResponse.statusCode)，MP3 \(audioByteCount) bytes，JSON \(requestData.count) bytes，要求 \(requestedModelID)，實際請求 \(effectiveModelID)。"
         )
 
-        if httpResponse.statusCode != 200 {
+        guard httpResponse.statusCode == 200 else {
             let errorMsg = parseErrorMessage(from: data)
+            if httpResponse.statusCode == 429 {
+                if GeminiTransportHelper.isDailyQuotaExceeded(
+                    data: data,
+                    message: errorMsg
+                ) {
+                    throw GoogleAIStudioError.quotaExceeded(errorMsg)
+                }
+                throw GoogleAIStudioError.rateLimited(
+                    message: errorMsg,
+                    retryAfterSeconds: GeminiTransportHelper.retryAfterSeconds(
+                        response: httpResponse,
+                        data: data
+                    )
+                )
+            }
             throw GoogleAIStudioError.requestFailed(
                 statusCode: httpResponse.statusCode,
                 message: errorMsg
             )
         }
 
-        return try parseCandidateText(from: data)
+        let text = try parseCandidateText(from: data)
+        let metadata = GeminiResponseMetadataParser.makeMetadata(
+            from: data,
+            requestedModelID: requestedModelID,
+            effectiveModelID: effectiveModelID,
+            retryCount: retryCount,
+            fallbackReason: fallbackReason,
+            thinkingLevel: thinkingLevel,
+            latencySeconds: latency
+        )
+        return CloudTranscriptionResult(text: text, metadata: metadata)
     }
 
     /// 透過串流上傳將請求送出，若遇到 POSIX 40 自動建立全新 Ephemeral Session 重試一次

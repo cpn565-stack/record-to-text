@@ -5,6 +5,8 @@ public enum VertexAIError: LocalizedError, Equatable {
     case authenticationFailed(String)
     case audioPayloadTooLarge(sizeBytes: Int, limitBytes: Int)
     case requestFailed(statusCode: Int, message: String)
+    case rateLimited(message: String, retryAfterSeconds: Double?)
+    case quotaExceeded(String)
     case prohibitedContent(String)
     case incompleteResponse(finishReason: String, message: String?)
     case emptyResponse
@@ -26,6 +28,11 @@ public enum VertexAIError: LocalizedError, Equatable {
         case let .requestFailed(statusCode, message):
             let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
             return "Vertex AI 請求失敗（HTTP \(statusCode)）：\(trimmed)"
+        case let .rateLimited(message, retryAfterSeconds):
+            let delay = retryAfterSeconds.map { "，建議至少等待 \(String(format: "%.1f", $0)) 秒" } ?? ""
+            return "Vertex AI 暫時達到速率限制\(delay)：\(message)"
+        case let .quotaExceeded(message):
+            return "Vertex AI 當日配額已用完，短時間重試不會成功：\(message)"
         case let .prohibitedContent(message):
             return "Google 內容安全政策攔截：\(message)"
         case let .incompleteResponse(finishReason, message):
@@ -53,19 +60,25 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         public var modelID: String
         public var gcsBucket: String?
         public var includeSummary: Bool
+        public var thinkingLevel: GeminiThinkingLevel
+        public var fallbackPolicy: CloudFallbackPolicy
 
         public init(
             projectID: String? = nil,
             location: String = "global",
             modelID: String = "gemini-3.7-flash",
             gcsBucket: String? = nil,
-            includeSummary: Bool = false
+            includeSummary: Bool = false,
+            thinkingLevel: GeminiThinkingLevel = .medium,
+            fallbackPolicy: CloudFallbackPolicy = .disabled
         ) {
             self.projectID = projectID
             self.location = location
             self.modelID = modelID
             self.gcsBucket = gcsBucket
             self.includeSummary = includeSummary
+            self.thinkingLevel = thinkingLevel
+            self.fallbackPolicy = fallbackPolicy
         }
 
         public static let `default` = Configuration()
@@ -111,8 +124,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         lock.withLock { config }
     }
 
-    /// 執行語音轉文字
-    public func transcribe(
+    public func transcribeDetailed(
         audioData: Data,
         mimeType: String = "audio/mp3",
         terms: [String] = [],
@@ -120,23 +132,26 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         timeOffsetSeconds: Double = 0,
         workingDirectory: URL? = nil,
         logger: ((_ level: String, _ message: String) -> Void)? = nil
-    ) async throws -> String {
+    ) async throws -> CloudTranscriptionResult {
         let currentConfig = getConfiguration()
         let authService = lock.withLock { self.authService }
 
-        // 1. 取得 Project ID
         let resolvedProjectID: String
-        if let explicitID = currentConfig.projectID, !explicitID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            resolvedProjectID = explicitID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let explicitID = currentConfig.projectID,
+           !explicitID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            resolvedProjectID = explicitID.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
         } else {
             do {
                 resolvedProjectID = try await authService.getDefaultProjectID()
             } catch {
-                throw VertexAIError.authenticationFailed("無法取得 GCP Project ID：\(error.localizedDescription)")
+                throw VertexAIError.authenticationFailed(
+                    "無法取得 GCP Project ID：\(error.localizedDescription)"
+                )
             }
         }
 
-        // 2. 取得 Access Token
         let accessToken: String
         do {
             accessToken = try await authService.getAccessToken()
@@ -144,10 +159,9 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             throw VertexAIError.authenticationFailed(error.localizedDescription)
         }
 
-        // 3. 上傳音訊一次。所有重試與模型 fallback 共用同一個參照，
-        //    不穩定的伺服器不該放大付費上傳次數。
         let preparedAudio = try await prepareAudioPart(
-            bucket: currentConfig.gcsBucket?.trimmingCharacters(in: .whitespacesAndNewlines),
+            bucket: currentConfig.gcsBucket?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
             authService: authService,
             accessToken: accessToken,
             audioData: audioData,
@@ -156,12 +170,13 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             logger: logger
         )
 
-        let resolvedLocation = currentConfig.location.trimmingCharacters(in: .whitespacesAndNewlines)
-        let location = resolvedLocation.isEmpty ? "global" : resolvedLocation
+        let rawLocation = currentConfig.location
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let location = rawLocation.isEmpty ? "global" : rawLocation
 
-        let text: String
+        let result: CloudTranscriptionResult
         do {
-            text = try await runTranscriptionAttempts(
+            result = try await runTranscriptionAttempts(
                 preferredModelID: currentConfig.modelID,
                 projectID: resolvedProjectID,
                 location: location,
@@ -172,6 +187,8 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                 terms: terms,
                 customPrompt: customPrompt,
                 timeOffsetSeconds: timeOffsetSeconds,
+                thinkingLevel: currentConfig.thinkingLevel,
+                fallbackPolicy: currentConfig.fallbackPolicy,
                 workingDirectory: workingDirectory,
                 logger: logger
             )
@@ -190,7 +207,27 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             authService: authService,
             logger: logger
         )
-        return text
+        return result
+    }
+
+    public func transcribe(
+        audioData: Data,
+        mimeType: String = "audio/mp3",
+        terms: [String] = [],
+        customPrompt: String = "",
+        timeOffsetSeconds: Double = 0,
+        workingDirectory: URL? = nil,
+        logger: ((_ level: String, _ message: String) -> Void)? = nil
+    ) async throws -> String {
+        try await transcribeDetailed(
+            audioData: audioData,
+            mimeType: mimeType,
+            terms: terms,
+            customPrompt: customPrompt,
+            timeOffsetSeconds: timeOffsetSeconds,
+            workingDirectory: workingDirectory,
+            logger: logger
+        ).text
     }
 
     private func runTranscriptionAttempts(
@@ -204,12 +241,17 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         terms: [String],
         customPrompt: String,
         timeOffsetSeconds: Double,
+        thinkingLevel: GeminiThinkingLevel,
+        fallbackPolicy: CloudFallbackPolicy,
         workingDirectory: URL?,
         logger: ((_ level: String, _ message: String) -> Void)?
-    ) async throws -> String {
+    ) async throws -> CloudTranscriptionResult {
         do {
             return try await executeWithRetries(
-                modelID: preferredModelID,
+                requestedModelID: preferredModelID,
+                effectiveModelID: preferredModelID,
+                fallbackReason: nil,
+                priorRetryCount: 0,
                 projectID: projectID,
                 location: location,
                 preparedAudio: preparedAudio,
@@ -219,89 +261,59 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                 terms: terms,
                 customPrompt: customPrompt,
                 timeOffsetSeconds: timeOffsetSeconds,
+                thinkingLevel: thinkingLevel,
                 workingDirectory: workingDirectory,
                 logger: logger
             )
-        } catch VertexAIError.prohibitedContent {
-            // 若遇到 Google 預先審查誤判（False Positive），自動切換至 Gemini 3.1 Pro 重試
-            if !preferredModelID.contains("pro") {
-                logger?("info", "遇到內容安全政策誤判，自動 Fallback 至 Gemini 3.1 Pro 重試。")
-                return try await executeWithRetries(
-                    modelID: "gemini-3.1-pro-preview",
-                    projectID: projectID,
-                    location: location,
-                    preparedAudio: preparedAudio,
-                    accessToken: accessToken,
-                    authService: authService,
-                    inputByteCount: audioByteCount,
-                    terms: terms,
-                    customPrompt: customPrompt,
-                    timeOffsetSeconds: timeOffsetSeconds,
-                    workingDirectory: workingDirectory,
-                    logger: logger
-                )
-            }
-            throw VertexAIError.prohibitedContent("Google 內容安全誤判，建議切換至 Gemini 3.1 Pro。")
+        } catch is CancellationError {
+            throw CancellationError()
         } catch let error as VertexAIError {
-            // 若 3.7 Flash 在多次重試後依然遇到伺服器尖峰，自動 Fallback。
-            if case let .requestFailed(statusCode, _) = error,
-               Self.isRetryableServerFailure(error)
-            {
-                if preferredModelID.contains("3.7") {
-                    let fallbackModel = "gemini-3.6-flash"
-                    logger?("info", "Gemini 3.7 伺服器尖峰 (HTTP \(statusCode))，自動 Fallback 至 \(fallbackModel) 重試。")
-                    do {
-                        return try await executeWithRetries(
-                            modelID: fallbackModel,
-                            projectID: projectID,
-                            location: location,
-                            preparedAudio: preparedAudio,
-                            accessToken: accessToken,
-                            authService: authService,
-                            inputByteCount: audioByteCount,
-                            terms: terms,
-                            customPrompt: customPrompt,
-                            timeOffsetSeconds: timeOffsetSeconds,
-                            workingDirectory: workingDirectory,
-                            logger: logger
-                        )
-                    } catch is CancellationError {
-                        // 使用者取消不應被解讀成再送另一個付費 fallback 的理由。
-                        throw CancellationError()
-                    } catch let escalationError as VertexAIError
-                        where Self.isRetryableServerFailure(escalationError)
-                    {
-                        logger?("info", "\(fallbackModel) 重試失敗，再次 Fallback 至 gemini-3.1-pro-preview 重試。")
-                        return try await executeWithRetries(
-                            modelID: "gemini-3.1-pro-preview",
-                            projectID: projectID,
-                            location: location,
-                            preparedAudio: preparedAudio,
-                            accessToken: accessToken,
-                            authService: authService,
-                            inputByteCount: audioByteCount,
-                            terms: terms,
-                            customPrompt: customPrompt,
-                            timeOffsetSeconds: timeOffsetSeconds,
-                            workingDirectory: workingDirectory,
-                            logger: logger
-                        )
-                    } catch let fallbackNonRetryable {
-                        // Fallback 嘗試的非可重試錯誤如實回報（fail-closed），
-                        // 不再默默換模型送出更多請求。
-                        throw fallbackNonRetryable
-                    }
-                }
+            guard
+                fallbackPolicy == .flashOnly,
+                preferredModelID.contains("3.7"),
+                Self.isRetryableServerFailure(error)
+            else {
+                throw error
             }
-            throw error
+
+            let fallbackModel = "gemini-3.6-flash"
+            let reason = error.localizedDescription
+            logger?(
+                "warning",
+                "Gemini 3.7 重試後仍不可用；依使用者設定改用 \(fallbackModel)。原始原因：\(reason)"
+            )
+            return try await executeWithRetries(
+                requestedModelID: preferredModelID,
+                effectiveModelID: fallbackModel,
+                fallbackReason: reason,
+                priorRetryCount:
+                    GeminiTransportHelper.RetryPolicy.maximumAttempts - 1,
+                projectID: projectID,
+                location: location,
+                preparedAudio: preparedAudio,
+                accessToken: accessToken,
+                authService: authService,
+                inputByteCount: audioByteCount,
+                terms: terms,
+                customPrompt: customPrompt,
+                timeOffsetSeconds: timeOffsetSeconds,
+                thinkingLevel: thinkingLevel,
+                workingDirectory: workingDirectory,
+                logger: logger
+            )
         }
     }
 
     static func isRetryableServerFailure(_ error: VertexAIError) -> Bool {
-        guard case let .requestFailed(statusCode, _) = error else {
+        switch error {
+        case .rateLimited:
+            return true
+        case let .requestFailed(statusCode, _):
+            return GeminiTransportHelper.RetryPolicy
+                .isRetryableStatusCode(statusCode)
+        default:
             return false
         }
-        return GeminiTransportHelper.RetryPolicy.isRetryableStatusCode(statusCode)
     }
 
     private struct PreparedAudio {
@@ -398,7 +410,10 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
     }
 
     private func executeWithRetries(
-        modelID: String,
+        requestedModelID: String,
+        effectiveModelID: String,
+        fallbackReason: String?,
+        priorRetryCount: Int,
         projectID: String,
         location: String,
         preparedAudio: [String: Any],
@@ -408,16 +423,20 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         terms: [String],
         customPrompt: String,
         timeOffsetSeconds: Double,
+        thinkingLevel: GeminiThinkingLevel,
         workingDirectory: URL?,
         logger: ((_ level: String, _ message: String) -> Void)?
-    ) async throws -> String {
+    ) async throws -> CloudTranscriptionResult {
         let policy = GeminiTransportHelper.RetryPolicy.self
         var lastError: Error?
 
         for attempt in 1...policy.maximumAttempts {
             do {
-                let result = try await generateTranscript(
-                    modelID: modelID,
+                let generated = try await generateTranscript(
+                    requestedModelID: requestedModelID,
+                    effectiveModelID: effectiveModelID,
+                    retryCount: priorRetryCount + attempt - 1,
+                    fallbackReason: fallbackReason,
                     projectID: projectID,
                     location: location,
                     preparedAudio: preparedAudio,
@@ -427,35 +446,62 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                     terms: terms,
                     customPrompt: customPrompt,
                     timeOffsetSeconds: timeOffsetSeconds,
+                    thinkingLevel: thinkingLevel,
                     workingDirectory: workingDirectory,
                     logger: logger
                 )
-                return result.text
+                return generated.result
+            } catch is CancellationError {
+                throw CancellationError()
             } catch let error as VertexAIError {
-                guard case let .requestFailed(statusCode, _) = error,
-                      policy.isRetryableStatusCode(statusCode)
-                else {
+                let retryAfter: Double?
+                let retryable: Bool
+                switch error {
+                case let .rateLimited(_, delay):
+                    retryAfter = delay
+                    retryable = true
+                case let .requestFailed(statusCode, _):
+                    retryAfter = nil
+                    retryable = policy.isRetryableStatusCode(statusCode)
+                default:
+                    retryAfter = nil
+                    retryable = false
+                }
+                guard retryable else {
                     throw error
                 }
                 lastError = error
-                if attempt < policy.maximumAttempts {
-                    let backoffSeconds = policy.backoffSeconds(forAttempt: attempt)
-                    logger?("info", "HTTP \(statusCode) 伺服器忙碌，等候 \(Int(backoffSeconds)) 秒後進行第 \(attempt + 1) 次重試...")
-                    try await Task.sleep(nanoseconds: UInt64(backoffSeconds * 1_000_000_000))
+                guard attempt < policy.maximumAttempts else {
+                    break
                 }
-            } catch is CancellationError {
-                throw CancellationError()
+                let delay = policy.backoffSeconds(
+                    forAttempt: attempt,
+                    retryAfterSeconds: retryAfter
+                )
+                logger?(
+                    "info",
+                    "Vertex Gemini \(effectiveModelID) 暫時忙碌，\(String(format: "%.1f", delay)) 秒後進行第 \(attempt + 1) 次嘗試。"
+                )
+                try await Task.sleep(
+                    nanoseconds: UInt64(delay * 1_000_000_000)
+                )
             }
         }
 
         if let lastError {
             throw lastError
         }
-        throw VertexAIError.requestFailed(statusCode: 503, message: "伺服器忙碌，重試後仍失敗。")
+        throw VertexAIError.requestFailed(
+            statusCode: 503,
+            message: "伺服器忙碌，重試後仍失敗。"
+        )
     }
 
     private func generateTranscript(
-        modelID: String,
+        requestedModelID: String,
+        effectiveModelID: String,
+        retryCount: Int,
+        fallbackReason: String?,
         projectID: String,
         location: String,
         preparedAudio: [String: Any],
@@ -465,36 +511,38 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         terms: [String],
         customPrompt: String,
         timeOffsetSeconds: Double,
+        thinkingLevel: GeminiThinkingLevel,
         workingDirectory: URL?,
         logger: ((_ level: String, _ message: String) -> Void)?
-    ) async throws -> (text: String, accessToken: String) {
-        let host = (location == "global") ? "aiplatform.googleapis.com" : "\(location)-aiplatform.googleapis.com"
-        let endpointString = "https://\(host)/v1/projects/\(projectID)/locations/\(location)/publishers/google/models/\(modelID):generateContent"
+    ) async throws -> (result: CloudTranscriptionResult, accessToken: String) {
+        let host = location == "global"
+            ? "aiplatform.googleapis.com"
+            : "\(location)-aiplatform.googleapis.com"
+        let endpointString = "https://\(host)/v1/projects/\(projectID)/locations/\(location)/publishers/google/models/\(effectiveModelID):generateContent"
         guard let endpointURL = URL(string: endpointString) else {
             throw VertexAIError.invalidEndpointURL(endpointString)
         }
 
-        // 音訊分段永遠只回傳逐字稿。若使用者有勾選摘要，
-        // 由 TranscriptionEngine 在所有分段合併後再做一次文字摘要。
-        let systemInstructionText = buildSystemInstruction()
-        let userPromptText = buildUserPrompt(
-            terms: terms,
-            customPrompt: customPrompt,
-            timeOffsetSeconds: timeOffsetSeconds
-        )
-
         return try await sendGenerateContentRequest(
-            modelID: modelID,
+            requestedModelID: requestedModelID,
+            effectiveModelID: effectiveModelID,
+            retryCount: retryCount,
+            fallbackReason: fallbackReason,
             resolvedLocation: location,
             endpointURL: endpointURL,
             accessToken: accessToken,
             authService: authService,
             inputByteCount: inputByteCount,
             inputPart: preparedAudio,
-            systemInstructionText: systemInstructionText,
-            userPromptText: userPromptText,
+            systemInstructionText: buildSystemInstruction(),
+            userPromptText: buildUserPrompt(
+                terms: terms,
+                customPrompt: customPrompt,
+                timeOffsetSeconds: timeOffsetSeconds
+            ),
             requestDescription: "轉錄",
-            maximumOutputTokens: 8_192,
+            maximumOutputTokens: 16_384,
+            thinkingLevel: thinkingLevel,
             workingDirectory: workingDirectory,
             logger: logger
         )
@@ -553,7 +601,10 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         }
 
         let result = try await sendGenerateContentRequest(
-            modelID: currentConfig.modelID,
+            requestedModelID: currentConfig.modelID,
+            effectiveModelID: currentConfig.modelID,
+            retryCount: 0,
+            fallbackReason: nil,
             resolvedLocation: location,
             endpointURL: endpointURL,
             accessToken: accessToken,
@@ -566,14 +617,18 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             userPromptText: "請直接輸出這份完整逐字稿的精簡摘要。",
             requestDescription: "摘要",
             maximumOutputTokens: 2_048,
+            thinkingLevel: currentConfig.thinkingLevel,
             workingDirectory: workingDirectory,
             logger: logger
         )
-        return result.text
+        return result.result.text
     }
 
     private func sendGenerateContentRequest(
-        modelID: String,
+        requestedModelID: String,
+        effectiveModelID: String,
+        retryCount: Int,
+        fallbackReason: String?,
         resolvedLocation: String,
         endpointURL: URL,
         accessToken: String,
@@ -584,10 +639,19 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         userPromptText: String,
         requestDescription: String,
         maximumOutputTokens: Int,
+        thinkingLevel: GeminiThinkingLevel,
         workingDirectory: URL?,
         logger: ((_ level: String, _ message: String) -> Void)?
-    ) async throws -> (text: String, accessToken: String) {
+    ) async throws -> (result: CloudTranscriptionResult, accessToken: String) {
         var resolvedAccessToken = accessToken
+        var generationConfig: [String: Any] = [
+            "maxOutputTokens": maximumOutputTokens
+        ]
+        if effectiveModelID.contains("3.7") {
+            generationConfig["thinkingConfig"] = [
+                "thinkingLevel": thinkingLevel.rawValue
+            ]
+        }
         let requestBody: [String: Any] = [
             "systemInstruction": [
                 "parts": [
@@ -610,9 +674,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                 ["category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"],
                 ["category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"]
             ],
-            "generationConfig": [
-                "maxOutputTokens": maximumOutputTokens
-            ]
+            "generationConfig": generationConfig
         ]
 
         let requestData = try JSONSerialization.data(withJSONObject: requestBody)
@@ -633,6 +695,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         urlRequest.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
         urlRequest.timeoutInterval = 300 // 5 分鐘超時
 
+        let startedAt = Date()
         var (data, httpResponse) = try await sendWithPOSIXRetry(
             request: urlRequest,
             fileURL: tempRequestFile,
@@ -666,18 +729,46 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
 
         logger?(
             "info",
-            "Vertex AI \(requestDescription)請求回應：HTTP \(httpResponse.statusCode), 輸入 \(inputByteCount) bytes, JSON \(requestData.count) bytes, 模型 \(modelID), location \(resolvedLocation)"
+            "Vertex AI \(requestDescription)回應：HTTP \(httpResponse.statusCode)，輸入 \(inputByteCount) bytes，JSON \(requestData.count) bytes，要求 \(requestedModelID)，實際請求 \(effectiveModelID)，location \(resolvedLocation)。"
         )
 
-        if httpResponse.statusCode != 200 {
+        guard httpResponse.statusCode == 200 else {
             let errorMsg = parseErrorMessage(from: data)
+            if httpResponse.statusCode == 429 {
+                if GeminiTransportHelper.isDailyQuotaExceeded(
+                    data: data,
+                    message: errorMsg
+                ) {
+                    throw VertexAIError.quotaExceeded(errorMsg)
+                }
+                throw VertexAIError.rateLimited(
+                    message: errorMsg,
+                    retryAfterSeconds: GeminiTransportHelper.retryAfterSeconds(
+                        response: httpResponse,
+                        data: data
+                    )
+                )
+            }
             throw VertexAIError.requestFailed(
                 statusCode: httpResponse.statusCode,
                 message: errorMsg
             )
         }
 
-        return (try parseCandidateText(from: data), resolvedAccessToken)
+        let text = try parseCandidateText(from: data)
+        let metadata = GeminiResponseMetadataParser.makeMetadata(
+            from: data,
+            requestedModelID: requestedModelID,
+            effectiveModelID: effectiveModelID,
+            retryCount: retryCount,
+            fallbackReason: fallbackReason,
+            thinkingLevel: thinkingLevel,
+            latencySeconds: Date().timeIntervalSince(startedAt)
+        )
+        return (
+            CloudTranscriptionResult(text: text, metadata: metadata),
+            resolvedAccessToken
+        )
     }
 
     /// 透過串流上傳將請求送出，若遇到 POSIX 40 自動建立全新 Ephemeral Session 重試一次
