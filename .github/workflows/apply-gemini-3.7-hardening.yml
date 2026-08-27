@@ -5,8 +5,7 @@ on:
     branches:
       - feature/gemini-3.7-quality-hardening
     paths:
-      - scripts/apply-gemini-3.7-phase6-gcloud-tests.py
-      - scripts/fix-gemini-3.7-phase6-generated-tests.py
+      - scripts/apply-gemini-3.7-docs.py
       - .github/workflows/apply-gemini-3.7-hardening.yml
 
 permissions:
@@ -23,10 +22,8 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
 
-      - name: Expand gcloud authentication tests
-        run: |
-          python3 scripts/apply-gemini-3.7-phase6-gcloud-tests.py
-          python3 scripts/fix-gemini-3.7-phase6-generated-tests.py
+      - name: Synchronize documentation
+        run: python3 scripts/apply-gemini-3.7-docs.py
 
       - name: Install integration-test tools
         run: brew install ffmpeg opencc
@@ -50,12 +47,12 @@ jobs:
       - name: Commit generated changes
         run: |
           if git diff --quiet -- . ':!scripts/*.py' ':!.github/workflows/apply-gemini-3.7-hardening.yml'; then
-            echo "No generated changes to commit"
+            echo "No documentation changes to commit"
             exit 0
           fi
           git config user.name "record-to-text hardening bot"
           git config user.email "actions@users.noreply.github.com"
           git add -A
           git reset scripts/*.py .github/workflows/apply-gemini-3.7-hardening.yml
-          git commit -m "test: expand gcloud authentication coverage [hardening-generated]"
+          git commit -m "docs: document Gemini 3.7 quality hardening [hardening-generated]"
           git push origin HEAD:feature/gemini-3.7-quality-hardening
