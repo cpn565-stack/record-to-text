@@ -948,6 +948,72 @@ tests.check(
     "GeminiModelDescriptor contains 3.7 Flash, 3.6 Flash and 3.1 Pro presets"
 )
 
+tests.check(
+    {
+        let base = AppSettings(defaultOutputDirectory: "/tmp/output")
+        let qwen = QuickTranscriptionChoice.qwen3ASR1_7BBF16.applying(to: base)
+        let vertex = QuickTranscriptionChoice.vertexGemini37Flash.applying(to: qwen)
+        let aiStudio = QuickTranscriptionChoice.aiStudioGemini37Flash.applying(
+            to: vertex
+        )
+        return QuickTranscriptionChoice.qwen3ASR1_7BBF16.matches(qwen)
+            && qwen.backendType == .localQwen
+            && qwen.selectedModelID == ASRModelDescriptor.appleSiliconBF16.id
+            && QuickTranscriptionChoice.vertexGemini37Flash.matches(vertex)
+            && vertex.vertexAIModelID == "gemini-3.7-flash"
+            && QuickTranscriptionChoice.aiStudioGemini37Flash.matches(aiStudio)
+            && aiStudio.googleAIStudioModelID == "gemini-3.7-flash"
+    }(),
+    "Main-window quick model choices switch backend and matching model together"
+)
+
+tests.check(
+    {
+        let system = GeminiTranscriptPrompt.systemInstruction
+        let user = GeminiTranscriptPrompt.buildUserPrompt(
+            terms: ["盛和塾"],
+            canonicalPrompt: "忠實轉錄。\n盛和塾",
+            timeOffsetSeconds: 1_200
+        )
+        return system.contains("[00:00 - 05:00]")
+            && system.contains("講者 1：")
+            && system.contains("不得猜測身分")
+            && system.contains("不同講者回合之間必須保留一個空白行")
+            && system.contains("[05:00 - 10:00]")
+            && user.contains("20:00")
+            && user.contains("不要從 00:00 重新計時")
+            && user.contains("第一行即從 [20:00 - ...] 開始")
+            && user.components(separatedBy: "盛和塾").count - 1 == 1
+    }(),
+    "Gemini cloud prompt requests speaker turns and absolute time ranges without duplicating glossary terms"
+)
+
+tests.check(
+    {
+        let low = GeminiGenerationConfig.make(
+            maxOutputTokens: 16_384,
+            modelID: "gemini-3.7-flash",
+            thinkingLevel: .low
+        )
+        let high = GeminiGenerationConfig.make(
+            maxOutputTokens: 16_384,
+            modelID: "gemini-3.7-flash",
+            thinkingLevel: .high
+        )
+        let custom = GeminiGenerationConfig.make(
+            maxOutputTokens: 16_384,
+            modelID: "custom-model",
+            thinkingLevel: .high
+        )
+        let lowThinking = (low["thinkingConfig"] as? [String: Any])?["thinkingLevel"] as? String
+        let highThinking = (high["thinkingConfig"] as? [String: Any])?["thinkingLevel"] as? String
+        return lowThinking == "low"
+            && highThinking == "high"
+            && custom["thinkingConfig"] == nil
+    }(),
+    "Gemini thinking level is included in Gemini 3 generation config"
+)
+
 // MARK: - Gemini Cloud Transport Hardening Tests
 
 tests.check(
@@ -1455,6 +1521,131 @@ tests.check(
             && siblings.contains("job-ledger.json")
     }(),
     "Unparsable ledger is quarantined instead of being overwritten by a future save"
+)
+
+tests.check(
+    {
+        let json: [String: Any] = [
+            "promptFeedback": [
+                "blockReason": "OTHER",
+                "safetyRatings": [
+                    [
+                        "category": "HARM_CATEGORY_HARASSMENT",
+                        "probability": "NEGLIGIBLE",
+                        "blocked": false
+                    ]
+                ]
+            ],
+            "usageMetadata": [
+                "promptTokenCount": 9999,
+                "promptTokensDetails": [
+                    ["modality": "AUDIO", "tokenCount": 9800]
+                ]
+            ],
+            "modelVersion": "gemini-3.7-flash-exp",
+            "responseId": "resp-blocked-1"
+        ]
+        guard let diagnostics = GeminiPromptFeedbackParser.diagnosticsIfBlocked(
+            from: json,
+            httpStatusCode: 200
+        ) else {
+            return false
+        }
+        let studioError = GoogleAIStudioError.promptBlocked(diagnostics)
+        let vertexError = VertexAIError.promptBlocked(diagnostics)
+        let description = studioError.errorDescription ?? ""
+        return diagnostics.blockReason == "OTHER"
+            && diagnostics.httpStatusCode == 200
+            && diagnostics.responseID == "resp-blocked-1"
+            && diagnostics.modelVersion == "gemini-3.7-flash-exp"
+            && diagnostics.promptTokenCount == 9999
+            && diagnostics.audioTokenCount == 9800
+            && diagnostics.safetyRatings.contains(where: { $0.category == "HARM_CATEGORY_HARASSMENT" })
+            && description.contains("HTTP 200")
+            && description.contains("promptFeedback.blockReason=OTHER")
+            && !description.contains("HTTP 400")
+            && !description.contains("內容安全政策攔截")
+            && diagnostics.logSummary.contains("responseId=resp-blocked-1")
+            && diagnostics.logSummary.contains("audioTokenCount=9800")
+            && studioError.errorDescription == vertexError.errorDescription
+    }(),
+    "promptFeedback OTHER is fail-closed with diagnostics, not a fake HTTP 400"
+)
+
+tests.check(
+    {
+        let json: [String: Any] = [
+            "promptFeedback": [
+                "blockReason": "PROHIBITED_CONTENT",
+                "blockReasonMessage": "policy"
+            ]
+        ]
+        guard let diagnostics = GeminiPromptFeedbackParser.diagnosticsIfBlocked(
+            from: json,
+            httpStatusCode: 200
+        ) else {
+            return false
+        }
+        let description = VertexAIError.promptBlocked(diagnostics).errorDescription ?? ""
+        return diagnostics.isExplicitSafetyPolicy
+            && description.contains("內容安全政策攔截")
+            && !description.contains("HTTP 400")
+    }(),
+    "Vertex promptFeedback PROHIBITED_CONTENT stays a policy block without fake HTTP 400"
+)
+
+tests.check(
+    {
+        let json: [String: Any] = [
+            "promptFeedback": [
+                "blockReason": 2
+            ],
+            "responseId": "resp-int-other"
+        ]
+        guard let diagnostics = GeminiPromptFeedbackParser.diagnosticsIfBlocked(
+            from: json,
+            httpStatusCode: 200
+        ) else {
+            return false
+        }
+        return diagnostics.blockReason == "OTHER"
+            && diagnostics.responseID == "resp-int-other"
+    }(),
+    "integer promptFeedback.blockReason 2 maps to OTHER"
+)
+
+tests.check(
+    {
+        let json: [String: Any] = [
+            "usageMetadata": [
+                "promptTokenCount": 12,
+                "thoughtsTokenCount": 34,
+                "candidatesTokenCount": 0
+            ],
+            "modelVersion": "gemini-3.7-flash-exp",
+            "responseId": "resp-empty-1"
+        ]
+        let summary = GeminiResponseInventory.summary(
+            from: json,
+            reason: "no_candidates",
+            rawByteCount: 88
+        )
+        return summary.contains("no_candidates")
+            && summary.contains("candidateCount=0")
+            && summary.contains("responseId=resp-empty-1")
+            && summary.contains("thoughtsTokenCount=34")
+            && summary.contains("rawBytes=88")
+    }(),
+    "empty Gemini response inventory captures responseId and token counts"
+)
+
+tests.check(
+    GeminiTranscriptFinishReason.allowsUsableText("MAX_TOKENS")
+        && GeminiTranscriptFinishReason.allowsUsableText("stop")
+        && GeminiTranscriptFinishReason.isTruncated("max_tokens")
+        && !GeminiTranscriptFinishReason.allowsUsableText("OTHER")
+        && GeminiTranscriptFinishReason.isSafetyBlock("SAFETY"),
+    "MAX_TOKENS with usable text is accepted; safety finish reasons stay blocked"
 )
 
 // MARK: - Process Tree Termination Test

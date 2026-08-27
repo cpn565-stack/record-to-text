@@ -134,16 +134,51 @@ struct MainView: View {
 
             Spacer()
 
-            Label(
-                viewModel.selectedModelName,
-                systemImage: viewModel.selectedModelIcon
-            )
-            .font(.caption.weight(.medium))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(.quaternary, in: Capsule())
+            quickModelMenu
         }
+    }
+
+    private var quickModelMenu: some View {
+        Menu {
+            ForEach(QuickTranscriptionChoice.allCases) { choice in
+                Button {
+                    viewModel.selectQuickTranscriptionChoice(choice)
+                } label: {
+                    Label(
+                        choice.displayName,
+                        systemImage: quickModelMenuIcon(for: choice)
+                    )
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: viewModel.selectedModelIcon)
+                Text(viewModel.selectedModelName)
+                    .lineLimit(1)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .font(.caption.weight(.medium))
+        }
+        .menuStyle(.button)
+        .buttonStyle(.bordered)
+        .buttonBorderShape(.capsule)
+        .controlSize(.small)
+        .fixedSize()
+        .help("快速切換轉錄模型；只影響之後加入的錄音")
+        .accessibilityLabel("轉錄模型")
+        .accessibilityValue(viewModel.selectedModelName)
+        .accessibilityHint("點擊以切換 Qwen、Vertex AI 或 Google AI Studio")
+    }
+
+    private func quickModelMenuIcon(
+        for choice: QuickTranscriptionChoice
+    ) -> String {
+        if viewModel.selectedQuickTranscriptionChoice == choice {
+            return "checkmark"
+        }
+        return choice.backendType == .localQwen ? "apple.logo" : "cloud.fill"
     }
 
     private var terminologyCard: some View {

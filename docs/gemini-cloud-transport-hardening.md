@@ -132,7 +132,7 @@ POSIX 40（`EMSGSIZE`）出現在 IPv6 + 大包 POST 時，與 HTTP/3／QUIC（U
 
 - 不呼叫 Files API／GCS。
 - 不改切段秒數。
-- 不改 prompt、safetySettings、generationConfig（含 `maxOutputTokens`）。
+- 不改 prompt、safetySettings；`maxOutputTokens` 維持固定，Gemini 3.x 的 `thinkingConfig` 依使用者在設定裡選擇的思考強度送出。
 
 ---
 

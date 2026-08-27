@@ -7,6 +7,7 @@ public enum GoogleAIStudioError: LocalizedError, Equatable {
     case rateLimited(message: String, retryAfterSeconds: Double?)
     case quotaExceeded(String)
     case prohibitedContent(String)
+    case promptBlocked(GeminiPromptBlockDiagnostics)
     case incompleteResponse(finishReason: String, message: String?)
     case emptyResponse
     case invalidJSONResponse
@@ -32,6 +33,8 @@ public enum GoogleAIStudioError: LocalizedError, Equatable {
             return "Google AI Studio 當日配額已用完，短時間重試不會成功：\(message)"
         case let .prohibitedContent(message):
             return "Google 內容安全政策攔截：\(message)"
+        case let .promptBlocked(diagnostics):
+            return diagnostics.userFacingMessage
         case let .incompleteResponse(finishReason, message):
             let detail = message?.trimmingCharacters(in: .whitespacesAndNewlines)
             let suffix = detail.map { "：\($0)" } ?? ""
@@ -526,14 +529,15 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         workingDirectory: URL?,
         logger: ((_ level: String, _ message: String) -> Void)?
     ) async throws -> CloudTranscriptionResult {
-        var generationConfig: [String: Any] = [
-            "maxOutputTokens": 16_384
-        ]
-        if effectiveModelID.contains("3.7") {
-            generationConfig["thinkingConfig"] = [
-                "thinkingLevel": thinkingLevel.rawValue
-            ]
-        }
+        let generationConfig = GeminiGenerationConfig.make(
+            maxOutputTokens: 16_384,
+            modelID: effectiveModelID,
+            thinkingLevel: thinkingLevel
+        )
+        logger?(
+            "info",
+            "轉錄請求送出 thinkingConfig=\(thinkingLevel.rawValue)（模型 \(effectiveModelID)）。"
+        )
 
         let requestBody: [String: Any] = [
             "systemInstruction": [
@@ -609,7 +613,11 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             )
         }
 
-        let text = try parseCandidateText(from: data)
+        let text = try parseCandidateText(
+            from: data,
+            httpStatusCode: httpResponse.statusCode,
+            logger: logger
+        )
         let metadata = GeminiResponseMetadataParser.makeMetadata(
             from: data,
             requestedModelID: requestedModelID,
@@ -854,32 +862,15 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
     }
 
     func buildSystemInstruction() -> String {
-        return """
-你是一個高精度語音逐字稿工具。請忠實轉錄音訊中實際聽到的內容，保留原意、語序、口語重複與不完整語句，不要摘要、改寫、刪除或補充。
-
-只輸出純文字逐字稿，不使用 Markdown，不加時間戳，不自行辨識、命名或標示講者。可依自然停頓與語意分段，但不可新增音訊中沒有的標題、前言、結語、摘要、待辦事項或背景說明。中文使用台灣繁體中文，英文專有名詞維持正確拼寫。
-"""
+        GeminiTranscriptPrompt.systemInstruction
     }
 
     func buildUserPrompt(terms: [String], customPrompt: String, timeOffsetSeconds: Double) -> String {
-        var parts: [String] = []
-
-        if timeOffsetSeconds > 0 {
-            parts.append("這是長錄音中從第 \(Int(timeOffsetSeconds)) 秒開始的獨立片段。只轉錄本片段實際聽到的內容，不要補寫、重複或猜測前後片段。")
-        }
-
-        let trimmedPrompt = customPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedPrompt.isEmpty {
-            // JobSnapshot.prompt 已是 PromptBuilder 產生的 canonical prompt，內含詞庫；
-            // 不再同時附加 terms，避免詞庫與整份 prompt 重複送出。
-            parts.append(trimmedPrompt)
-        } else if !terms.isEmpty {
-            let termsFormatted = terms.map { "- \($0)" }.joined(separator: "\n")
-            parts.append("以下詞彙可能出現在錄音中；只有音訊內容相符時才採用，不得自行加入：\n\(termsFormatted)")
-        }
-
-        parts.append("請直接開始轉錄上述音訊。")
-        return parts.joined(separator: "\n\n")
+        GeminiTranscriptPrompt.buildUserPrompt(
+            terms: terms,
+            canonicalPrompt: customPrompt,
+            timeOffsetSeconds: timeOffsetSeconds
+        )
     }
 
     private func parseErrorMessage(from data: Data) -> String {
@@ -891,53 +882,77 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         return String(decoding: data, as: UTF8.self)
     }
 
-    func parseCandidateText(from data: Data) throws -> String {
+    func parseCandidateText(
+        from data: Data,
+        httpStatusCode: Int = 200,
+        logger: ((_ level: String, _ message: String) -> Void)? = nil
+    ) throws -> String {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw GoogleAIStudioError.invalidJSONResponse
         }
 
-        if let promptFeedback = json["promptFeedback"] as? [String: Any],
-           let blockReason = promptFeedback["blockReason"] as? String,
-           blockReason != "BLOCK_REASON_UNSPECIFIED" {
-            let msg = promptFeedback["blockReasonMessage"] as? String ?? blockReason
-            if blockReason == "PROHIBITED_CONTENT" {
-                throw GoogleAIStudioError.prohibitedContent(msg)
-            }
-            throw GoogleAIStudioError.requestFailed(statusCode: 400, message: "Google 內容安全政策攔截：\(msg)")
+        if let diagnostics = GeminiPromptFeedbackParser.diagnosticsIfBlocked(
+            from: json,
+            httpStatusCode: httpStatusCode
+        ) {
+            logger?("warning", diagnostics.logSummary)
+            throw GoogleAIStudioError.promptBlocked(diagnostics)
         }
 
         guard let candidates = json["candidates"] as? [[String: Any]],
               let firstCandidate = candidates.first else {
+            logger?(
+                "warning",
+                GeminiResponseInventory.summary(
+                    from: json,
+                    reason: "no_candidates",
+                    rawByteCount: data.count
+                )
+            )
             throw GoogleAIStudioError.emptyResponse
         }
 
         guard let finishReason = firstCandidate["finishReason"] as? String,
               !finishReason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else {
+            logger?(
+                "warning",
+                GeminiResponseInventory.summary(
+                    from: json,
+                    reason: "missing_finish_reason",
+                    rawByteCount: data.count
+                )
+            )
             throw GoogleAIStudioError.incompleteResponse(
                 finishReason: "MISSING_FINISH_REASON",
                 message: firstCandidate["finishMessage"] as? String
             )
         }
-        let normalizedFinishReason = finishReason.uppercased()
-        guard normalizedFinishReason == "STOP" else {
-            let message = firstCandidate["finishMessage"] as? String
-            if ["SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "RECITATION"].contains(normalizedFinishReason) {
-                throw GoogleAIStudioError.prohibitedContent(message ?? normalizedFinishReason)
-            }
-            throw GoogleAIStudioError.incompleteResponse(
-                finishReason: normalizedFinishReason,
-                message: message
+        let normalizedFinishReason = GeminiTranscriptFinishReason.normalized(finishReason)
+        if GeminiTranscriptFinishReason.isSafetyBlock(normalizedFinishReason) {
+            throw GoogleAIStudioError.prohibitedContent(
+                firstCandidate["finishMessage"] as? String ?? normalizedFinishReason
             )
         }
 
         guard let content = firstCandidate["content"] as? [String: Any],
               let parts = content["parts"] as? [[String: Any]] else {
+            logger?(
+                "warning",
+                GeminiResponseInventory.summary(
+                    from: json,
+                    reason: "missing_candidate_parts",
+                    rawByteCount: data.count
+                )
+            )
             throw GoogleAIStudioError.emptyResponse
         }
 
         var textChunks: [String] = []
         for part in parts {
+            if part["thought"] as? Bool == true {
+                continue
+            }
             if let text = part["text"] as? String {
                 textChunks.append(text)
             }
@@ -946,7 +961,29 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         let combined = textChunks.joined().trimmingCharacters(in: .whitespacesAndNewlines)
         let sanitized = sanitizeTranscript(combined)
         guard !sanitized.isEmpty else {
+            logger?(
+                "warning",
+                GeminiResponseInventory.summary(
+                    from: json,
+                    reason: "empty_transcript_text",
+                    rawByteCount: data.count
+                )
+            )
             throw GoogleAIStudioError.emptyResponse
+        }
+
+        if GeminiTranscriptFinishReason.isTruncated(normalizedFinishReason) {
+            logger?(
+                "warning",
+                "Gemini 輸出達 maxOutputTokens，已收下現有逐字稿；結尾可能被截斷。"
+            )
+            return sanitized
+        }
+        guard GeminiTranscriptFinishReason.allowsUsableText(normalizedFinishReason) else {
+            throw GoogleAIStudioError.incompleteResponse(
+                finishReason: normalizedFinishReason,
+                message: firstCandidate["finishMessage"] as? String
+            )
         }
         return sanitized
     }

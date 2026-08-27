@@ -289,6 +289,10 @@ final class AppViewModel: ObservableObject {
             : "cloud.fill"
     }
 
+    var selectedQuickTranscriptionChoice: QuickTranscriptionChoice? {
+        QuickTranscriptionChoice.allCases.first { $0.matches(settings) }
+    }
+
     var appSubtitle: String {
         switch settings.backendType {
         case .googleAIStudio:
@@ -605,6 +609,24 @@ final class AppViewModel: ObservableObject {
             modelDownloadPhase = .idle
             modelDownloadProgressLine = ""
         }
+    }
+
+    func selectQuickTranscriptionChoice(_ choice: QuickTranscriptionChoice) {
+        settings = choice.applying(to: settings)
+        scheduleSettingsPersist()
+
+        if choice.backendType == .localQwen {
+            refreshSelectedModelCacheStatus()
+        }
+        if case .succeeded = modelDownloadPhase {
+            modelDownloadPhase = .idle
+            modelDownloadProgressLine = ""
+        }
+        if case .failed = modelDownloadPhase {
+            modelDownloadPhase = .idle
+            modelDownloadProgressLine = ""
+        }
+        refreshEnvironment()
     }
 
     func refreshSelectedModelCacheStatus() {

@@ -505,7 +505,7 @@ struct SettingsView: View {
                             Text(level.displayName).tag(level)
                         }
                     }
-                    Text("預設使用 Medium。Low 可用來做速度／品質 A/B；每個工作加入佇列時會鎖定當下設定。")
+                    Text("此設定會實際送給 Gemini 3.x；程度越高通常等待越久、消耗 token 越多，不保證逐字稿一定更準。每個工作加入佇列時會鎖定當下設定。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 

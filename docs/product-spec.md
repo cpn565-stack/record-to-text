@@ -4,7 +4,7 @@
 
 ## 產品定位
 
-把會議錄音轉為可交給後續 ChatAI／LLM 使用的台灣繁體原始逐字稿。可選 Google AI Studio、Vertex AI 或本機 Qwen；雲端後端會上傳轉錄所需的音訊與 Prompt。預設不摘要、不改寫、不重新斷句、不刪語助詞、不做說話者辨識或時間戳。
+把會議錄音轉為可交給後續 ChatAI／LLM 使用的台灣繁體逐字稿。可選 Google AI Studio、Vertex AI 或本機 Qwen；雲端後端會上傳轉錄所需的音訊與 Prompt。預設不摘要、不改寫、不刪語助詞；雲端逐字稿會依聲音特徵整理講者輪替，並加入約每 3 至 5 分鐘的時間區間。講者姓名與時間皆為模型推定，不等同專用 diarization 或 forced alignment。
 
 ## P0 使用者旅程
 
@@ -50,7 +50,7 @@
 ## 第一版明確不做
 
 - 預設不做 LLM 摘要、改寫或會議記錄；僅當使用者明確開啟 Vertex AI「附加內容摘要」時，才在完整逐字稿後附加摘要。
-- diarization、時間戳、字幕與 forced alignment。
+- 專用 diarization、精準逐字時間戳、字幕與 forced alignment；雲端 Prompt 僅提供講者輪替與約略時間區間。
 - 錄音、剪輯、降噪。
 - Mac App Store、手機、Windows。
 - 多工作平行 ASR。

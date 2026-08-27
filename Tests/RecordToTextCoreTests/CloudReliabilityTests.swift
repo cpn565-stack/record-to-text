@@ -56,18 +56,18 @@ final class GeminiCloudResponseValidationTests: XCTestCase {
             "忠實逐字稿"
         )
 
-        XCTAssertThrowsError(
+        XCTAssertEqual(
             try backend.parseCandidateText(
                 from: responseData(finishReason: "MAX_TOKENS")
+            ),
+            "忠實逐字稿"
+        )
+        XCTAssertThrowsError(
+            try backend.parseCandidateText(
+                from: responseData(finishReason: "MAX_TOKENS", text: "   ")
             )
         ) { error in
-            XCTAssertEqual(
-                error as? GoogleAIStudioError,
-                .incompleteResponse(
-                    finishReason: "MAX_TOKENS",
-                    message: "output limit"
-                )
-            )
+            XCTAssertEqual(error as? GoogleAIStudioError, .emptyResponse)
         }
 
         XCTAssertThrowsError(
@@ -89,18 +89,18 @@ final class GeminiCloudResponseValidationTests: XCTestCase {
             "忠實逐字稿"
         )
 
-        XCTAssertThrowsError(
+        XCTAssertEqual(
             try backend.parseCandidateText(
                 from: responseData(finishReason: "MAX_TOKENS")
+            ),
+            "忠實逐字稿"
+        )
+        XCTAssertThrowsError(
+            try backend.parseCandidateText(
+                from: responseData(finishReason: "MAX_TOKENS", text: "   ")
             )
         ) { error in
-            XCTAssertEqual(
-                error as? VertexAIError,
-                .incompleteResponse(
-                    finishReason: "MAX_TOKENS",
-                    message: "output limit"
-                )
-            )
+            XCTAssertEqual(error as? VertexAIError, .emptyResponse)
         }
 
         XCTAssertThrowsError(
@@ -137,7 +137,129 @@ final class GeminiCloudResponseValidationTests: XCTestCase {
         }
     }
 
-    func testCloudPromptsDoNotForceTimestampsSpeakersOrDuplicateTerms() {
+    func testPromptFeedbackOtherIsNotFakeHTTP400AndCapturesDiagnostics() throws {
+        let data = promptFeedbackResponseData(blockReason: "OTHER")
+        let expected = Self.sampleOtherDiagnostics
+        var logged: [String] = []
+
+        XCTAssertThrowsError(
+            try GoogleAIStudioBackend().parseCandidateText(
+                from: data,
+                httpStatusCode: 200,
+                logger: { _, message in logged.append(message) }
+            )
+        ) { error in
+            guard case let .promptBlocked(diagnostics) = error as? GoogleAIStudioError else {
+                return XCTFail("expected promptBlocked, got \(error)")
+            }
+            XCTAssertEqual(diagnostics, expected)
+            let description = (error as? LocalizedError)?.errorDescription ?? ""
+            XCTAssertTrue(description.contains("HTTP 200"))
+            XCTAssertTrue(description.contains("promptFeedback.blockReason=OTHER"))
+            XCTAssertTrue(description.contains("Google 未提供具體原因"))
+            XCTAssertFalse(description.contains("HTTP 400"))
+            XCTAssertFalse(description.contains("內容安全政策攔截"))
+        }
+
+        XCTAssertThrowsError(
+            try VertexAIGeminiBackend().parseCandidateText(
+                from: data,
+                httpStatusCode: 200
+            )
+        ) { error in
+            guard case let .promptBlocked(diagnostics) = error as? VertexAIError else {
+                return XCTFail("expected promptBlocked, got \(error)")
+            }
+            XCTAssertEqual(diagnostics, expected)
+            let description = (error as? LocalizedError)?.errorDescription ?? ""
+            XCTAssertTrue(description.contains("HTTP 200"))
+            XCTAssertFalse(description.contains("內容安全政策攔截"))
+        }
+
+        XCTAssertEqual(logged, [expected.logSummary])
+        XCTAssertTrue(logged[0].contains("responseId=resp-blocked-1"))
+        XCTAssertTrue(logged[0].contains("audioTokenCount=9800"))
+    }
+
+    func testPromptFeedbackSafetyStillUsesPolicyLanguageWithoutHTTP400() throws {
+        let data = promptFeedbackResponseData(
+            blockReason: "PROHIBITED_CONTENT",
+            blockReasonMessage: "policy"
+        )
+
+        XCTAssertThrowsError(
+            try GoogleAIStudioBackend().parseCandidateText(from: data)
+        ) { error in
+            guard case let .promptBlocked(diagnostics) = error as? GoogleAIStudioError else {
+                return XCTFail("expected promptBlocked, got \(error)")
+            }
+            XCTAssertTrue(diagnostics.isExplicitSafetyPolicy)
+            let description = (error as? LocalizedError)?.errorDescription ?? ""
+            XCTAssertTrue(description.contains("內容安全政策攔截"))
+            XCTAssertTrue(description.contains("PROHIBITED_CONTENT"))
+            XCTAssertFalse(description.contains("HTTP 400"))
+        }
+
+        XCTAssertThrowsError(
+            try VertexAIGeminiBackend().parseCandidateText(from: data)
+        ) { error in
+            guard case let .promptBlocked(diagnostics) = error as? VertexAIError else {
+                return XCTFail("expected promptBlocked, got \(error)")
+            }
+            XCTAssertTrue(diagnostics.isExplicitSafetyPolicy)
+        }
+    }
+
+    private static let sampleOtherDiagnostics = GeminiPromptBlockDiagnostics(
+        httpStatusCode: 200,
+        blockReason: "OTHER",
+        blockReasonMessage: nil,
+        safetyRatings: [
+            GeminiSafetyRating(
+                category: "HARM_CATEGORY_HARASSMENT",
+                probability: "NEGLIGIBLE",
+                blocked: false
+            )
+        ],
+        modelVersion: "gemini-3.7-flash-exp",
+        responseID: "resp-blocked-1",
+        promptTokenCount: 9999,
+        audioTokenCount: 9800
+    )
+
+    private func promptFeedbackResponseData(
+        blockReason: String,
+        blockReasonMessage: String? = nil
+    ) -> Data {
+        var feedback: [String: Any] = [
+            "blockReason": blockReason,
+            "safetyRatings": [
+                [
+                    "category": "HARM_CATEGORY_HARASSMENT",
+                    "probability": "NEGLIGIBLE",
+                    "blocked": false
+                ]
+            ]
+        ]
+        if let blockReasonMessage {
+            feedback["blockReasonMessage"] = blockReasonMessage
+        }
+        let payload: [String: Any] = [
+            "promptFeedback": feedback,
+            "usageMetadata": [
+                "promptTokenCount": 9999,
+                "promptTokensDetails": [
+                    ["modality": "AUDIO", "tokenCount": 9800],
+                    ["modality": "TEXT", "tokenCount": 199]
+                ]
+            ],
+            "modelVersion": "gemini-3.7-flash-exp",
+            "responseId": "resp-blocked-1"
+        ]
+        return try! JSONSerialization.data(withJSONObject: payload)
+    }
+
+    func testCloudPromptsRequestStructuredSpeakerTranscriptWithoutDuplicateTerms() {
         let canonicalPrompt = "忠實轉錄。\n盛和塾"
         let aiStudio = GoogleAIStudioBackend()
         let aiStudioSystem = aiStudio.buildSystemInstruction()
@@ -146,15 +268,19 @@ final class GeminiCloudResponseValidationTests: XCTestCase {
             customPrompt: canonicalPrompt,
             timeOffsetSeconds: 1_200
         )
-        XCTAssertTrue(aiStudioSystem.contains("不加時間戳"))
-        XCTAssertTrue(aiStudioSystem.contains("不自行辨識、命名或標示講者"))
+        XCTAssertTrue(aiStudioSystem.contains("[00:00 - 05:00]"))
+        XCTAssertTrue(aiStudioSystem.contains("講者 1："))
+        XCTAssertTrue(aiStudioSystem.contains("不得猜測身分"))
+        XCTAssertTrue(aiStudioSystem.contains("不同講者回合之間必須保留一個空白行"))
+        XCTAssertTrue(aiStudioSystem.contains("[05:00 - 10:00]"))
         XCTAssertEqual(aiStudioUser.components(separatedBy: "盛和塾").count - 1, 1)
-        XCTAssertFalse(aiStudioUser.contains("請將輸出中的所有時間碼"))
+        XCTAssertTrue(aiStudioUser.contains("20:00"))
+        XCTAssertTrue(aiStudioUser.contains("不要從 00:00 重新計時"))
+        XCTAssertTrue(aiStudioUser.contains("第一行即從 [20:00 - ...] 開始"))
 
         let vertex = VertexAIGeminiBackend()
         let vertexSystem = vertex.buildSystemInstruction()
-        XCTAssertTrue(vertexSystem.contains("不得輸出摘要"))
-        XCTAssertFalse(vertexSystem.contains("[00:00"))
+        XCTAssertEqual(vertexSystem, aiStudioSystem)
         XCTAssertFalse(
             vertex.buildUserPrompt(
                 terms: ["盛和塾"],
@@ -307,7 +433,7 @@ final class GeminiCloudResponseValidationTests: XCTestCase {
                     httpVersion: nil,
                     headerFields: nil
                 )!
-                data = self.responseData(finishReason: "MAX_TOKENS")
+                data = Data("{\"candidates\":[]}".utf8)
             case "https://generativelanguage.googleapis.com/v1beta/files/test-audio":
                 deleteCount.increment()
                 response = HTTPURLResponse(
@@ -337,9 +463,9 @@ final class GeminiCloudResponseValidationTests: XCTestCase {
         )
         do {
             _ = try await backend.transcribe(audioData: Data("audio".utf8))
-            XCTFail("Expected an incomplete response error")
+            XCTFail("Expected an empty response error")
         } catch let error as GoogleAIStudioError {
-            guard case .incompleteResponse = error else {
+            guard case .emptyResponse = error else {
                 return XCTFail("Unexpected error: \(error)")
             }
         }
@@ -443,6 +569,21 @@ final class GeminiCloudResponseValidationTests: XCTestCase {
         XCTAssertFalse(
             GoogleAIStudioBackend.isRetryableServerFailure(
                 .incompleteResponse(finishReason: "MAX_TOKENS", message: nil)
+            )
+        )
+        XCTAssertFalse(
+            GoogleAIStudioBackend.isRetryableServerFailure(
+                .promptBlocked(Self.sampleOtherDiagnostics)
+            )
+        )
+        XCTAssertFalse(
+            VertexAIGeminiBackend.isRetryableServerFailure(
+                .promptBlocked(Self.sampleOtherDiagnostics)
+            )
+        )
+        XCTAssertFalse(
+            GoogleAIStudioBackend.isRetryableServerFailure(
+                .prohibitedContent("SAFETY")
             )
         )
     }
