@@ -81,7 +81,7 @@ final class ModelsDefaultsTests: XCTestCase {
     func testAppSettingsInitializerUsesProductDefaults() {
         let settings = AppSettings(defaultOutputDirectory: "/tmp/output")
 
-        XCTAssertEqual(settings.schemaVersion, 1)
+        XCTAssertEqual(settings.schemaVersion, 2)
         XCTAssertEqual(settings.defaultOutputDirectory, "/tmp/output")
         XCTAssertEqual(settings.outputLocationMode, .fixedDirectory)
         XCTAssertNil(settings.lastInputDirectory)

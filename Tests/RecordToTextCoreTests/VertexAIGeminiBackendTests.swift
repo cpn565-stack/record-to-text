@@ -34,17 +34,53 @@ private final class MockURLProtocol: URLProtocol {
 
 final class VertexAIGeminiBackendTests: XCTestCase {
     private var mockSession: URLSession!
+    private var fakeGCloudDirectory: URL!
+    private var fakeGCloudURL: URL!
 
     override func setUp() {
         super.setUp()
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MockURLProtocol.self]
         mockSession = URLSession(configuration: configuration)
+
+        fakeGCloudDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "record-to-text-fake-gcloud-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try! FileManager.default.createDirectory(
+            at: fakeGCloudDirectory,
+            withIntermediateDirectories: true
+        )
+        fakeGCloudURL = fakeGCloudDirectory.appendingPathComponent("gcloud")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "auth" ]; then
+          printf 'mock-access-token\n'
+          exit 0
+        fi
+        if [ "$1" = "config" ]; then
+          printf 'my-test-gcp-project\n'
+          exit 0
+        fi
+        printf 'unsupported fake gcloud command\n' >&2
+        exit 2
+        """
+        try! script.write(to: fakeGCloudURL, atomically: true, encoding: .utf8)
+        try! FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: fakeGCloudURL.path
+        )
     }
 
     override func tearDown() {
         MockURLProtocol.requestHandler = nil
         mockSession = nil
+        if let fakeGCloudDirectory {
+            try? FileManager.default.removeItem(at: fakeGCloudDirectory)
+        }
+        fakeGCloudDirectory = nil
+        fakeGCloudURL = nil
         super.tearDown()
     }
 
@@ -88,7 +124,7 @@ final class VertexAIGeminiBackendTests: XCTestCase {
             return (response, mockResponseJSON.data(using: .utf8)!)
         }
 
-        let authService = GCloudAuthService(customGCloudPath: "/nonexistent/gcloud")
+        let authService = GCloudAuthService(customGCloudPath: fakeGCloudURL.path)
         let config = VertexAIGeminiBackend.Configuration(
             projectID: expectedProject,
             location: expectedLocation,
@@ -160,7 +196,7 @@ final class VertexAIGeminiBackendTests: XCTestCase {
             modelID: expectedModel
         )
         let backend = VertexAIGeminiBackend(
-            authService: GCloudAuthService(customGCloudPath: "/nonexistent/gcloud"),
+            authService: GCloudAuthService(customGCloudPath: fakeGCloudURL.path),
             urlSession: mockSession,
             configuration: config
         )
@@ -200,7 +236,7 @@ final class VertexAIGeminiBackendTests: XCTestCase {
             modelID: expectedModel
         )
         let backend = VertexAIGeminiBackend(
-            authService: GCloudAuthService(customGCloudPath: "/nonexistent/gcloud"),
+            authService: GCloudAuthService(customGCloudPath: fakeGCloudURL.path),
             urlSession: mockSession,
             configuration: config
         )

@@ -71,7 +71,17 @@ def main() -> None:
 '''
     )
 
-    replace_once(models, "        schemaVersion: Int = 1,\n", "        schemaVersion: Int = 2,\n")
+    replace_once(
+        models,
+        """    public init(
+        schemaVersion: Int = 1,
+        defaultOutputDirectory: String,
+""",
+        """    public init(
+        schemaVersion: Int = 2,
+        defaultOutputDirectory: String,
+"""
+    )
 
     replace_once(
         models,
@@ -199,13 +209,9 @@ def main() -> None:
 
     replace_once(
         models,
-        '''        case vertexAIGCSBucket
-        case vertexAIIncludeSummary
-        // Legacy runtime-selection keys are intentionally ignored.
+        '''        // Legacy runtime-selection keys are intentionally ignored. Runtime
 ''',
-        '''        case vertexAIGCSBucket
-        case vertexAIIncludeSummary
-        case cloudTransport
+        '''        case cloudTransport
         case transcriptionOptions
         case resolvedLanguageCodes
         case resolvedCustomVocabulary
@@ -213,7 +219,7 @@ def main() -> None:
         case modelRecommendedSegmentDurationSeconds
         case vertexAISummaryModelID
         case allowDedicatedTranscribeFallbackToGeneralGemini
-        // Legacy runtime-selection keys are intentionally ignored.
+        // Legacy runtime-selection keys are intentionally ignored. Runtime
 '''
     )
 
@@ -353,7 +359,7 @@ def main() -> None:
         try container.encode(vertexAIIncludeSummary, forKey: .vertexAIIncludeSummary)
     }
 
-    /// Returns a copy suitable for transient execution.
+    /// Returns a copy suitable for transient execution. The credential remains
 ''',
         '''        try container.encodeIfPresent(vertexAIGCSBucket, forKey: .vertexAIGCSBucket)
         try container.encode(vertexAIIncludeSummary, forKey: .vertexAIIncludeSummary)
@@ -379,7 +385,7 @@ def main() -> None:
         )
     }
 
-    /// Returns a copy suitable for transient execution.
+    /// Returns a copy suitable for transient execution. The credential remains
 '''
     )
 

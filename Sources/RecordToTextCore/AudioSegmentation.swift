@@ -68,6 +68,7 @@ public struct AudioSegmentRecord: Codable, Equatable, Sendable {
     public let endSeconds: Double
     public let audioPath: String
     public let outputPath: String
+    public let metadataPath: String?
     public var status: AudioSegmentStatus
     public var completedEventCount: Int
     public var failureMessage: String?
@@ -79,6 +80,7 @@ public struct AudioSegmentRecord: Codable, Equatable, Sendable {
         endSeconds: Double,
         audioPath: String,
         outputPath: String,
+        metadataPath: String? = nil,
         status: AudioSegmentStatus = .planned,
         completedEventCount: Int = 0,
         failureMessage: String? = nil
@@ -89,6 +91,7 @@ public struct AudioSegmentRecord: Codable, Equatable, Sendable {
         self.endSeconds = endSeconds
         self.audioPath = audioPath
         self.outputPath = outputPath
+        self.metadataPath = metadataPath
         self.status = status
         self.completedEventCount = completedEventCount
         self.failureMessage = failureMessage

@@ -43,7 +43,7 @@ final class AppCredentialMigrationTests: XCTestCase {
             viewModel.settings.googleAIStudioAPIKey,
             "settings-legacy-secret"
         )
-        XCTAssertEqual(viewModel.alert?.title, "舊版 API Key 尚未遷移")
+        XCTAssertEqual(viewModel.alert?.title, "部分資料未能載入")
     }
 
     func testExistingKeychainValueWinsAndLegacyFilesAreRedacted() throws {
