@@ -724,6 +724,13 @@ private struct JobRowView: View {
                             }
                         }
 
+                        if viewModel.canResumeCloudJob(job) {
+                            Button("從已完成片段續跑") {
+                                viewModel.resumeCloudJobFromCheckpoint(job.id)
+                            }
+                            .buttonStyle(.link)
+                        }
+
                         Button("在 Finder 顯示復原資料") {
                             viewModel.revealRecovery(for: job)
                         }

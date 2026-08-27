@@ -1174,17 +1174,45 @@ public final class TranscriptionEngine {
         ) async throws -> CloudTranscriptionResult
     ) async throws -> PipelineResult {
         let fileManager = FileManager.default
-        let segmentPlan = try await makeCloudSegmentPlan(
-            job: job,
-            sourceURL: sourceURL,
-            metadata: metadata,
-            update: update
-        )
-        let totalSegments = segmentPlan.expectedSegmentCount
         let sourceTimeOffset = Self.cloudSegmentStart(
             sourceSlice: job.sourceSlice,
             plannedStart: 0
         )
+        let resumeCheckpoint: CloudResumeCheckpoint?
+        if let rawRecoveryPath = job.resumeFromRecoveryDirectory {
+            let loaded = try CloudResumeCheckpointLoader.load(
+                recoveryDirectory: URL(
+                    fileURLWithPath: rawRecoveryPath,
+                    isDirectory: true
+                ),
+                job: job,
+                sourceDuration: metadata.duration,
+                sourceTimeOffset: sourceTimeOffset,
+                maximumSegmentDuration: maximumASRSegmentDuration,
+                paths: paths,
+                fileManager: fileManager
+            )
+            resumeCheckpoint = loaded
+            update(
+                .log(
+                    level: "info",
+                    message: "已驗證雲端復原檢查點，將重用 \(loaded.reusableSegments.count) 個已完成片段。"
+                )
+            )
+        } else {
+            resumeCheckpoint = nil
+        }
+        let segmentPlan = if let resumeCheckpoint {
+            resumeCheckpoint.plan
+        } else {
+            try await makeCloudSegmentPlan(
+                job: job,
+                sourceURL: sourceURL,
+                metadata: metadata,
+                update: update
+            )
+        }
+        let totalSegments = segmentPlan.expectedSegmentCount
         let segmentsDirectory = workingDirectory.appendingPathComponent(
             RecoveryScanner.segmentsDirectoryName,
             isDirectory: true
@@ -1231,6 +1259,27 @@ public final class TranscriptionEngine {
                 )
             }
         )
+        if let resumeCheckpoint {
+            for (segmentIndex, reusable) in resumeCheckpoint.reusableSegments {
+                guard segmentManifest.segments.indices.contains(segmentIndex - 1) else {
+                    continue
+                }
+                let destination = URL(
+                    fileURLWithPath:
+                        segmentManifest.segments[segmentIndex - 1].outputPath
+                )
+                try AtomicFileWriter.writeText(
+                    reusable.transcript,
+                    to: destination
+                )
+                segmentManifest.segments[segmentIndex - 1].status = reusable.status
+                segmentManifest.segments[segmentIndex - 1].completedEventCount = 1
+                segmentManifest.segments[segmentIndex - 1].failureMessage = nil
+                segmentManifest.segments[segmentIndex - 1].cloudMetadata =
+                    reusable.metadata
+                segmentManifest.segments[segmentIndex - 1].reusedFromCheckpoint = true
+            }
+        }
         try writeSegmentManifest(segmentManifest, to: segmentManifestURL)
 
         if segmentPlan.requiresSplitting {
@@ -1262,6 +1311,39 @@ public final class TranscriptionEngine {
             let waitingUnit = totalSegments > 1
                 ? "waiting|\(segmentIndex)|\(totalSegments)"
                 : "waiting"
+
+            if
+                (record.status == .completed
+                    || record.status == .completedWithGaps),
+                record.completedEventCount == 1,
+                record.reusedFromCheckpoint == true,
+                (try? TextFileValidator.readNonEmptyUTF8(at: transcriptURL)) != nil
+            {
+                update(
+                    .log(
+                        level: "info",
+                        message: "［第 \(segmentIndex)/\(totalSegments) 段］沿用已完成檢查點，不重新壓縮、上傳或計費轉錄。"
+                    )
+                )
+                if let metadata = record.cloudMetadata {
+                    emitCloudMetadataLog(
+                        metadata,
+                        segmentIndex: segmentIndex,
+                        segmentCount: totalSegments,
+                        update: update
+                    )
+                }
+                update(
+                    .progress(
+                        current: maxProgress,
+                        total: 100,
+                        unit: totalSegments > 1
+                            ? "percent|\(segmentIndex)|\(totalSegments)"
+                            : "percent"
+                    )
+                )
+                continue
+            }
 
             do {
                 currentStage.set(.convertingAudio)
@@ -1839,7 +1921,9 @@ extension TranscriptionEngine {
                     outputPath: recoveredTranscript.path,
                     status: sourceRecord.status,
                     completedEventCount: sourceRecord.completedEventCount,
-                    failureMessage: sourceRecord.failureMessage
+                    failureMessage: sourceRecord.failureMessage,
+                    cloudMetadata: sourceRecord.cloudMetadata,
+                    reusedFromCheckpoint: sourceRecord.reusedFromCheckpoint
                 )
             )
         }

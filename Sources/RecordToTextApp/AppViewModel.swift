@@ -1037,6 +1037,65 @@ final class AppViewModel: ObservableObject {
         scheduleQueueIfNeeded()
     }
 
+    func canResumeCloudJob(_ job: TranscriptionJob) -> Bool {
+        guard job.snapshot.backendType != .localQwen,
+              job.stage == .failed
+                || job.stage == .cancelled
+                || job.stage == .interrupted,
+              let recoveryDirectory = job.failure?.recoveryDirectory
+        else {
+            return false
+        }
+        let recoveryURL = URL(
+            fileURLWithPath: recoveryDirectory,
+            isDirectory: true
+        )
+        return fileManager.fileExists(
+            atPath: recoveryURL
+                .appendingPathComponent(
+                    RecoveryScanner.segmentManifestFileName
+                )
+                .path
+        )
+    }
+
+    func resumeCloudJobFromCheckpoint(_ id: UUID) {
+        guard let index = jobs.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        let oldJob = jobs[index]
+        guard canResumeCloudJob(oldJob),
+              let recoveryDirectory = oldJob.failure?.recoveryDirectory
+        else {
+            alert = UserFacingAlert(
+                title: "沒有可續跑的片段",
+                message: "這筆工作沒有通過基本檢查的雲端片段檢查點。"
+            )
+            return
+        }
+        guard fileManager.fileExists(atPath: oldJob.sourcePath) else {
+            alert = UserFacingAlert(
+                title: "來源錄音不存在",
+                message: "找不到原始錄音，無法重新建立尚未完成的音訊片段。"
+            )
+            return
+        }
+
+        var resumed = TranscriptionJob(
+            sourcePath: oldJob.sourcePath,
+            snapshot: oldJob.snapshot.withGoogleAIStudioAPIKey(nil),
+            sourceSlice: oldJob.sourceSlice,
+            resumeFromRecoveryDirectory: recoveryDirectory
+        )
+        resumed.logLines.append(
+            "從雲端檢查點續跑；已完成片段會先驗證，只有未完成片段會重新上傳與轉錄。"
+        )
+        jobs.insert(resumed, at: min(index + 1, jobs.count))
+        persistJobs()
+        manualDrainRequested = true
+        scheduleQueueIfNeeded()
+    }
+
     func retryWithoutGlossaryPrompt() {
         guard let jobID = promptConsentJobID else {
             return
