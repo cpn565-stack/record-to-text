@@ -6,6 +6,7 @@ on:
       - feature/gemini-3.7-quality-hardening
     paths:
       - scripts/apply-gemini-3.7-phase4-silence.py
+      - scripts/fix-gemini-3.7-phase4-generated-tests.py
       - .github/workflows/apply-gemini-3.7-hardening.yml
 
 permissions:
@@ -23,7 +24,9 @@ jobs:
           fetch-depth: 0
 
       - name: Apply silence-aware segmentation
-        run: python3 scripts/apply-gemini-3.7-phase4-silence.py
+        run: |
+          python3 scripts/apply-gemini-3.7-phase4-silence.py
+          python3 scripts/fix-gemini-3.7-phase4-generated-tests.py
 
       - name: Install integration-test tools
         run: brew install ffmpeg opencc
