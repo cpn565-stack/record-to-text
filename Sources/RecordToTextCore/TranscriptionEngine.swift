@@ -82,6 +82,7 @@ public final class TranscriptionEngine {
     private let runner: ProcessRunner
     private let probeService: AudioProbeService
     private let ffmpegService: FFmpegService
+    private let silenceDetectionService: SilenceDetectionService
     private let openCCService: OpenCCService
     private let backend: HelperASRBackend
     private let googleAIStudioBackend: GoogleAIStudioBackend
@@ -163,6 +164,10 @@ public final class TranscriptionEngine {
         self.runner = runner
         self.probeService = AudioProbeService(executableURL: runtime.ffprobe)
         self.ffmpegService = FFmpegService(executableURL: runtime.ffmpeg, runner: runner)
+        self.silenceDetectionService = SilenceDetectionService(
+            executableURL: runtime.ffmpeg,
+            runner: runner
+        )
         self.openCCService = OpenCCService(executableURL: runtime.opencc, runner: runner)
         self.backend = HelperASRBackend(runtime: runtime, paths: paths, runner: runner)
         self.googleAIStudioBackend = googleAIStudioBackend ?? GoogleAIStudioBackend()
@@ -1085,6 +1090,71 @@ public final class TranscriptionEngine {
         }
     }
 
+    private func makeCloudSegmentPlan(
+        job: TranscriptionJob,
+        sourceURL: URL,
+        metadata: AudioMetadata,
+        update: (PipelineUpdate) -> Void
+    ) async throws -> AudioSegmentationPlan {
+        let hardPlan = try AudioSegmentPlanner.makePlan(
+            sourceDuration: metadata.duration,
+            maximumSegmentDuration: maximumASRSegmentDuration
+        )
+        guard job.snapshot.silenceAwareCloudSegmentation,
+              hardPlan.requiresSplitting
+        else {
+            return hardPlan
+        }
+
+        do {
+            update(
+                .log(
+                    level: "info",
+                    message: "正在分析 20 分鐘上限前的靜音位置，以降低句子被硬切的機率。"
+                )
+            )
+            let silences = try await silenceDetectionService.detect(
+                sourceURL: sourceURL,
+                startSeconds: job.sourceSlice?.startSeconds ?? 0,
+                durationSeconds: metadata.duration
+            )
+            let adjusted = try SilenceAwareSegmentPlanner.makePlan(
+                sourceDuration: metadata.duration,
+                maximumSegmentDuration: maximumASRSegmentDuration,
+                silences: silences
+            )
+            guard adjusted != hardPlan else {
+                update(
+                    .log(
+                        level: "info",
+                        message: "未找到合適靜音切點，維持精確 20 分鐘硬切。"
+                    )
+                )
+                return hardPlan
+            }
+            let boundaries = adjusted.segments.dropLast().map {
+                String(format: "%.1f", $0.endSeconds)
+            }.joined(separator: "、")
+            update(
+                .log(
+                    level: "info",
+                    message: "已採用靜音感知切點（秒）：\(boundaries)。每段仍不超過 20 分鐘。"
+                )
+            )
+            return adjusted
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            update(
+                .warning(
+                    code: "silence_detection_failed",
+                    message: "靜音分析失敗，已安全退回 20 分鐘硬切：\(error.localizedDescription)"
+                )
+            )
+            return hardPlan
+        }
+    }
+
     private func runCloudPipeline(
         job: TranscriptionJob,
         startedAt: Date,
@@ -1104,9 +1174,11 @@ public final class TranscriptionEngine {
         ) async throws -> CloudTranscriptionResult
     ) async throws -> PipelineResult {
         let fileManager = FileManager.default
-        let segmentPlan = try AudioSegmentPlanner.makePlan(
-            sourceDuration: metadata.duration,
-            maximumSegmentDuration: maximumASRSegmentDuration
+        let segmentPlan = try await makeCloudSegmentPlan(
+            job: job,
+            sourceURL: sourceURL,
+            metadata: metadata,
+            update: update
         )
         let totalSegments = segmentPlan.expectedSegmentCount
         let sourceTimeOffset = Self.cloudSegmentStart(

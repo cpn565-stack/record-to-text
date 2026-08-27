@@ -525,7 +525,7 @@ struct SettingsView: View {
                         "在 20 分鐘上限前優先尋找靜音切點",
                         isOn: setting(\.silenceAwareCloudSegmentation)
                     )
-                    Text("目前先保存此工作設定；靜音偵測與切點調整會在本分支下一階段接入。沒有可用靜音時仍採 20 分鐘硬切。")
+                    Text("開啟後會掃描每個 20 分鐘上限前 30 秒，優先在至少 0.35 秒的靜音中切分；找不到時安全退回硬切。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
