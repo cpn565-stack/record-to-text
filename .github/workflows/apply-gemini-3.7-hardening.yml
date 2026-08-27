@@ -6,6 +6,7 @@ on:
       - feature/gemini-3.7-quality-hardening
     paths:
       - scripts/apply-gemini-3.7-phase5-resume.py
+      - scripts/fix-gemini-3.7-phase5-generated-tests.py
       - .github/workflows/apply-gemini-3.7-hardening.yml
 
 permissions:
@@ -23,7 +24,9 @@ jobs:
           fetch-depth: 0
 
       - name: Apply cloud checkpoint resume
-        run: python3 scripts/apply-gemini-3.7-phase5-resume.py
+        run: |
+          python3 scripts/apply-gemini-3.7-phase5-resume.py
+          python3 scripts/fix-gemini-3.7-phase5-generated-tests.py
 
       - name: Install integration-test tools
         run: brew install ffmpeg opencc
