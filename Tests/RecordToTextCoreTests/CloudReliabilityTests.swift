@@ -412,10 +412,10 @@ final class GeminiCloudResponseValidationTests: XCTestCase {
                 useFilesAPI: true
             )
         )
-        XCTAssertEqual(
-            try await backend.transcribe(audioData: Data("audio".utf8)),
-            "忠實逐字稿"
+        let transcript = try await backend.transcribe(
+            audioData: Data("audio".utf8)
         )
+        XCTAssertEqual(transcript, "忠實逐字稿")
         XCTAssertEqual(deleteCount.value, 1)
     }
 

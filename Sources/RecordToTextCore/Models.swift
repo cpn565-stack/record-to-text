@@ -208,6 +208,9 @@ public struct AppSettings: Codable, Equatable, Sendable {
         case vertexAIModelID
         case vertexAIGCSBucket
         case vertexAIIncludeSummary
+        case geminiThinkingLevel
+        case cloudFallbackPolicy
+        case silenceAwareCloudSegmentation
         case customGCloudPath
     }
 
@@ -245,6 +248,9 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var vertexAIModelID: String
     public var vertexAIGCSBucket: String?
     public var vertexAIIncludeSummary: Bool
+    public var geminiThinkingLevel: GeminiThinkingLevel
+    public var cloudFallbackPolicy: CloudFallbackPolicy
+    public var silenceAwareCloudSegmentation: Bool
     public var customGCloudPath: String?
 
     public init(
@@ -279,6 +285,9 @@ public struct AppSettings: Codable, Equatable, Sendable {
         vertexAIModelID: String = "gemini-3.7-flash",
         vertexAIGCSBucket: String? = nil,
         vertexAIIncludeSummary: Bool = false,
+        geminiThinkingLevel: GeminiThinkingLevel = .medium,
+        cloudFallbackPolicy: CloudFallbackPolicy = .disabled,
+        silenceAwareCloudSegmentation: Bool = true,
         customGCloudPath: String? = nil
     ) {
         self.schemaVersion = schemaVersion
@@ -309,6 +318,9 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.vertexAIModelID = vertexAIModelID
         self.vertexAIGCSBucket = vertexAIGCSBucket
         self.vertexAIIncludeSummary = vertexAIIncludeSummary
+        self.geminiThinkingLevel = geminiThinkingLevel
+        self.cloudFallbackPolicy = cloudFallbackPolicy
+        self.silenceAwareCloudSegmentation = silenceAwareCloudSegmentation
         self.customGCloudPath = customGCloudPath
     }
 
@@ -346,6 +358,18 @@ public struct AppSettings: Codable, Equatable, Sendable {
         vertexAIModelID = try container.decodeIfPresent(String.self, forKey: .vertexAIModelID) ?? "gemini-3.7-flash"
         vertexAIGCSBucket = try container.decodeIfPresent(String.self, forKey: .vertexAIGCSBucket)
         vertexAIIncludeSummary = try container.decodeIfPresent(Bool.self, forKey: .vertexAIIncludeSummary) ?? false
+        geminiThinkingLevel = try container.decodeIfPresent(
+            GeminiThinkingLevel.self,
+            forKey: .geminiThinkingLevel
+        ) ?? .medium
+        cloudFallbackPolicy = try container.decodeIfPresent(
+            CloudFallbackPolicy.self,
+            forKey: .cloudFallbackPolicy
+        ) ?? .disabled
+        silenceAwareCloudSegmentation = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .silenceAwareCloudSegmentation
+        ) ?? true
         customGCloudPath = try container.decodeIfPresent(String.self, forKey: .customGCloudPath)
     }
 
@@ -379,6 +403,12 @@ public struct AppSettings: Codable, Equatable, Sendable {
         try container.encode(vertexAIModelID, forKey: .vertexAIModelID)
         try container.encodeIfPresent(vertexAIGCSBucket, forKey: .vertexAIGCSBucket)
         try container.encode(vertexAIIncludeSummary, forKey: .vertexAIIncludeSummary)
+        try container.encode(geminiThinkingLevel, forKey: .geminiThinkingLevel)
+        try container.encode(cloudFallbackPolicy, forKey: .cloudFallbackPolicy)
+        try container.encode(
+            silenceAwareCloudSegmentation,
+            forKey: .silenceAwareCloudSegmentation
+        )
         try container.encodeIfPresent(customGCloudPath, forKey: .customGCloudPath)
     }
 
@@ -535,6 +565,9 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
         case vertexAIModelID
         case vertexAIGCSBucket
         case vertexAIIncludeSummary
+        case geminiThinkingLevel
+        case cloudFallbackPolicy
+        case silenceAwareCloudSegmentation
         // Legacy runtime-selection keys are intentionally ignored. Runtime
         // paths and the Developer Runtime consent are live authorization, not
         // immutable transcription semantics.
@@ -567,6 +600,9 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
     public let vertexAIModelID: String
     public let vertexAIGCSBucket: String?
     public let vertexAIIncludeSummary: Bool
+    public let geminiThinkingLevel: GeminiThinkingLevel
+    public let cloudFallbackPolicy: CloudFallbackPolicy
+    public let silenceAwareCloudSegmentation: Bool
 
     public init(
         modelID: String,
@@ -588,7 +624,10 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
         vertexAILocation: String = "global",
         vertexAIModelID: String = "gemini-3.7-flash",
         vertexAIGCSBucket: String? = nil,
-        vertexAIIncludeSummary: Bool = false
+        vertexAIIncludeSummary: Bool = false,
+        geminiThinkingLevel: GeminiThinkingLevel = .medium,
+        cloudFallbackPolicy: CloudFallbackPolicy = .disabled,
+        silenceAwareCloudSegmentation: Bool = true
     ) {
         self.modelID = modelID
         self.modelRevision = modelRevision
@@ -616,6 +655,9 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
         self.vertexAIModelID = vertexAIModelID
         self.vertexAIGCSBucket = vertexAIGCSBucket
         self.vertexAIIncludeSummary = vertexAIIncludeSummary
+        self.geminiThinkingLevel = geminiThinkingLevel
+        self.cloudFallbackPolicy = cloudFallbackPolicy
+        self.silenceAwareCloudSegmentation = silenceAwareCloudSegmentation
     }
 
     public init(from decoder: Decoder) throws {
@@ -649,6 +691,18 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
         vertexAIModelID = try container.decodeIfPresent(String.self, forKey: .vertexAIModelID) ?? "gemini-3.7-flash"
         vertexAIGCSBucket = try container.decodeIfPresent(String.self, forKey: .vertexAIGCSBucket)
         vertexAIIncludeSummary = try container.decodeIfPresent(Bool.self, forKey: .vertexAIIncludeSummary) ?? false
+        geminiThinkingLevel = try container.decodeIfPresent(
+            GeminiThinkingLevel.self,
+            forKey: .geminiThinkingLevel
+        ) ?? .medium
+        cloudFallbackPolicy = try container.decodeIfPresent(
+            CloudFallbackPolicy.self,
+            forKey: .cloudFallbackPolicy
+        ) ?? .disabled
+        silenceAwareCloudSegmentation = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .silenceAwareCloudSegmentation
+        ) ?? true
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -673,6 +727,12 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
         try container.encode(vertexAIModelID, forKey: .vertexAIModelID)
         try container.encodeIfPresent(vertexAIGCSBucket, forKey: .vertexAIGCSBucket)
         try container.encode(vertexAIIncludeSummary, forKey: .vertexAIIncludeSummary)
+        try container.encode(geminiThinkingLevel, forKey: .geminiThinkingLevel)
+        try container.encode(cloudFallbackPolicy, forKey: .cloudFallbackPolicy)
+        try container.encode(
+            silenceAwareCloudSegmentation,
+            forKey: .silenceAwareCloudSegmentation
+        )
     }
 
     /// Returns a copy suitable for transient execution. The credential remains
@@ -698,7 +758,10 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
             vertexAILocation: vertexAILocation,
             vertexAIModelID: vertexAIModelID,
             vertexAIGCSBucket: vertexAIGCSBucket,
-            vertexAIIncludeSummary: vertexAIIncludeSummary
+            vertexAIIncludeSummary: vertexAIIncludeSummary,
+            geminiThinkingLevel: geminiThinkingLevel,
+            cloudFallbackPolicy: cloudFallbackPolicy,
+            silenceAwareCloudSegmentation: silenceAwareCloudSegmentation
         )
     }
 }
@@ -718,6 +781,10 @@ public extension AppSettings {
         resolved.vertexAIModelID = snapshot.vertexAIModelID
         resolved.vertexAIGCSBucket = snapshot.vertexAIGCSBucket
         resolved.vertexAIIncludeSummary = snapshot.vertexAIIncludeSummary
+        resolved.geminiThinkingLevel = snapshot.geminiThinkingLevel
+        resolved.cloudFallbackPolicy = snapshot.cloudFallbackPolicy
+        resolved.silenceAwareCloudSegmentation =
+            snapshot.silenceAwareCloudSegmentation
         return resolved
     }
 }
@@ -847,6 +914,8 @@ public struct TranscriptionJob: Codable, Equatable, Identifiable, Sendable {
     public var completedAt: Date?
     public var failure: JobFailure?
     public var logLines: [String]
+    public var cloudSegmentMetadata: [CloudTranscriptionMetadata]?
+    public var resumeFromRecoveryDirectory: String?
 
     public init(
         id: UUID = UUID(),
@@ -854,7 +923,9 @@ public struct TranscriptionJob: Codable, Equatable, Identifiable, Sendable {
         snapshot: JobSnapshot,
         sourceSlice: TranscriptionSourceSlice? = nil,
         stage: TranscriptionStage = .queued,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        cloudSegmentMetadata: [CloudTranscriptionMetadata]? = nil,
+        resumeFromRecoveryDirectory: String? = nil
     ) {
         self.id = id
         self.sourcePath = sourcePath
@@ -871,6 +942,8 @@ public struct TranscriptionJob: Codable, Equatable, Identifiable, Sendable {
         self.completedAt = nil
         self.failure = nil
         self.logLines = []
+        self.cloudSegmentMetadata = cloudSegmentMetadata
+        self.resumeFromRecoveryDirectory = resumeFromRecoveryDirectory
     }
 
     public var sourceURL: URL {
@@ -895,6 +968,11 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
     public let completedAt: Date?
     public let modelID: String
     public let glossaryName: String?
+    public let backendType: ASRBackendType?
+    public let effectiveModelIDs: [String]?
+    public let cloudUsage: CloudUsageMetadata?
+    public let cloudRetryCount: Int?
+    public let cloudFallbackUsed: Bool?
 
     public init(
         id: UUID,
@@ -905,7 +983,12 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
         startedAt: Date?,
         completedAt: Date?,
         modelID: String,
-        glossaryName: String?
+        glossaryName: String?,
+        backendType: ASRBackendType? = nil,
+        effectiveModelIDs: [String]? = nil,
+        cloudUsage: CloudUsageMetadata? = nil,
+        cloudRetryCount: Int? = nil,
+        cloudFallbackUsed: Bool? = nil
     ) {
         self.id = id
         self.sourcePath = sourcePath
@@ -916,9 +999,15 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
         self.completedAt = completedAt
         self.modelID = modelID
         self.glossaryName = glossaryName
+        self.backendType = backendType
+        self.effectiveModelIDs = effectiveModelIDs
+        self.cloudUsage = cloudUsage
+        self.cloudRetryCount = cloudRetryCount
+        self.cloudFallbackUsed = cloudFallbackUsed
     }
 
     public init(job: TranscriptionJob) {
+        let cloudMetadata = job.resolvedCloudSegmentMetadata
         self.init(
             id: job.id,
             sourcePath: job.sourcePath,
@@ -927,8 +1016,22 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
             stage: job.stage,
             startedAt: job.startedAt,
             completedAt: job.completedAt,
-            modelID: job.snapshot.modelID,
-            glossaryName: job.snapshot.glossaryName
+            modelID: job.snapshot.requestedModelID,
+            glossaryName: job.snapshot.glossaryName,
+            backendType: job.snapshot.backendType,
+            effectiveModelIDs: cloudMetadata.isEmpty
+                ? nil
+                : CloudTranscriptionMetadataAggregator
+                    .uniqueEffectiveModelIDs(cloudMetadata),
+            cloudUsage: CloudTranscriptionMetadataAggregator
+                .totalUsage(cloudMetadata),
+            cloudRetryCount: cloudMetadata.isEmpty
+                ? nil
+                : CloudTranscriptionMetadataAggregator
+                    .totalRetryCount(cloudMetadata),
+            cloudFallbackUsed: cloudMetadata.isEmpty
+                ? nil
+                : cloudMetadata.contains(where: \.usedFallback)
         )
     }
 
@@ -1079,17 +1182,20 @@ public struct PipelineResult: Equatable, Sendable {
     public let rawOutputURL: URL?
     public let duration: TimeInterval
     public let containsSkippedAudio: Bool
+    public let cloudSegmentMetadata: [CloudTranscriptionMetadata]
 
     public init(
         outputURL: URL,
         rawOutputURL: URL?,
         duration: TimeInterval,
-        containsSkippedAudio: Bool = false
+        containsSkippedAudio: Bool = false,
+        cloudSegmentMetadata: [CloudTranscriptionMetadata] = []
     ) {
         self.outputURL = outputURL
         self.rawOutputURL = rawOutputURL
         self.duration = duration
         self.containsSkippedAudio = containsSkippedAudio
+        self.cloudSegmentMetadata = cloudSegmentMetadata
     }
 }
 

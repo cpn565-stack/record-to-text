@@ -71,6 +71,8 @@ public struct AudioSegmentRecord: Codable, Equatable, Sendable {
     public var status: AudioSegmentStatus
     public var completedEventCount: Int
     public var failureMessage: String?
+    public var cloudMetadata: CloudTranscriptionMetadata?
+    public var reusedFromCheckpoint: Bool?
 
     public init(
         segmentIndex: Int,
@@ -81,7 +83,9 @@ public struct AudioSegmentRecord: Codable, Equatable, Sendable {
         outputPath: String,
         status: AudioSegmentStatus = .planned,
         completedEventCount: Int = 0,
-        failureMessage: String? = nil
+        failureMessage: String? = nil,
+        cloudMetadata: CloudTranscriptionMetadata? = nil,
+        reusedFromCheckpoint: Bool? = nil
     ) {
         self.segmentIndex = segmentIndex
         self.segmentCount = segmentCount
@@ -92,6 +96,8 @@ public struct AudioSegmentRecord: Codable, Equatable, Sendable {
         self.status = status
         self.completedEventCount = completedEventCount
         self.failureMessage = failureMessage
+        self.cloudMetadata = cloudMetadata
+        self.reusedFromCheckpoint = reusedFromCheckpoint
     }
 }
 
