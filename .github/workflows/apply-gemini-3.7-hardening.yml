@@ -1,0 +1,58 @@
+name: Apply Gemini 3.7 hardening
+
+on:
+  push:
+    branches:
+      - feature/gemini-3.7-quality-hardening
+    paths:
+      - scripts/apply-gemini-3.7-hardening.py
+      - .github/workflows/apply-gemini-3.7-hardening.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-verify:
+    if: ${{ !contains(github.event.head_commit.message, '[hardening-generated]') }}
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/gemini-3.7-quality-hardening
+          fetch-depth: 0
+
+      - name: Apply current hardening phase
+        run: python3 scripts/apply-gemini-3.7-hardening.py
+
+      - name: Install integration-test tools
+        run: brew install ffmpeg opencc
+
+      - name: Build and test
+        env:
+          REQUIRE_XCTEST: "1"
+        run: scripts/run-checks.sh
+
+      - name: Build unsigned App bundle
+        env:
+          ADHOC_SIGN: "0"
+        run: scripts/build-app.sh
+
+      - name: Verify functional App bundle
+        env:
+          ALLOW_UNSIGNED: "1"
+          CHECK_APP_SIZE: "0"
+        run: scripts/verify-release.sh dist/record-to-text.app
+
+      - name: Commit generated changes
+        run: |
+          if git diff --quiet -- . ':!scripts/apply-gemini-3.7-hardening.py' ':!.github/workflows/apply-gemini-3.7-hardening.yml'; then
+            echo "No generated changes to commit"
+            exit 0
+          fi
+          git config user.name "record-to-text hardening bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git reset scripts/apply-gemini-3.7-hardening.py .github/workflows/apply-gemini-3.7-hardening.yml
+          git commit -m "feat: add cloud transcription provenance models [hardening-generated]"
+          git push origin HEAD:feature/gemini-3.7-quality-hardening
