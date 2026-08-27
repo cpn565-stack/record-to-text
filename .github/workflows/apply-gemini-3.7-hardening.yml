@@ -5,8 +5,7 @@ on:
     branches:
       - feature/gemini-3.7-quality-hardening
     paths:
-      - scripts/apply-gemini-3.7-phase2-backends.py
-      - scripts/fix-gemini-3.7-phase2-generated-swift.py
+      - scripts/apply-gemini-3.7-phase3-pipeline-ui.py
       - .github/workflows/apply-gemini-3.7-hardening.yml
 
 permissions:
@@ -23,10 +22,8 @@ jobs:
           ref: feature/gemini-3.7-quality-hardening
           fetch-depth: 0
 
-      - name: Apply backend observability phase
-        run: |
-          python3 scripts/apply-gemini-3.7-phase2-backends.py
-          python3 scripts/fix-gemini-3.7-phase2-generated-swift.py
+      - name: Apply pipeline and UI phase
+        run: python3 scripts/apply-gemini-3.7-phase3-pipeline-ui.py
 
       - name: Install integration-test tools
         run: brew install ffmpeg opencc
@@ -57,5 +54,5 @@ jobs:
           git config user.email "actions@users.noreply.github.com"
           git add -A
           git reset scripts/*.py .github/workflows/apply-gemini-3.7-hardening.yml
-          git commit -m "feat: harden Gemini 3.7 backend observability [hardening-generated]"
+          git commit -m "feat: connect Gemini 3.7 provenance and Taiwan output [hardening-generated]"
           git push origin HEAD:feature/gemini-3.7-quality-hardening
