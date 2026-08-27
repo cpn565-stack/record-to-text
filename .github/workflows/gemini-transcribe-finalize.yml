@@ -6,6 +6,7 @@ on:
       - feature/gemini-3.5-transcribe
     paths:
       - scripts/gemini-transcribe-finalize.py
+      - scripts/gemini-transcribe-normalize-eof.py
       - .github/workflows/gemini-transcribe-finalize.yml
   workflow_dispatch:
 
@@ -29,6 +30,9 @@ jobs:
 
       - name: Apply final contract corrections
         run: python3 scripts/gemini-transcribe-finalize.py
+
+      - name: Normalize documentation EOF
+        run: python3 scripts/gemini-transcribe-normalize-eof.py
 
       - name: Check patch formatting
         run: git diff --check
