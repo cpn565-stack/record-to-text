@@ -96,6 +96,19 @@ final class GeminiTranscribeCatalogTests: XCTestCase {
         }
         XCTAssertFalse(options.normalizedForUI().diarizationEnabled)
     }
+
+    func testMandarinPresetUsesPublishedSupportedCode() {
+        let automatic = DedicatedTranscriptionOptions(
+            languagePreference: .automatic
+        )
+        XCTAssertTrue(automatic.resolvedLanguageCodes.isEmpty)
+
+        let mandarin = DedicatedTranscriptionOptions(
+            languagePreference: .taiwanMandarin
+        )
+        XCTAssertEqual(mandarin.resolvedLanguageCodes, ["cmn-Hans-CN"])
+    }
+
 }
 
 final class GoogleAIStudioInteractionsContractTests: XCTestCase {
@@ -125,7 +138,7 @@ final class GoogleAIStudioInteractionsContractTests: XCTestCase {
         )
         XCTAssertEqual(
             transcription["language_codes"] as? [String],
-            ["cmn-Hant-TW"]
+            ["cmn-Hans-CN"]
         )
         XCTAssertEqual(
             transcription["custom_vocabulary"] as? [String],
@@ -251,7 +264,7 @@ final class AgentPlatformTranscribeContractTests: XCTestCase {
         )
         XCTAssertEqual(
             transcription["languageCodes"] as? [String],
-            ["cmn-Hant-TW"]
+            ["cmn-Hans-CN"]
         )
         XCTAssertEqual(
             transcription["customVocabulary"] as? [String],
@@ -307,7 +320,7 @@ final class AgentPlatformTranscribeContractTests: XCTestCase {
                                     "text": "fallback text",
                                     "audioTranscription": [
                                         "text": "專用逐字稿",
-                                        "languageCode": "cmn-Hant-TW",
+                                        "languageCode": "cmn-Hans-CN",
                                         "speakerLabel": "speaker-2",
                                         "words": [
                                             [
@@ -332,7 +345,7 @@ final class AgentPlatformTranscribeContractTests: XCTestCase {
         let result = try AgentPlatformTranscribeBackend().parseResponse(data)
         XCTAssertEqual(result.text, "專用逐字稿")
         XCTAssertEqual(result.transport, .agentPlatformTranscribe)
-        XCTAssertEqual(result.detectedLanguageCodes, ["cmn-Hant-TW"])
+        XCTAssertEqual(result.detectedLanguageCodes, ["cmn-Hans-CN"])
         XCTAssertEqual(result.words.count, 2)
         XCTAssertEqual(result.words[0].speaker, "speaker-2")
         XCTAssertEqual(result.providerResponseID, "response-456")

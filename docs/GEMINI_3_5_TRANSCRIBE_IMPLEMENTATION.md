@@ -103,3 +103,7 @@ Preview API 可能調整；gcloud `v1beta1` 與 Project entitlement 是最重要
 完整指令、UI 步驟、邊界測試、遠端 cleanup、資安檢查與 A/B 表格見：
 
 `docs/GEMINI_3_5_TRANSCRIBE_VERIFICATION.md`
+
+## 語言提示限制（2026-08-27）
+
+Google 目前公開的 Gemini 3.5 Transcribe 支援語言表只列出 Mandarin `cmn-Hans-CN`，沒有列出 `cmn-Hant-TW` 或 `zh-TW`。因此 App 的 Mandarin 中文提示會送出 `cmn-Hans-CN`；主逐字稿、speaker turn 與 word metadata 仍會在本機經 OpenCC 轉成台灣繁體。台灣口音或中英混講建議先使用「自動偵測」，再以相同音檔比較 Mandarin 提示的結果。

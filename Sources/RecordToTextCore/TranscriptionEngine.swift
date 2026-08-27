@@ -272,9 +272,18 @@ public final class TranscriptionEngine {
                 sampleRate: sourceMetadata.sampleRate,
                 channels: sourceMetadata.channels
             )
+            let planningSegmentDuration: TimeInterval
+            if job.snapshot.backendType == .localQwen {
+                planningSegmentDuration = maximumASRSegmentDuration
+            } else {
+                planningSegmentDuration = Self.effectiveCloudSegmentDuration(
+                    for: job.snapshot,
+                    productMaximum: maximumASRSegmentDuration
+                )
+            }
             let segmentPlan = try AudioSegmentPlanner.makePlan(
                 sourceDuration: metadata.duration,
-                maximumSegmentDuration: maximumASRSegmentDuration
+                maximumSegmentDuration: planningSegmentDuration
             )
             update(
                 .log(
@@ -282,8 +291,8 @@ public final class TranscriptionEngine {
                     message: String(
                         format: "分段計畫：來源 %.1f 分鐘，每段最長 %.0f 分鐘（%.0f 秒），共 %d 段。",
                         metadata.duration / 60.0,
-                        maximumASRSegmentDuration / 60.0,
-                        maximumASRSegmentDuration,
+                        planningSegmentDuration / 60.0,
+                        planningSegmentDuration,
                         segmentPlan.expectedSegmentCount
                     )
                 )

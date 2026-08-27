@@ -41,7 +41,7 @@ public enum TranscriptionLanguagePreference: String, Codable, CaseIterable, Send
         case .automatic:
             return "自動偵測"
         case .taiwanMandarin:
-            return "台灣華語優先"
+            return "Mandarin 中文提示（官方代碼）"
         case .custom:
             return "自訂語言代碼"
         }
@@ -79,7 +79,7 @@ public struct DedicatedTranscriptionOptions: Codable, Equatable, Sendable {
         case .automatic:
             return []
         case .taiwanMandarin:
-            return ["cmn-Hant-TW"]
+            return ["cmn-Hans-CN"]
         case .custom:
             return Self.normalizedCodes(customLanguageCodes)
         }

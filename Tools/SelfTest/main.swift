@@ -940,12 +940,28 @@ tests.check(
 
 tests.check(
     {
-        let presets = GeminiModelDescriptor.presetModels
-        return presets.contains(where: { $0.id == "gemini-3.7-flash" })
-            && presets.contains(where: { $0.id == "gemini-3.6-flash" })
-            && presets.contains(where: { $0.id == "gemini-3.1-pro-preview" })
+        let aiStudio = GoogleAIStudioModelCatalog.models
+        let gcloud = GCloudModelCatalog.models
+        let generalModelIDs = [
+            "gemini-3.7-flash",
+            "gemini-3.6-flash",
+            "gemini-3.1-pro-preview"
+        ]
+        return generalModelIDs.allSatisfy { modelID in
+            aiStudio.contains(where: { $0.id == modelID })
+                && gcloud.contains(where: { $0.id == modelID })
+        }
+            && aiStudio.contains(where: {
+                $0.id == "gemini-3.5-transcribe"
+                    && $0.transport == .geminiInteractionsTranscribe
+            })
+            && gcloud.contains(where: {
+                $0.id == "gemini-3.5-transcribe-preview"
+                    && $0.transport == .agentPlatformTranscribe
+                    && $0.requiredLocation == "global"
+            })
     }(),
-    "GeminiModelDescriptor contains 3.7 Flash, 3.6 Flash and 3.1 Pro presets"
+    "Provider cloud catalogs contain general Gemini and dedicated Transcribe models"
 )
 
 // MARK: - Gemini Cloud Transport Hardening Tests

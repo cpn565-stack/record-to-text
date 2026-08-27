@@ -161,9 +161,15 @@ private struct DedicatedTranscriptionOptionsView: View {
                             }
                         }
                     ),
-                    prompt: Text("例：cmn-Hant-TW, en-US")
+                    prompt: Text("例：cmn-Hans-CN, en-US")
                 )
                 .textFieldStyle(.roundedBorder)
+            }
+
+            if options.languagePreference == .taiwanMandarin {
+                Text("Google 目前公開的 Mandarin 支援代碼為 cmn-Hans-CN；App 仍會在輸出階段轉為台灣繁體。台灣口音或中英混講建議優先使用自動偵測。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Toggle(

@@ -108,6 +108,20 @@ final class ModelsDefaultsTests: XCTestCase {
         XCTAssertFalse(settings.hasCompletedOnboarding)
     }
 
+    func testLegacySettingsDecodeUpgradesCloudSchemaAndDefaults() throws {
+        let json = "{\"schemaVersion\":1,\"defaultOutputDirectory\":\"/tmp/output\"}"
+        let settings = try JSONDecoder().decode(
+            AppSettings.self,
+            from: Data(json.utf8)
+        )
+
+        XCTAssertEqual(settings.schemaVersion, 2)
+        XCTAssertEqual(settings.googleAIStudioTranscriptionOptions, .default)
+        XCTAssertEqual(settings.vertexAITranscriptionOptions, .default)
+        XCTAssertEqual(settings.vertexAISummaryModelID, "gemini-3.7-flash")
+        XCTAssertFalse(settings.allowDedicatedTranscribeFallbackToGeneralGemini)
+    }
+
     func testDefaultValueUsesNeutralProductDirectoryAndRequestedDeveloperMode() {
         let settings = AppSettings.defaultValue(developerMode: true)
 

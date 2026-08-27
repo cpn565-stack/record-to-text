@@ -299,7 +299,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        let decodedSchemaVersion = try container.decodeIfPresent(
+            Int.self,
+            forKey: .schemaVersion
+        ) ?? 1
+        schemaVersion = max(decodedSchemaVersion, 2)
         defaultOutputDirectory = try container.decode(String.self, forKey: .defaultOutputDirectory)
         outputLocationMode = try container.decodeIfPresent(OutputLocationMode.self, forKey: .outputLocationMode) ?? .fixedDirectory
         lastInputDirectory = try container.decodeIfPresent(String.self, forKey: .lastInputDirectory)

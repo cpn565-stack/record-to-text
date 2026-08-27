@@ -39,6 +39,7 @@
 - 錄音加入佇列後，可在「開始轉文字」旁將單一錄音切成前後兩個時間範圍工作：前半先處理，後半排隊；兩段各自輸出有順序的 TXT。
 - 可從前端選取多份 TXT，依分段編號排序後合併成新檔；拒絕空白／不合法輸出且不覆寫既有檔案。
 
+- Gemini 3.5 Transcribe 的 Mandarin 預設語言提示改用官方已列出的 `cmn-Hans-CN`；輸出仍由 App 在本機轉為台灣繁體，並修正 gcloud 14 分鐘工作在初始日誌中誤顯示 20 分鐘的問題。
 ### Fixed
 
 - 長駐 ASR helper 的 stdin 改送 compact 單行 JSON（JSONL），避免 pretty-printed JSON 造成 helper `JSONDecodeError` 與早期 `asr_failed`。

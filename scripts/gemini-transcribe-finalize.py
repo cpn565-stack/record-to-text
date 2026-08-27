@@ -50,9 +50,9 @@ def replace_supported_language_code() -> None:
             text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             continue
-        updated = text.replace("cmn-Hant-TW", "cmn-Hans-CN")
+        updated = text.replace("cmn-Hans-CN", "cmn-Hans-CN")
         updated = updated.replace(
-            "台灣華語優先",
+            "Mandarin 中文提示（官方代碼）",
             "Mandarin 中文提示（官方代碼）",
         )
         if updated != text:
@@ -193,7 +193,7 @@ def patch_settings_migration_test() -> None:
 def patch_docs() -> None:
     note = (
         "\n\n## 語言提示限制（2026-08-27）\n\n"
-        "Google 目前公開的 Gemini 3.5 Transcribe 支援語言表只列出 Mandarin `cmn-Hans-CN`，沒有列出 `cmn-Hant-TW` 或 `zh-TW`。因此 App 的 Mandarin 中文提示會送出 `cmn-Hans-CN`；主逐字稿、speaker turn 與 word metadata 仍會在本機經 OpenCC 轉成台灣繁體。台灣口音或中英混講建議先使用「自動偵測」，再以相同音檔比較 Mandarin 提示的結果。\n"
+        "Google 目前公開的 Gemini 3.5 Transcribe 支援語言表只列出 Mandarin `cmn-Hans-CN`，沒有列出 `cmn-Hans-CN` 或 `zh-TW`。因此 App 的 Mandarin 中文提示會送出 `cmn-Hans-CN`；主逐字稿、speaker turn 與 word metadata 仍會在本機經 OpenCC 轉成台灣繁體。台灣口音或中英混講建議先使用「自動偵測」，再以相同音檔比較 Mandarin 提示的結果。\n"
     )
     for path in [
         "docs/GEMINI_3_5_TRANSCRIBE_IMPLEMENTATION.md",

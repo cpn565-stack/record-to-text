@@ -278,13 +278,13 @@ OGSTM
 改為：
 
 ```text
-語言提示：台灣華語優先
+語言提示：Mandarin 中文提示（官方代碼）
 ```
 
 App 會解析為：
 
 ```text
-cmn-Hant-TW
+cmn-Hans-CN
 ```
 
 使用音檔 B 驗證：
@@ -836,3 +836,7 @@ segmentLocal
 - [ ] Local Qwen 不受影響
 
 全部完成後，再決定是否將 Gemini 3.5 Transcribe 提升為預設模型或合併回主要雲端分支。
+
+## 語言提示限制（2026-08-27）
+
+Google 目前公開的 Gemini 3.5 Transcribe 支援語言表只列出 Mandarin `cmn-Hans-CN`，沒有列出 `cmn-Hant-TW` 或 `zh-TW`。因此 App 的 Mandarin 中文提示會送出 `cmn-Hans-CN`；主逐字稿、speaker turn 與 word metadata 仍會在本機經 OpenCC 轉成台灣繁體。台灣口音或中英混講建議先使用「自動偵測」，再以相同音檔比較 Mandarin 提示的結果。
