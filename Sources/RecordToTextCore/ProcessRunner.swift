@@ -615,9 +615,22 @@ enum ProcessTreeTermination {
 
         deliver(process, pid: pid, signal: SIGINT)
         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2) {
+            // The original process may have exited before this delayed pass;
+            // never send its PID to a possibly unrelated, newly reused process.
+            guard process.isRunning, process.processIdentifier == pid else {
+                // A surviving child can keep the original process group alive
+                // after its root exits. Signal only that group; do not signal
+                // the positive PID after the root has gone away.
+                _ = Darwin.kill(-pid, SIGTERM)
+                return
+            }
             deliver(process, pid: pid, signal: SIGTERM)
         }
         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 4) {
+            guard process.isRunning, process.processIdentifier == pid else {
+                _ = Darwin.kill(-pid, SIGKILL)
+                return
+            }
             deliver(process, pid: pid, signal: SIGKILL)
         }
     }

@@ -299,7 +299,7 @@ private final class PersistentASRHelperSession: @unchecked Sendable {
         let currentProcess = lock.withLock { () -> Process? in
             let current = process
             process = nil
-            inputPipe?.fileHandleForReading.readabilityHandler = nil
+            outputPipe?.fileHandleForReading.readabilityHandler = nil
             errorPipe?.fileHandleForReading.readabilityHandler = nil
             inputPipe = nil
             outputPipe = nil
@@ -384,6 +384,7 @@ private final class PersistentASRHelperSession: @unchecked Sendable {
     private func readOutput(_ handle: FileHandle) {
         let data = handle.availableData
         guard !data.isEmpty else {
+            handle.readabilityHandler = nil
             return
         }
 
@@ -414,6 +415,7 @@ private final class PersistentASRHelperSession: @unchecked Sendable {
     private func readError(_ handle: FileHandle) {
         let data = handle.availableData
         guard !data.isEmpty else {
+            handle.readabilityHandler = nil
             return
         }
         let lines = String(decoding: data, as: UTF8.self)
@@ -479,7 +481,7 @@ private final class PersistentASRHelperSession: @unchecked Sendable {
                 // A partial JSONL line from the crashed helper must not leak
                 // into the next request's event stream.
                 outputBuffer.removeAll()
-                inputPipe?.fileHandleForReading.readabilityHandler = nil
+                outputPipe?.fileHandleForReading.readabilityHandler = nil
                 errorPipe?.fileHandleForReading.readabilityHandler = nil
                 inputPipe = nil
                 outputPipe = nil

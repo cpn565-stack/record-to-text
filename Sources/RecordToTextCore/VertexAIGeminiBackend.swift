@@ -611,7 +611,6 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                 ["category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"]
             ],
             "generationConfig": [
-                "temperature": 0.2,
                 "maxOutputTokens": maximumOutputTokens
             ]
         ]

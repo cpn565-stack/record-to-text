@@ -6,7 +6,11 @@ final class RecordToTextAppDelegate: NSObject, NSApplicationDelegate {
     weak var viewModel: AppViewModel?
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let viewModel, viewModel.hasActiveJob else {
+        guard let viewModel else {
+            return .terminateNow
+        }
+        guard viewModel.hasActiveJob else {
+            viewModel.flushPendingSettingsPersistence()
             return .terminateNow
         }
 

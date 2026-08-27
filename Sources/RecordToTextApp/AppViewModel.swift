@@ -422,7 +422,20 @@ final class AppViewModel: ObservableObject {
                 return
             }
             self.persistSettings()
+            self.settingsPersistTask = nil
         }
+    }
+
+    /// Flushes a debounced settings write before the App terminates. The
+    /// termination path is synchronous when no transcription is active, so a
+    /// pending Task cannot be allowed to disappear with the view model.
+    func flushPendingSettingsPersistence() {
+        guard settingsPersistTask != nil else {
+            return
+        }
+        settingsPersistTask?.cancel()
+        settingsPersistTask = nil
+        persistSettings()
     }
 
     var googleAIStudioCredentialStorageDescription: String {
@@ -1151,6 +1164,8 @@ final class AppViewModel: ObservableObject {
             jobs[index].stage = .cancelled
             jobs[index].completedAt = Date()
         }
+
+        flushPendingSettingsPersistence()
 
         if let activeJobID {
             cancellationRequested.insert(activeJobID)
