@@ -56,12 +56,19 @@ final class GeminiCloudResponseValidationTests: XCTestCase {
             "忠實逐字稿"
         )
 
-        XCTAssertEqual(
+        XCTAssertThrowsError(
             try backend.parseCandidateText(
                 from: responseData(finishReason: "MAX_TOKENS")
-            ),
-            "忠實逐字稿"
-        )
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? CloudOutputTruncatedError,
+                CloudOutputTruncatedError(
+                    partialText: "忠實逐字稿",
+                    finishMessage: "output limit"
+                )
+            )
+        }
         XCTAssertThrowsError(
             try backend.parseCandidateText(
                 from: responseData(finishReason: "MAX_TOKENS", text: "   ")
@@ -89,12 +96,19 @@ final class GeminiCloudResponseValidationTests: XCTestCase {
             "忠實逐字稿"
         )
 
-        XCTAssertEqual(
+        XCTAssertThrowsError(
             try backend.parseCandidateText(
                 from: responseData(finishReason: "MAX_TOKENS")
-            ),
-            "忠實逐字稿"
-        )
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? CloudOutputTruncatedError,
+                CloudOutputTruncatedError(
+                    partialText: "忠實逐字稿",
+                    finishMessage: "output limit"
+                )
+            )
+        }
         XCTAssertThrowsError(
             try backend.parseCandidateText(
                 from: responseData(finishReason: "MAX_TOKENS", text: "   ")

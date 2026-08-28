@@ -248,6 +248,22 @@ class TranscriptAccumulator:
         self._parts.append(marker)
         return marker
 
+    def record_checkpoint_text(
+        self,
+        text: str,
+        *,
+        contains_skipped_audio: bool = False,
+    ) -> None:
+        cleaned = text.strip()
+        if cleaned:
+            self._parts.append(cleaned)
+        self._contains_skipped_audio = (
+            self._contains_skipped_audio or contains_skipped_audio
+        )
+
+    def mark_prompt_echo_only(self) -> None:
+        self._has_prompt_echo_only_chunk = True
+
     @property
     def text(self) -> str:
         return join_transcript_parts(self._parts)

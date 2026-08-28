@@ -23,15 +23,21 @@ public struct CloudResumeCheckpoint: Equatable, Sendable {
     public let recoveryDirectory: URL
     public let plan: AudioSegmentationPlan
     public let reusableSegments: [Int: ReusableCloudSegment]
+    public let splitDepths: [Int: Int]
+    public let speakerRoster: SpeakerRoster?
 
     public init(
         recoveryDirectory: URL,
         plan: AudioSegmentationPlan,
-        reusableSegments: [Int: ReusableCloudSegment]
+        reusableSegments: [Int: ReusableCloudSegment],
+        splitDepths: [Int: Int] = [:],
+        speakerRoster: SpeakerRoster? = nil
     ) {
         self.recoveryDirectory = recoveryDirectory
         self.plan = plan
         self.reusableSegments = reusableSegments
+        self.splitDepths = splitDepths
+        self.speakerRoster = speakerRoster
     }
 }
 
@@ -159,6 +165,7 @@ public enum CloudResumeCheckpointLoader {
         }
         var planSegments: [PlannedAudioSegment] = []
         var reusable: [Int: ReusableCloudSegment] = [:]
+        var splitDepths: [Int: Int] = [:]
         var expectedAbsoluteStart = sourceTimeOffset
         let recoverySegmentsDirectory = resolvedDirectory
             .appendingPathComponent(
@@ -200,6 +207,7 @@ public enum CloudResumeCheckpointLoader {
                     durationSeconds: duration
                 )
             )
+            splitDepths[record.segmentIndex] = max(record.splitDepth ?? 0, 0)
             expectedAbsoluteStart = record.endSeconds
 
             guard
@@ -248,7 +256,9 @@ public enum CloudResumeCheckpointLoader {
                 maximumSegmentDurationSeconds: maximumSegmentDuration,
                 segments: planSegments
             ),
-            reusableSegments: reusable
+            reusableSegments: reusable,
+            splitDepths: splitDepths,
+            speakerRoster: manifest.speakerRoster
         )
     }
 

@@ -69,4 +69,19 @@ public enum GeminiTranscriptPrompt {
         parts.append("請直接開始轉錄上述音訊。")
         return parts.joined(separator: "\n\n")
     }
+
+    public static func promptByAppendingSpeakerContinuity(
+        _ canonicalPrompt: String,
+        roster: SpeakerRoster
+    ) -> String {
+        guard let instruction = roster.promptInstruction else {
+            return canonicalPrompt
+        }
+        let trimmed = canonicalPrompt.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        return trimmed.isEmpty
+            ? instruction
+            : "\(trimmed)\n\n\(instruction)"
+    }
 }

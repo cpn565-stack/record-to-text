@@ -3,6 +3,37 @@ import XCTest
 @testable import RecordToTextCore
 
 final class JSONLStreamParserTests: XCTestCase {
+    func testQwenHardTimeoutScalesWithModelAndChunkDuration() {
+        let bf16 = ASRRequest(
+            jobID: "job",
+            audioPath: "/tmp/audio.wav",
+            outputPath: "/tmp/output.txt",
+            modelID: ASRModelDescriptor.appleSiliconBF16.id,
+            language: "Chinese",
+            prompt: "prompt",
+            terms: [],
+            modelCacheDirectory: "/tmp/models",
+            offline: true,
+            chunkDurationSeconds: 120
+        )
+        var small = bf16
+        small = ASRRequest(
+            jobID: small.jobID,
+            audioPath: small.audioPath,
+            outputPath: small.outputPath,
+            modelID: ASRModelDescriptor.appleSilicon0_6B8bit.id,
+            language: small.language,
+            prompt: small.prompt,
+            terms: small.terms,
+            modelCacheDirectory: small.modelCacheDirectory,
+            offline: small.offline,
+            chunkDurationSeconds: small.chunkDurationSeconds
+        )
+
+        XCTAssertEqual(HelperInactivityPolicy.hardTimeout(for: bf16), 600)
+        XCTAssertEqual(HelperInactivityPolicy.hardTimeout(for: small), 360)
+    }
+
     func testLivenessMonitorWarnsOnceUntilActivityResumes() {
         let start = Date(timeIntervalSince1970: 1_700_000_000)
         let monitor = HelperLivenessMonitor(startedAt: start)

@@ -62,8 +62,8 @@ public enum AudioSegmentStatus: String, Codable, Equatable, Sendable {
 }
 
 public struct AudioSegmentRecord: Codable, Equatable, Sendable {
-    public let segmentIndex: Int
-    public let segmentCount: Int
+    public var segmentIndex: Int
+    public var segmentCount: Int
     public let startSeconds: Double
     public let endSeconds: Double
     public let audioPath: String
@@ -73,6 +73,7 @@ public struct AudioSegmentRecord: Codable, Equatable, Sendable {
     public var failureMessage: String?
     public var cloudMetadata: CloudTranscriptionMetadata?
     public var reusedFromCheckpoint: Bool?
+    public var splitDepth: Int?
 
     public init(
         segmentIndex: Int,
@@ -85,7 +86,8 @@ public struct AudioSegmentRecord: Codable, Equatable, Sendable {
         completedEventCount: Int = 0,
         failureMessage: String? = nil,
         cloudMetadata: CloudTranscriptionMetadata? = nil,
-        reusedFromCheckpoint: Bool? = nil
+        reusedFromCheckpoint: Bool? = nil,
+        splitDepth: Int? = nil
     ) {
         self.segmentIndex = segmentIndex
         self.segmentCount = segmentCount
@@ -98,6 +100,11 @@ public struct AudioSegmentRecord: Codable, Equatable, Sendable {
         self.failureMessage = failureMessage
         self.cloudMetadata = cloudMetadata
         self.reusedFromCheckpoint = reusedFromCheckpoint
+        self.splitDepth = splitDepth
+    }
+
+    public var durationSeconds: Double {
+        endSeconds - startSeconds
     }
 }
 
@@ -106,8 +113,9 @@ public struct AudioSegmentManifest: Codable, Equatable, Sendable {
     public let jobID: UUID
     public let sourceDurationSeconds: Double
     public let maximumSegmentDurationSeconds: Double
-    public let expectedSegmentCount: Int
+    public var expectedSegmentCount: Int
     public var segments: [AudioSegmentRecord]
+    public var speakerRoster: SpeakerRoster?
 
     public init(
         schemaVersion: Int = 1,
@@ -115,7 +123,8 @@ public struct AudioSegmentManifest: Codable, Equatable, Sendable {
         sourceDurationSeconds: Double,
         maximumSegmentDurationSeconds: Double,
         expectedSegmentCount: Int,
-        segments: [AudioSegmentRecord]
+        segments: [AudioSegmentRecord],
+        speakerRoster: SpeakerRoster? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.jobID = jobID
@@ -123,6 +132,7 @@ public struct AudioSegmentManifest: Codable, Equatable, Sendable {
         self.maximumSegmentDurationSeconds = maximumSegmentDurationSeconds
         self.expectedSegmentCount = expectedSegmentCount
         self.segments = segments
+        self.speakerRoster = speakerRoster
     }
 
     public mutating func mark(
@@ -141,6 +151,23 @@ public struct AudioSegmentManifest: Codable, Equatable, Sendable {
             segments[index].completedEventCount = completedEventCount
         }
         segments[index].failureMessage = failureMessage
+    }
+
+    public mutating func replaceSegment(
+        segmentIndex: Int,
+        with replacement: [AudioSegmentRecord]
+    ) throws {
+        guard let index = segments.firstIndex(where: {
+            $0.segmentIndex == segmentIndex
+        }) else {
+            throw AudioSegmentationError.segmentMissing(segmentIndex)
+        }
+        segments.replaceSubrange(index...index, with: replacement)
+        expectedSegmentCount = segments.count
+        for offset in segments.indices {
+            segments[offset].segmentIndex = offset + 1
+            segments[offset].segmentCount = expectedSegmentCount
+        }
     }
 
     public func validatedCompletedSegments() throws -> [AudioSegmentRecord] {
@@ -172,6 +199,36 @@ public struct AudioSegmentManifest: Codable, Equatable, Sendable {
             }
         }
         return segments
+    }
+}
+
+public enum CloudAdaptiveSegmentPlanner {
+    public static let productionMaximumSplitDepth = 2
+    public static let productionMinimumChildDuration: TimeInterval = 240
+
+    public static func splitBoundary(
+        duration: TimeInterval,
+        splitDepth: Int,
+        silences: [DetectedSilence] = [],
+        maximumSplitDepth: Int = productionMaximumSplitDepth,
+        minimumChildDuration: TimeInterval = productionMinimumChildDuration
+    ) -> TimeInterval? {
+        guard duration.isFinite,
+              duration >= minimumChildDuration * 2,
+              splitDepth < maximumSplitDepth
+        else {
+            return nil
+        }
+
+        let lowerBound = minimumChildDuration
+        let upperBound = duration - minimumChildDuration
+        let midpoint = duration / 2
+        let candidates = silences
+            .map(\.midpointSeconds)
+            .filter { $0 >= lowerBound && $0 <= upperBound }
+        return candidates.min {
+            abs($0 - midpoint) < abs($1 - midpoint)
+        } ?? midpoint
     }
 }
 

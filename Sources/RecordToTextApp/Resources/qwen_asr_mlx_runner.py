@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import importlib.metadata
 import inspect
 import json
@@ -163,6 +164,119 @@ def atomic_write_text(text: str, destination: Path) -> None:
         except FileNotFoundError:
             pass
         raise
+
+
+def chunk_checkpoint_path(output: Path, request: dict[str, Any]) -> Path:
+    directory_value = request.get("chunkCheckpointDirectory")
+    if isinstance(directory_value, str) and directory_value.strip():
+        directory = Path(directory_value)
+        filename = (
+            f"segment-{int(request.get('segmentIndex', 1)):04d}-"
+            f"of-{int(request.get('segmentCount', 1)):04d}.chunks.json"
+        )
+        return directory / filename
+    return output.with_name(f"{output.name}.chunks.json")
+
+
+def chunk_checkpoint_fingerprint(
+    request: dict[str, Any],
+    *,
+    audio_length: int,
+    sample_rate: int,
+    total_chunks: int,
+    chunk_duration: float,
+) -> str:
+    payload = {
+        "audioLength": audio_length,
+        "sampleRate": sample_rate,
+        "totalChunks": total_chunks,
+        "chunkDurationSeconds": chunk_duration,
+        "modelID": request.get("modelID"),
+        "modelRevision": request.get("modelRevision"),
+        "maximumTokens": request.get("maximumTokens"),
+        "prompt": request.get("prompt"),
+        "terms": request.get("terms"),
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def write_chunk_checkpoint(
+    destination: Path,
+    *,
+    fingerprint: str,
+    total_chunks: int,
+    completed_chunks: list[dict[str, Any]],
+) -> None:
+    atomic_write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "fingerprint": fingerprint,
+                "totalChunks": total_chunks,
+                "completedChunks": completed_chunks,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        destination,
+    )
+
+
+def load_chunk_checkpoint(
+    source: Path,
+    *,
+    fingerprint: str,
+    total_chunks: int,
+) -> list[dict[str, Any]]:
+    if not source.is_file():
+        return []
+    try:
+        payload = json.loads(source.read_text(encoding="utf-8"))
+    except Exception as error:
+        emit(
+            "warning",
+            code="chunk_checkpoint_invalid",
+            message=f"內部 chunk checkpoint 無法讀取，將從頭處理本段：{exception_details(error)}",
+        )
+        return []
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schemaVersion") != 1
+        or payload.get("fingerprint") != fingerprint
+        or payload.get("totalChunks") != total_chunks
+    ):
+        emit(
+            "warning",
+            code="chunk_checkpoint_incompatible",
+            message="內部 chunk checkpoint 與目前音訊／模型／Prompt 不相容，將從頭處理本段。",
+        )
+        return []
+    completed = payload.get("completedChunks")
+    if not isinstance(completed, list) or len(completed) > total_chunks:
+        return []
+    validated: list[dict[str, Any]] = []
+    for expected_index, item in enumerate(completed):
+        if (
+            not isinstance(item, dict)
+            or item.get("index") != expected_index
+            or not isinstance(item.get("text"), str)
+            or not isinstance(item.get("containsSkippedAudio"), bool)
+        ):
+            emit(
+                "warning",
+                code="chunk_checkpoint_invalid",
+                message="內部 chunk checkpoint 順序或內容無效，將從頭處理本段。",
+            )
+            return []
+        validated.append(item)
+    return validated
 
 
 def configure_environment(request: dict[str, Any]) -> None:
@@ -336,6 +450,34 @@ def transcribe(request: dict[str, Any]) -> None:
         terms=terms,
         emit=emit,
     )
+    checkpoint = chunk_checkpoint_path(output, request)
+    checkpoint_fingerprint = chunk_checkpoint_fingerprint(
+        request,
+        audio_length=audio_length,
+        sample_rate=sample_rate,
+        total_chunks=total_chunks,
+        chunk_duration=chunk_duration,
+    )
+    completed_chunks = load_chunk_checkpoint(
+        checkpoint,
+        fingerprint=checkpoint_fingerprint,
+        total_chunks=total_chunks,
+    )
+    for item in completed_chunks:
+        transcript.record_checkpoint_text(
+            item["text"],
+            contains_skipped_audio=item["containsSkippedAudio"],
+        )
+    starting_chunk = len(completed_chunks)
+    if starting_chunk > 0:
+        emit(
+            "log",
+            level="info",
+            message=(
+                f"已驗證內部 chunk checkpoint，沿用前 {starting_chunk}/{total_chunks} 塊；"
+                "不重新推論已完成音訊。"
+            ),
+        )
 
     def preserve_partial_output() -> None:
         partial_text = transcript.text
@@ -375,7 +517,7 @@ def transcribe(request: dict[str, Any]) -> None:
             return model.generate(span, **generation_arguments)
 
     try:
-        for index in range(total_chunks):
+        for index in range(starting_chunk, total_chunks):
             start = index * samples_per_chunk
             end = min((index + 1) * samples_per_chunk, audio_length)
             chunk = audio[start:end]
@@ -384,6 +526,11 @@ def transcribe(request: dict[str, Any]) -> None:
                 current=index,
                 total=total_chunks,
                 unit="chunks",
+            )
+            chunk_transcript = TranscriptAccumulator(
+                prompt=prompt,
+                terms=terms,
+                emit=emit,
             )
             generate_span_with_token_guard(
                 model,
@@ -395,10 +542,38 @@ def transcribe(request: dict[str, Any]) -> None:
                 emit=emit,
                 heartbeat_factory=heartbeat,
                 generate=generate_with_redirect,
-                on_leaf_complete=transcript.record_completed_text,
-                on_leaf_skipped=transcript.record_skipped_span,
+                on_leaf_complete=chunk_transcript.record_completed_text,
+                on_leaf_skipped=chunk_transcript.record_skipped_span,
                 min_split_seconds=min_split_seconds,
                 max_depth=6,
+            )
+            if chunk_transcript.has_prompt_echo_only_chunk:
+                transcript.mark_prompt_echo_only()
+                preserve_partial_output()
+                emit(
+                    "error",
+                    code="prompt_echo_only",
+                    message="模型只回吐了送入的 Prompt／詞庫，沒有產生可用逐字稿。",
+                    recoverable=True,
+                )
+                raise SystemExit(2)
+            transcript.record_checkpoint_text(
+                chunk_transcript.text,
+                contains_skipped_audio=chunk_transcript.contains_skipped_audio,
+            )
+            completed_chunks.append(
+                {
+                    "index": index,
+                    "text": chunk_transcript.text,
+                    "containsSkippedAudio":
+                        chunk_transcript.contains_skipped_audio,
+                }
+            )
+            write_chunk_checkpoint(
+                checkpoint,
+                fingerprint=checkpoint_fingerprint,
+                total_chunks=total_chunks,
+                completed_chunks=completed_chunks,
             )
             emit(
                 "progress",
@@ -423,6 +598,10 @@ def transcribe(request: dict[str, Any]) -> None:
     text = transcript.text
 
     atomic_write_text(text, output)
+    try:
+        output.with_name(f"{output.name}.partial.txt").unlink()
+    except FileNotFoundError:
+        pass
     emit(
         "completed",
         outputPath=str(output),

@@ -1,6 +1,23 @@
 import Foundation
 
-private let asrHelperInactivityTimeout: TimeInterval = 3 * 60
+public enum HelperInactivityPolicy {
+    public static let warningTimeout: TimeInterval = 30
+
+    public static func hardTimeout(for request: ASRRequest) -> TimeInterval {
+        let modelMultiplier: Double
+        if request.modelID.contains("1.7B-bf16") {
+            modelMultiplier = 5
+        } else if request.modelID.contains("1.7B") {
+            modelMultiplier = 4
+        } else {
+            modelMultiplier = 3
+        }
+        return min(
+            max(5 * 60, request.chunkDurationSeconds * modelMultiplier),
+            20 * 60
+        )
+    }
+}
 
 public struct ASRRequest: Codable, Equatable, Sendable {
     public let jobID: String
@@ -18,6 +35,7 @@ public struct ASRRequest: Codable, Equatable, Sendable {
     public let chunkDurationSeconds: Double
     public let segmentIndex: Int
     public let segmentCount: Int
+    public let chunkCheckpointDirectory: String?
 
     public init(
         jobID: String,
@@ -37,7 +55,8 @@ public struct ASRRequest: Codable, Equatable, Sendable {
         /// auto-splits further when a chunk hits the token cap.
         chunkDurationSeconds: Double = 120,
         segmentIndex: Int = 1,
-        segmentCount: Int = 1
+        segmentCount: Int = 1,
+        chunkCheckpointDirectory: String? = nil
     ) {
         self.jobID = jobID
         self.audioPath = audioPath
@@ -54,6 +73,7 @@ public struct ASRRequest: Codable, Equatable, Sendable {
         self.chunkDurationSeconds = chunkDurationSeconds
         self.segmentIndex = segmentIndex
         self.segmentCount = segmentCount
+        self.chunkCheckpointDirectory = chunkCheckpointDirectory
     }
 }
 
@@ -205,6 +225,7 @@ private final class PersistentASRHelperSession: @unchecked Sendable {
 
     func send(
         requestData: Data,
+        inactivityTimeout: TimeInterval,
         stdoutLineHandler: @escaping (String) -> Bool,
         stderrLineHandler: @escaping (String) -> Void
     ) async throws {
@@ -221,8 +242,8 @@ private final class PersistentASRHelperSession: @unchecked Sendable {
                 guard let self, let activity else {
                     return
                 }
-                if activity.isInactive(timeout: asrHelperInactivityTimeout) {
-                    self.failActiveRequest()
+                if activity.isInactive(timeout: inactivityTimeout) {
+                    self.failActiveRequest(timeout: inactivityTimeout)
                     return
                 }
             }
@@ -445,7 +466,7 @@ private final class PersistentASRHelperSession: @unchecked Sendable {
         }
     }
 
-    private func failActiveRequest() {
+    private func failActiveRequest(timeout: TimeInterval) {
         let currentProcess = lock.withLock { () -> Process? in
             guard requestContinuation != nil else {
                 return nil
@@ -457,7 +478,7 @@ private final class PersistentASRHelperSession: @unchecked Sendable {
         }
         finishRequest(
             with: ASRBackendError.helperTimedOut(
-                timeout: asrHelperInactivityTimeout
+                timeout: timeout
             )
         )
         ProcessTreeTermination.begin(currentProcess)
@@ -529,6 +550,39 @@ public final class HelperASRBackend {
         requestURL: URL,
         eventHandler: @escaping (HelperEvent) -> Void
     ) async throws -> ASRTranscriptionResult {
+        let maximumAttempts = usesPersistentSession ? 2 : 1
+        for attempt in 1...maximumAttempts {
+            do {
+                return try await transcribeOnce(
+                    request: request,
+                    requestURL: requestURL,
+                    eventHandler: eventHandler
+                )
+            } catch let error as ASRBackendError {
+                guard attempt < maximumAttempts,
+                      case .helperTimedOut = error
+                else {
+                    throw error
+                }
+                recyclePersistentSession()
+                eventHandler(
+                    HelperEvent(
+                        type: "warning",
+                        message: "ASR Helper 長時間未回報，已重啟並嘗試從已完成的內部 chunk checkpoint 接續。",
+                        code: "helper_restarted_from_chunk_checkpoint",
+                        recoverable: true
+                    )
+                )
+            }
+        }
+        throw ASRBackendError.completedEventMissing
+    }
+
+    private func transcribeOnce(
+        request: ASRRequest,
+        requestURL: URL,
+        eventHandler: @escaping (HelperEvent) -> Void
+    ) async throws -> ASRTranscriptionResult {
         let encoder = JSONEncoder()
         // The persistent helper reads stdin as JSONL: one complete JSON object
         // per line. Pretty-printed JSON would send the opening brace alone and
@@ -573,10 +627,12 @@ public final class HelperASRBackend {
 
         let terminationStatus: Int32
         let technicalDetails: String
+        let inactivityTimeout = HelperInactivityPolicy.hardTimeout(for: request)
         if usesPersistentSession {
             let session = persistentSessionForRequest(request)
             try await session.send(
                 requestData: requestData,
+                inactivityTimeout: inactivityTimeout,
                 stdoutLineHandler: stdoutLineHandler,
                 stderrLineHandler: stderrLineHandler
             )
@@ -592,7 +648,7 @@ public final class HelperASRBackend {
                 ],
                 environment: helperEnvironment(request: request),
                 requireSuccess: false,
-                inactivityTimeout: asrHelperInactivityTimeout,
+                inactivityTimeout: inactivityTimeout,
                 stdoutLineHandler: { line in
                     _ = stdoutLineHandler(line)
                 },
@@ -608,6 +664,15 @@ public final class HelperASRBackend {
             terminationStatus: terminationStatus,
             technicalDetails: technicalDetails
         )
+    }
+
+    private func recyclePersistentSession() {
+        let oldSession = sessionLock.withLock { () -> PersistentASRHelperSession? in
+            let current = persistentSession
+            persistentSession = nil
+            return current
+        }
+        oldSession?.stop()
     }
 
     private var usesPersistentSession: Bool {

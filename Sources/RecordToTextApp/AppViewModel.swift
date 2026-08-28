@@ -197,9 +197,32 @@ final class AppViewModel: ObservableObject {
         var summaries = loadedRecentJobs.jobs
         var didInterruptJobs = false
         for index in loadedLedger.jobs.indices where !loadedLedger.jobs[index].stage.isTerminal {
+            let interruptedJob = loadedLedger.jobs[index]
             loadedLedger.jobs[index].stage = .interrupted
             loadedLedger.jobs[index].completedAt = Date()
             loadedLedger.jobs[index].logLines.append("App 上次結束時工作尚未完成。")
+            if interruptedJob.snapshot.backendType == .localQwen {
+                let directory = paths.tempRecovery.appendingPathComponent(
+                    interruptedJob.id.uuidString,
+                    isDirectory: true
+                )
+                if LocalChunkCheckpoint.containsUsableCheckpoint(
+                    in: directory,
+                    fileManager: fileManager
+                ) {
+                    loadedLedger.jobs[index].failure = JobFailure(
+                        stage: .interrupted,
+                        userMessage: "App 上次結束時 Qwen 工作尚未完成；已找到可驗證的 chunk checkpoint。",
+                        technicalDetails: "Recovered local Qwen chunk checkpoint after interrupted app session.",
+                        recoverable: true,
+                        recoveryDirectory: directory.path,
+                        partialTranscriptPath: nil
+                    )
+                    loadedLedger.jobs[index].logLines.append(
+                        "已找到本機 Qwen chunk checkpoint，可從已完成 chunk 續跑。"
+                    )
+                }
+            }
             let summary = RecentJobSummary(job: loadedLedger.jobs[index])
             summaries.removeAll(where: { $0.id == summary.id })
             summaries.append(summary)
@@ -1081,6 +1104,25 @@ final class AppViewModel: ObservableObject {
         )
     }
 
+    func canResumeLocalQwenJob(_ job: TranscriptionJob) -> Bool {
+        guard job.snapshot.backendType == .localQwen,
+              job.stage == .failed
+                || job.stage == .cancelled
+                || job.stage == .interrupted,
+              let recoveryDirectory = job.failure?.recoveryDirectory
+        else {
+            return false
+        }
+        let directory = URL(
+            fileURLWithPath: recoveryDirectory,
+            isDirectory: true
+        )
+        return LocalChunkCheckpoint.containsUsableCheckpoint(
+            in: directory,
+            fileManager: fileManager
+        )
+    }
+
     func resumeCloudJobFromCheckpoint(_ id: UUID) {
         guard let index = jobs.firstIndex(where: { $0.id == id }) else {
             return
@@ -1111,6 +1153,43 @@ final class AppViewModel: ObservableObject {
         )
         resumed.logLines.append(
             "從雲端檢查點續跑；已完成片段會先驗證，只有未完成片段會重新上傳與轉錄。"
+        )
+        jobs.insert(resumed, at: min(index + 1, jobs.count))
+        persistJobs()
+        manualDrainRequested = true
+        scheduleQueueIfNeeded()
+    }
+
+    func resumeLocalQwenJobFromCheckpoint(_ id: UUID) {
+        guard let index = jobs.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        let oldJob = jobs[index]
+        guard canResumeLocalQwenJob(oldJob),
+              let recoveryDirectory = oldJob.failure?.recoveryDirectory
+        else {
+            alert = UserFacingAlert(
+                title: "沒有可續跑的 Qwen chunk",
+                message: "這筆工作沒有通過基本檢查的本機 chunk checkpoint。"
+            )
+            return
+        }
+        guard fileManager.fileExists(atPath: oldJob.sourcePath) else {
+            alert = UserFacingAlert(
+                title: "來源錄音不存在",
+                message: "找不到原始錄音，無法重建尚未完成的音訊片段。"
+            )
+            return
+        }
+
+        var resumed = TranscriptionJob(
+            sourcePath: oldJob.sourcePath,
+            snapshot: oldJob.snapshot.withGoogleAIStudioAPIKey(nil),
+            sourceSlice: oldJob.sourceSlice,
+            resumeFromRecoveryDirectory: recoveryDirectory
+        )
+        resumed.logLines.append(
+            "從本機 Qwen chunk checkpoint 續跑；相容的已完成 chunk 不會重新推論。"
         )
         jobs.insert(resumed, at: min(index + 1, jobs.count))
         persistJobs()
@@ -1409,15 +1488,59 @@ final class AppViewModel: ObservableObject {
     }
 
     private func runRecoveryScan(presentIfNonEmpty: Bool) {
-        let report = RecoveryScanner.scan(
+        let scannedReport = RecoveryScanner.scan(
             paths: paths,
             fileManager: fileManager
+        )
+        let activeRecoveryDirectoryPaths = Set(
+            jobs.lazy.filter { !$0.stage.isTerminal }.map { job in
+                if let resumedDirectory = job.resumeFromRecoveryDirectory {
+                    return URL(
+                        fileURLWithPath: resumedDirectory,
+                        isDirectory: true
+                    ).standardizedFileURL.path
+                }
+                return self.paths.tempRecovery.appendingPathComponent(
+                    job.id.uuidString,
+                    isDirectory: true
+                ).standardizedFileURL.path
+            }
+        )
+        let report = Self.excludingActiveJobDirectories(
+            from: scannedReport,
+            activeRecoveryDirectoryPaths: activeRecoveryDirectoryPaths
         )
         recoveryScanReport = report
         // Don't compete with first-run onboarding sheet.
         if presentIfNonEmpty, !report.isEmpty, !isOnboardingPresented {
             isRecoveryScanPresented = true
         }
+    }
+
+    static func excludingActiveJobDirectories(
+        from report: RecoveryScanReport,
+        activeRecoveryDirectoryPaths: Set<String>
+    ) -> RecoveryScanReport {
+        guard !activeRecoveryDirectoryPaths.isEmpty else {
+            return report
+        }
+        return RecoveryScanReport(
+            scannedAt: report.scannedAt,
+            systemTempRoot: report.systemTempRoot,
+            tempRecoveryRoot: report.tempRecoveryRoot,
+            items: report.items.filter { item in
+                guard item.location == .tempRecovery else {
+                    return true
+                }
+                let path = URL(
+                    fileURLWithPath: item.directoryPath,
+                    isDirectory: true
+                ).standardizedFileURL.path
+                return !activeRecoveryDirectoryPaths.contains(path)
+            },
+            ignoredNonUUIDDirectoryCount:
+                report.ignoredNonUUIDDirectoryCount
+        )
     }
 
     func completeOnboarding() {
@@ -1725,12 +1848,23 @@ final class AppViewModel: ObservableObject {
         guard let index = jobs.firstIndex(where: { $0.id == id }) else {
             return
         }
-        let recoveryFailure = Self.cancellationRecoveryFailure(
-            jobID: id,
-            paths: paths,
-            fileManager: fileManager,
-            technicalDetails: String(reflecting: error)
-        )
+        let recoveryFailure: JobFailure?
+        if jobs[index].snapshot.backendType == .localQwen {
+            recoveryFailure = Self.localChunkRecoveryFailure(
+                jobID: id,
+                stage: .cancelled,
+                paths: paths,
+                fileManager: fileManager,
+                technicalDetails: String(reflecting: error)
+            )
+        } else {
+            recoveryFailure = Self.cancellationRecoveryFailure(
+                jobID: id,
+                paths: paths,
+                fileManager: fileManager,
+                technicalDetails: String(reflecting: error)
+            )
+        }
         jobs[index].stage = .cancelled
         jobs[index].progressCurrent = nil
         jobs[index].progressTotal = nil
@@ -1739,6 +1873,10 @@ final class AppViewModel: ObservableObject {
         jobs[index].failure = recoveryFailure
         if recoveryFailure == nil {
             jobs[index].logLines.append("工作已取消，未保留未完成文字。")
+        } else if jobs[index].snapshot.backendType == .localQwen {
+            jobs[index].logLines.append(
+                "工作已取消；已保留本機 Qwen chunk checkpoint，可稍後續跑。"
+            )
         } else {
             jobs[index].logLines.append(
                 "工作已取消；已完成的雲端片段已保留為未完成稿，可打開或刪除。"
@@ -1797,6 +1935,33 @@ final class AppViewModel: ObservableObject {
             recoverable: true,
             recoveryDirectory: directory.path,
             partialTranscriptPath: partialURL.path
+        )
+    }
+
+    static func localChunkRecoveryFailure(
+        jobID: UUID,
+        stage: TranscriptionStage,
+        paths: ApplicationPaths,
+        fileManager: FileManager = .default,
+        technicalDetails: String
+    ) -> JobFailure? {
+        let directory = paths.tempRecovery.appendingPathComponent(
+            jobID.uuidString,
+            isDirectory: true
+        )
+        guard LocalChunkCheckpoint.containsUsableCheckpoint(
+            in: directory,
+            fileManager: fileManager
+        ) else {
+            return nil
+        }
+        return JobFailure(
+            stage: stage,
+            userMessage: "Qwen 工作已停止；已保留通過基本檢查的 chunk checkpoint，可從已完成 chunk 續跑。",
+            technicalDetails: technicalDetails,
+            recoverable: true,
+            recoveryDirectory: directory.path,
+            partialTranscriptPath: nil
         )
     }
 

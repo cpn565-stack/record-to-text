@@ -24,6 +24,10 @@ final class CloudResumeCheckpointTests: XCTestCase {
             "gemini-3.7-flash"
         )
         XCTAssertNil(checkpoint.reusableSegments[2])
+        XCTAssertEqual(
+            checkpoint.speakerRoster?.identities.first?.canonicalLabel,
+            "講者甲"
+        )
     }
 
     func testRejectsDifferentSourceBackendAndOutsideDirectory() throws {
@@ -193,7 +197,16 @@ final class CloudResumeCheckpointTests: XCTestCase {
                     status: .failed,
                     failureMessage: "HTTP 503"
                 )
-            ]
+            ],
+            speakerRoster: SpeakerRoster(
+                identities: [
+                    SpeakerIdentity(
+                        canonicalLabel: "講者甲",
+                        firstSeenSegment: 1,
+                        confidence: .inferred
+                    )
+                ]
+            )
         )
         try JSONEncoder().encode(manifest).write(
             to: recovery.appendingPathComponent(

@@ -139,6 +139,56 @@ tests.check(
 )
 
 tests.check(
+    {
+        let request = ASRRequest(
+            jobID: "timeout-test",
+            audioPath: "/tmp/audio.wav",
+            outputPath: "/tmp/output.txt",
+            modelID: ASRModelDescriptor.appleSiliconBF16.id,
+            language: "Chinese",
+            prompt: "prompt",
+            terms: [],
+            modelCacheDirectory: "/tmp/models",
+            offline: true,
+            chunkDurationSeconds: 120
+        )
+        return HelperInactivityPolicy.hardTimeout(for: request) == 600
+    }(),
+    "Qwen BF16 hard timeout scales beyond the old fixed three minutes"
+)
+
+tests.check(
+    try {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("record-to-text-chunk-checkpoint-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directory = try LocalChunkCheckpoint.createSecureDirectory(in: root)
+        let checkpoint = directory.appendingPathComponent(
+            "segment-0001-of-0001.chunks.json"
+        )
+        try Data(
+            """
+            {
+              "schemaVersion": 1,
+              "fingerprint": "\(String(repeating: "a", count: 64))",
+              "totalChunks": 2,
+              "completedChunks": [
+                {"index": 0, "text": "已完成。", "containsSkippedAudio": false}
+              ]
+            }
+            """.utf8
+        ).write(to: checkpoint)
+        let attributes = try FileManager.default.attributesOfItem(
+            atPath: directory.path
+        )
+        let permissions = (attributes[.posixPermissions] as? NSNumber)?.intValue
+        return LocalChunkCheckpoint.containsUsableCheckpoint(in: root)
+            && permissions.map { $0 & 0o777 } == 0o700
+    }(),
+    "Local Qwen checkpoint discovery requires valid completed chunks and private directory permissions"
+)
+
+tests.check(
     try {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("record-to-text-self-test-\(UUID().uuidString)")
@@ -747,6 +797,80 @@ tests.check(
     "AudioSegmentManifest gates merge on one completion per ordered segment"
 )
 
+tests.check(
+    CloudAdaptiveSegmentPlanner.splitBoundary(
+        duration: 1_200,
+        splitDepth: 0,
+        silences: [
+            DetectedSilence(startSeconds: 480, endSeconds: 481),
+            DetectedSilence(startSeconds: 618, endSeconds: 620)
+        ]
+    ) == 619
+        && CloudAdaptiveSegmentPlanner.splitBoundary(
+            duration: 1_200,
+            splitDepth:
+                CloudAdaptiveSegmentPlanner.productionMaximumSplitDepth
+        ) == nil,
+    "Cloud adaptive segmentation prefers midpoint silence and obeys max depth"
+)
+
+tests.check(
+    try {
+        let first = AudioSegmentRecord(
+            segmentIndex: 1,
+            segmentCount: 2,
+            startSeconds: 0,
+            endSeconds: 1_200,
+            audioPath: "/tmp/segment-0001.mp3",
+            outputPath: "/tmp/segment-0001.txt"
+        )
+        let second = AudioSegmentRecord(
+            segmentIndex: 2,
+            segmentCount: 2,
+            startSeconds: 1_200,
+            endSeconds: 1_800,
+            audioPath: "/tmp/segment-0002.mp3",
+            outputPath: "/tmp/segment-0002.txt"
+        )
+        var manifest = AudioSegmentManifest(
+            schemaVersion: 3,
+            jobID: UUID(),
+            sourceDurationSeconds: 1_800,
+            maximumSegmentDurationSeconds: 1_200,
+            expectedSegmentCount: 2,
+            segments: [first, second]
+        )
+        try manifest.replaceSegment(
+            segmentIndex: 1,
+            with: [
+                AudioSegmentRecord(
+                    segmentIndex: 0,
+                    segmentCount: 0,
+                    startSeconds: 0,
+                    endSeconds: 600,
+                    audioPath: "/tmp/segment-0001-a.mp3",
+                    outputPath: "/tmp/segment-0001-a.txt",
+                    splitDepth: 1
+                ),
+                AudioSegmentRecord(
+                    segmentIndex: 0,
+                    segmentCount: 0,
+                    startSeconds: 600,
+                    endSeconds: 1_200,
+                    audioPath: "/tmp/segment-0001-b.mp3",
+                    outputPath: "/tmp/segment-0001-b.txt",
+                    splitDepth: 1
+                )
+            ]
+        )
+        return manifest.expectedSegmentCount == 3
+            && manifest.segments.map(\.segmentIndex) == [1, 2, 3]
+            && manifest.segments.allSatisfy { $0.segmentCount == 3 }
+            && manifest.segments.map(\.startSeconds) == [0, 600, 1_200]
+    }(),
+    "Adaptive cloud split renumbers a contiguous manifest"
+)
+
 private let retentionSnapshot = JobSnapshot(
     modelID: "mock/model",
     glossaryID: nil,
@@ -986,6 +1110,23 @@ tests.check(
             && user.components(separatedBy: "盛和塾").count - 1 == 1
     }(),
     "Gemini cloud prompt requests speaker turns and absolute time ranges without duplicating glossary terms"
+)
+
+tests.check(
+    {
+        var roster = SpeakerRoster()
+        roster.observe(
+            transcript: "彭建文：大家好，我是彭建文。\n郝哥：大家好，我是郝旭烈郝哥。",
+            segmentIndex: 1
+        )
+        let later = "建文：繼續下一題。\n豪哥：好，我補充。"
+        roster.observe(transcript: later, segmentIndex: 2)
+        return roster.identities.map(\.canonicalLabel) == ["彭建文", "郝旭烈"]
+            && roster.normalizingSpeakerLabels(in: later)
+                == "彭建文：繼續下一題。\n郝旭烈：好，我補充。"
+            && roster.promptInstruction?.contains("不要改名") == true
+    }(),
+    "Speaker roster keeps canonical labels across cloud segments"
 )
 
 tests.check(
@@ -1640,12 +1781,12 @@ tests.check(
 )
 
 tests.check(
-    GeminiTranscriptFinishReason.allowsUsableText("MAX_TOKENS")
+    !GeminiTranscriptFinishReason.allowsUsableText("MAX_TOKENS")
         && GeminiTranscriptFinishReason.allowsUsableText("stop")
         && GeminiTranscriptFinishReason.isTruncated("max_tokens")
         && !GeminiTranscriptFinishReason.allowsUsableText("OTHER")
         && GeminiTranscriptFinishReason.isSafetyBlock("SAFETY"),
-    "MAX_TOKENS with usable text is accepted; safety finish reasons stay blocked"
+    "MAX_TOKENS is fail-closed; only STOP is a complete transcript"
 )
 
 // MARK: - Process Tree Termination Test

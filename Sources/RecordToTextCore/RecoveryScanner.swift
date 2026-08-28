@@ -132,7 +132,8 @@ public enum RecoveryScanner {
         normalizedWAVFileName,
         segmentManifestFileName,
         segmentsDirectoryName,
-        partialTranscriptFileName
+        partialTranscriptFileName,
+        LocalChunkCheckpoint.directoryName
     ]
 
     public struct RecoveryMetadata: Codable, Equatable, Sendable {

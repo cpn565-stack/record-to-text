@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from pathlib import Path
+import json
 import os
 import sys
 import tempfile
@@ -141,6 +142,44 @@ class MLXRunnerTests(unittest.TestCase):
             self.assertFalse(output.exists())
             self.assertEqual(partial.read_text(encoding="utf-8"), "前一個 chunk 的正常內容。")
             self.assertNotIn("completed", [event_type for event_type, _ in events])
+
+    def test_retry_resumes_from_completed_chunk_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            request = self.make_request(directory)
+            first_events: list[tuple[str, dict]] = []
+            first_model = FakeModel([
+                FakeResult("第一塊內容。"),
+                RuntimeError("fake timeout"),
+            ])
+
+            with self.assertRaisesRegex(RuntimeError, "fake timeout"):
+                self.run_with_fake_runtime(request, first_model, first_events)
+
+            output = Path(request["outputPath"])
+            checkpoint = output.with_name(f"{output.name}.chunks.json")
+            self.assertTrue(checkpoint.exists())
+
+            second_events: list[tuple[str, dict]] = []
+            second_model = FakeModel([FakeResult("第二塊內容。")])
+            self.run_with_fake_runtime(request, second_model, second_events)
+
+            self.assertEqual(
+                output.read_text(encoding="utf-8"),
+                "第一塊內容。第二塊內容。",
+            )
+            self.assertTrue(checkpoint.exists())
+            checkpoint_payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+            self.assertEqual(len(checkpoint_payload["completedChunks"]), 2)
+            self.assertFalse(
+                output.with_name(f"{output.name}.partial.txt").exists()
+            )
+            self.assertTrue(
+                any(
+                    event_type == "log"
+                    and "沿用前 1/2 塊" in payload.get("message", "")
+                    for event_type, payload in second_events
+                )
+            )
 
 
 if __name__ == "__main__":

@@ -1041,9 +1041,12 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         if GeminiTranscriptFinishReason.isTruncated(normalizedFinishReason) {
             logger?(
                 "warning",
-                "Gemini 輸出達 maxOutputTokens，已收下現有逐字稿；結尾可能被截斷。"
+                "Gemini 輸出達 maxOutputTokens；現有文字只保存為未完成草稿，將由 coordinator 切小重試。"
             )
-            return sanitized
+            throw CloudOutputTruncatedError(
+                partialText: sanitized,
+                finishMessage: firstCandidate["finishMessage"] as? String
+            )
         }
         guard GeminiTranscriptFinishReason.allowsUsableText(normalizedFinishReason) else {
             throw VertexAIError.incompleteResponse(

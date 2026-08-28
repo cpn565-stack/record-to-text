@@ -116,8 +116,7 @@ public enum GeminiTranscriptFinishReason {
     }
 
     public static func allowsUsableText(_ raw: String) -> Bool {
-        let value = normalized(raw)
-        return value == "STOP" || value == "MAX_TOKENS"
+        normalized(raw) == "STOP"
     }
 }
 

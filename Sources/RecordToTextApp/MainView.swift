@@ -764,6 +764,11 @@ private struct JobRowView: View {
                                 viewModel.resumeCloudJobFromCheckpoint(job.id)
                             }
                             .buttonStyle(.link)
+                        } else if viewModel.canResumeLocalQwenJob(job) {
+                            Button("從已完成 Qwen chunk 續跑") {
+                                viewModel.resumeLocalQwenJobFromCheckpoint(job.id)
+                            }
+                            .buttonStyle(.link)
                         }
 
                         Button("在 Finder 顯示復原資料") {
