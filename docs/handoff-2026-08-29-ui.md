@@ -1,5 +1,7 @@
 # 交班單 — 2026-08-29 UI／0.2.0
 
+> **歷史 UI 交班。** 0.2.0 UI 與標題狀態仍有效；Reliability v2 工作 1–3 的後續自動化與文件收尾請見 `docs/handoff-2026-08-30-reliability-v2-closeout.md`。
+
 ## 安全停點
 
 - 分支：`codex/record-to-text-reliability-v2`
@@ -65,7 +67,7 @@
 
 - 不要把 `MAX_TOKENS` 截斷文字當正式稿（那是舊討論，0.2.0 這條線維持 fail-closed／切小）。
 - 不要為了認 App 再把版本寫回標題。
-- 尚未：窄視窗、深色模式、High Contrast、Reduce Motion 系統性目視；尚未在這輪跑新的真實 Gemini 付費回歸。
+- 本輪當時尚未做窄視窗、深色模式、High Contrast、Reduce Motion 系統性目視；後續已確認 760-point 最小寬度、深色模式與摺疊／展開狀態，High Contrast、Reduce Motion 與真實 active cloud job 仍未驗證。
 - `record-to-text2`（`d99b442`）是另一個 repo，與這條 reliability-v2 無關。
 
 ## 建議下一手

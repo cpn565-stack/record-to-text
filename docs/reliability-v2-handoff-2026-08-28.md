@@ -1,10 +1,12 @@
 # Reliability v2 安全停點與接手筆記（2026-08-28）
 
+> **歷史快照／已被後續交班取代。** 本文保留 2026-08-28 當時的工作樹與驗證狀態。Phase 4–6 後續已進入 `26da9aa`，視窗標題修正已進入 `ccc3431`，XCTest CI 修正已進入 `1d6870c`，MAX_TOKENS 整合測試已進入 `9c21834`。目前狀態請以 `docs/handoff-2026-08-30-reliability-v2-closeout.md` 與 `docs/reliability-v2-validation.md` 為準。
+
 ## Git 狀態
 
 - 分支：`codex/record-to-text-reliability-v2`
 - 基準：`7b3c426 feat: harden Gemini transcription and add model controls`
-- Reliability v2 主體已以 `5e7ff57` commit 並 push；Phase 4–6 後續修改尚未 commit、尚未 push。
+- Reliability v2 主體已以 `5e7ff57` commit 並 push；Phase 4–6 在 2026-08-28 當時尚未 commit／push，後續已進入 `26da9aa`。
 - 工作樹通過 `git diff --check`。
 - 私人錄音、逐字稿、API Key、token 均未加入工作樹。
 
@@ -27,7 +29,7 @@
 - 建立獨立分支。
 - CI 增加本分支 push 與 `workflow_dispatch` 入口。
 - 新增 `docs/reliability-v2-validation.md`，定義自動與真實驗收矩陣。
-- CI 修改尚未推送，因此 GitHub Actions 尚未執行。
+- 2026-08-28 當時 CI 修改尚未推送；後續 `9c21834` 的 GitHub Actions Run `33263989282` 已完整通過。
 
 ## 階段 4–6：後續實作
 
@@ -60,9 +62,10 @@
 - manifest split 後連續、重編號、無重疊。
 - 舊 cloud resume tests 未退化。
 
-### 未驗證
+### 後續驗證狀態（更新於 2026-08-30）
 
-- 尚缺一個完整 `TranscriptionEngine` mock，實際讓第一個 cloud call 回 `MAX_TOKENS`、子段回 `STOP`，驗證最終只交付子段合併稿。
+- 完整 `TranscriptionEngine.run` 整合測試已於 `fdeaef9`、`a3ac87d`、`9c21834` 補齊：父段 `MAX_TOKENS` 後子段全部 `STOP` 才交付正式稿；子段非重試錯誤與最大 split depth 維持 fail-closed。
+- GitHub Actions Run `33263989282` 已通過 178 項 XCTest，`CloudAdaptiveSegmentationTests` 6 項全綠。
 - 尚未跑真實付費 Gemini 截斷案例。
 
 ## 階段 2：跨段講者一致性已完成自動化實作與本機契約驗證
@@ -159,16 +162,15 @@
    scripts/run-checks.sh
    ```
 
-3. 新增完整 cloud adaptive split mock pipeline test。
-4. 以短音檔驗證 Vertex／AI Studio `MAX_TOKENS` 行為；設定支出上限，不重複大量付費測試。
+3. cloud adaptive split mock pipeline test 與完整 Xcode CI 已於 `9c21834`／Run `33263989282` 完成。
+4. 以短音檔驗證真實 Vertex／AI Studio `MAX_TOKENS` 行為；設定支出上限，不重複大量付費測試。
 5. 用 30 分鐘多人錄音驗證 speaker roster，檢查 canonical labels 是否誤合併。
 6. 用 Qwen BF16 先跑 30 分鐘，再跑原 173 分鐘 soak；測試 timeout restart 與手動 chunk resume。
-7. 以 App GUI 驗證 recovery scan、resume button、取消與清理。
-8. 推送本分支觸發完整 Xcode／XCTest CI。
-9. 真實驗收完成前不要 commit 到主分支，也不要替換 `/Applications` 正式使用版本。
+7. 以 App GUI 驗證 active cloud progress、High Contrast、Reduce Motion、recovery scan、resume button、取消與清理。
+8. 真實驗收完成前不要合併主分支、建立 Stable release 或替換正式使用版本。
 
 ## 回滾
 
-- 現在沒有 commit；切回 `feature/gemini-3.7-quality-hardening` 即可回到 `7b3c426`。
-- 不要使用 `git reset --hard`；目前工作樹包含完整未提交實作。
+- 本段原本的「沒有 commit」只描述 2026-08-28 當時狀態；目前可靠停點是 `9c21834`，不可再把 `7b3c426` 當成目前 HEAD。
+- 不要使用 `git reset --hard`；需回看舊基準時使用獨立 worktree，避免破壞目前分支。
 - 未刪除任何既有復原資料、模型或使用者輸出。

@@ -1,7 +1,8 @@
 # record-to-text 產品與技術決策
 
-版本：0.1
-日期：2026-07-30
+版本：0.2
+初版日期：2026-07-30
+最後更新：2026-08-30
 
 ## 1. 使用方式
 
@@ -342,20 +343,23 @@ Phase 0 完成時必須回答：
 
 ## 5. 明確尚未完成
 
-接續總表見 `docs/NEXT_STEPS.md`（2026-08-02 已與 main `38de33b` 對齊）。摘要：
+接續總表見 `docs/NEXT_STEPS.md`（2026-08-30 已與 `codex/record-to-text-reliability-v2` 的 `9c21834` 對齊）。摘要：
 
 **仍未完成**
 
-- ffprobe／ffmpeg／OpenCC timeout 與磁碟空間檢查。
-- 每段模型重複載入優化；最近工作檔案遺失標示。
 - 自動檢查更新（PD-015，約每週一次）— **程式尚未實作**。
 - 正式 Runtime artifact、模型 installer 完整 digest 流程。
 - Universal 2；Intel CPU 推論（Blocked／Experimental）。
 - Developer ID、notarization、Stable DMG、乾淨帳號首次啟動。
 - 31／65／120 分鐘系統性 Metal soak 與正式「任意長度」產品承諾。
-- 完整 Xcode XCTest 需在有完整 Xcode 的環境／CI 執行（CLTs 僅 self-test）。
+- 真實 Google AI Studio／Vertex AI 的 `MAX_TOKENS` 自適應切段回歸；目前完成的是本地 URLProtocol 整合測試。
+- 30 分鐘多人錄音 speaker roster、High Contrast／Reduce Motion、真實 active cloud job 與 recovery cleanup GUI 驗收。
 
-**已不再列為「尚未做」的（本機／main 已具備）**
+**已不再列為「尚未做」的（目前 reliability-v2 分支具備）**
 
 - Apple Silicon 真實 ASR 端到端（Developer Mode + 本機 MLX；非正式公證路徑）。
 - Coordinator 20 分預切、120 秒內切、16384 tokens、缺口標記、長駐 JSONL、Prompt echo 清除。
+- ffprobe／ffmpeg／OpenCC timeout、轉錄前磁碟空間檢查、最近工作來源／輸出檔遺失標示。
+- 同 runtime／job 的 engine、persistent helper 與 model cache reuse；真實長音的耗時、記憶體與 `Fetching 11 files` 改善幅度仍待量測。
+- 完整 Xcode CI：`9c21834` 對應 GitHub Actions Run `33263989282` 通過 178 項 XCTest，0 failures。
+- `MAX_TOKENS` 自適應切段成功、子段失敗與最大深度三條 `TranscriptionEngine.run` 整合路徑已通過 XCTest；不代表真實 Google API 已驗證。

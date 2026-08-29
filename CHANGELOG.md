@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- 新增完整 `TranscriptionEngine` 雲端自適應切段整合測試：父段 `MAX_TOKENS` 後切成子段重試，只有所有子段 `STOP` 才交付正式稿；子段失敗或達最大切段深度時維持 fail-closed 並保留 recovery。
+
+### Fixed
+
+- 修正 adaptive segmentation XCTest 的 optional 編譯錯誤，恢復完整 Xcode CI；`9c21834` 對應的 GitHub Actions 已執行 178 項 XCTest，0 failures。
+
 ### Planned
 
 - 自動檢查更新（PD-015）：預設約每 7 天檢查 GitHub Releases；有新版再提示；可手動檢查；細節見 `docs/NEXT_STEPS.md`。
@@ -43,7 +51,7 @@
 - 最近工作標示來源或輸出檔案已移動／刪除；相同 runtime 的佇列工作重用 engine 與長駐 helper。
 - 錄音加入佇列後，可在「開始轉文字」旁將單一錄音切成前後兩個時間範圍工作：前半先處理，後半排隊；兩段各自輸出有順序的 TXT。
 - 可從前端選取多份 TXT，依分段編號排序後合併成新檔；拒絕空白／不合法輸出且不覆寫既有檔案。
-- 視窗標題顯示行銷版本與 build，方便分辨同 bundle id 的多份 App。
+- 視窗標題維持純 `record-to-text`；行銷版本與 build 改由設定頁及「複製除錯資訊」提供。
 
 ### Fixed
 

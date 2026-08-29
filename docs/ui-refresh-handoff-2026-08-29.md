@@ -1,5 +1,7 @@
 # UI refresh handoff — 2026-08-29
 
+> **Historical snapshot / superseded.** This file preserves the state before the 0.2.0 closeout. The UI work was later committed in `26da9aa`, the window-title reversal in `ccc3431`, and the current reliability-v2 status is recorded in `docs/handoff-2026-08-30-reliability-v2-closeout.md`.
+
 ## Safe stopping point
 
 - Current branch: `codex/record-to-text-reliability-v2`.
@@ -51,17 +53,22 @@
 ## Follow-up 2026-08-29 (Grok)
 
 - Confirmed stale-bundle problem: `dist`, `/Applications/record-to-text.app`, and `/Applications/record-to-text 2.app` previously had three different SHA-256 hashes; two copies were running at once.
-- Window title now includes marketing version and build, e.g. `record-to-text 0.1.2 (1)`, also shown under the subtitle. Hover the caption for the bundle path.
+- Window title was temporarily changed to include marketing version and build. This was later reversed by `ccc3431`; the current title is the plain product name `record-to-text`.
 - Quit extra copies, launched the rebuilt `dist` App, visually confirmed collapsed main window: `轉錄設定` disclosure (not the old standalone `專有名詞` card), drop zone is the main intake, queue has no duplicate start button in the intake card.
 - Replaced `/Applications/record-to-text.app` so it matches `dist` (`eb982766…`). Left `/Applications/record-to-text 2.app` untouched.
 - Still not visually reviewed: expanded 轉錄設定, a real active cloud job tint/leading line, narrow window, dark mode, High Contrast, Reduce Motion, or a live Google API run.
-- Still no commit or push.
+- At this snapshot there was still no commit or push; the UI work was subsequently committed and pushed in `26da9aa` and `ccc3431`.
+
+## Follow-up 2026-08-29/30 (0.2.0)
+
+- `/Applications/record-to-text.app` and `dist/record-to-text.app` were confirmed as 0.2.0 (1) with matching executable hashes at the time of installation review.
+- The installed 0.2.0 UI was visually checked in dark mode with both collapsed and expanded `轉錄設定` states.
+- The window is intentionally constrained to a 760-point minimum width; that minimum-width layout showed no obvious clipping in the reviewed state.
+- The window title is the plain `record-to-text`; version/build remain available in Settings and copied debug information.
+- Still unverified: a real active cloud job card/progress transition, High Contrast, Reduce Motion, and a live Google API regression.
 
 ## Suggested next steps
 
-1. Resolve which App bundle macOS is launching when several copies share the same bundle identifier.
-2. Launch the exact `dist/record-to-text.app` executable and confirm the main window contains the `轉錄設定` disclosure row rather than the old standalone `專有名詞` card.
-3. Visually check collapsed and expanded states, a queued job, and an active cloud job at normal and narrow window widths.
-4. If the layout is accepted, decide whether to replace the `/Applications` copy.
-5. Only after visual acceptance, review the full dirty diff and decide what should be committed and pushed.
-
+1. Run a real multi-segment cloud job and verify the active card, current-segment estimate, 90% cap, and completed-segment transition.
+2. Review High Contrast and Reduce Motion without changing the production progress contract.
+3. Keep using exact bundle paths when multiple copies share `com.specifique.record-to-text`; do not re-add version text to the window title as an identification workaround.

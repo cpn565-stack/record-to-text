@@ -1,12 +1,12 @@
 # 下一次接續
 
-更新日期：2026-08-02  
-基準 commit：`38de33b`（main）  
-目前 checkpoint：**Phase 0 / Apple Silicon Developer Mode MVP** — 不是可交付一般使用者的 Stable DMG。
+更新日期：2026-08-30
+基準 commit：`9c21834`（`codex/record-to-text-reliability-v2`）
+目前 checkpoint：**0.2.0 / Reliability v2 自動化收尾完成** — 仍不是可交付一般使用者的 Stable DMG。
 
 ---
 
-## 已完成（已合併進 main）
+## 已完成（目前 reliability-v2 分支具備）
 
 ### 長錄音與 token 防護
 
@@ -55,7 +55,6 @@
 | 6 | **輸出契約再驗證** | 新增 final output contract，檢查 BOM、NUL、Prompt echo，並在 segment、merge、OpenCC 後再次驗證。 |
 | 7 | **手動 TXT 合併** | 可選取多份 TXT，依分段編號排序合併成新檔；原始檔案不覆寫，後續 LLM 可直接使用。 |
 | 15 | **前端等分切片佇列** | 錄音加入佇列後，可在「開始轉文字」旁將單一來源切成前後兩個時間範圍工作；第一段先處理，第二段留在佇列，各自產生有順序的 TXT。 |
-| 7 | **手動 TXT 合併** | 可選取多份 TXT，依分段編號排序合併成新檔；原始檔案不覆寫，後續 LLM 可直接使用。 |
 
 ## 已完成（2026-08-28，Reliability v2 Phase 4–6）
 
@@ -64,6 +63,26 @@
 | **4 啟動效能與復原 UX（P1）** | 模型快取與 RecoveryScanner 改在 utility-priority 背景任務執行；加入取消／generation gate，避免舊結果覆蓋新選擇；復原畫面顯示掃描中與完成時間。 |
 | **5 CI、版本、安裝與交付（P1）** | `Config/version.env` 成為單一版本來源；CI 避免重複 App bundle 建置，強制 150 MiB 體積門檻，產生未簽署測試 DMG 與 SHA-256 artifact。 |
 | **6 架構整理、repo 清理、體積（P2）** | 啟動盤點邏輯抽成 `StartupInventory`；移除一次性 Gemini patcher；SwiftPM 改為明確打包 3 支 helper，防止 `__pycache__` 進入 App；加入 repo hygiene 與建置體積 gate。 |
+
+## 已完成（2026-08-29，Reliability v2 自動化收尾）
+
+| 項目 | 結果 |
+|---|---|
+| **工作 1：恢復完整 XCTest CI** | `1d6870c` 修正 optional XCTest 編譯；GitHub Actions Run `33251816818` 通過 175 項 XCTest。 |
+| **工作 2：MAX_TOKENS 自適應切段整合測試** | `fdeaef9`、`a3ac87d`、`9c21834` 直接以 `TranscriptionEngine.run` 驗證父段截斷後子段成功、非重試錯誤與最大深度 fail-closed。 |
+| **目前完整 CI** | `9c21834` 對應 Run `33263989282`：178 項 XCTest、development DMG、App bundle 驗證與 artifact 上傳全部通過。 |
+
+以上是自動化、決定性證據；沒有呼叫真實 Google API，也沒有取代真實長音或 GUI 驗收。
+
+## 驗證待辦（程式已實作，不等於尚未做）
+
+| 項目 | 尚缺證據 |
+|---|---|
+| **真實 Gemini 自適應切段** | 以受控短音檔驗證真實 AI Studio／Vertex `MAX_TOKENS`、子段 `STOP`、segment coverage 與成本。 |
+| **Speaker roster** | 30 分鐘多人錄音、相似姓名、中途加入第三位講者，確認 heuristic 不會錯併。 |
+| **Qwen soak／復原** | 30 分鐘與原 173 分鐘 BF16；timeout restart、手動 chunk resume、成功後 recovery cleanup。 |
+| **GUI／輔助使用** | 真實 active cloud job 的 90% 進度、High Contrast、Reduce Motion、recovery scan／resume／取消。 |
+| **效能量測** | engine／helper reuse 的耗時、記憶體與 `Fetching 11 files` 前後比較。 |
 
 ## 待修改／尚未做（優先序）
 
@@ -82,7 +101,6 @@
 | 10 | **Intel 實機** | PD-005：Experimental／Blocked；x86_64 Runtime + 真機轉錄前不得宣稱支援。 |
 | 11 | **Universal 2** | arm64 + x86_64 正式建置與驗收。 |
 | 12 | **Developer ID、公證、Stable DMG** | 簽署、notarization、乾淨帳號首次啟動、正式發佈流程。 |
-| 13 | **長音 soak 與品質** | 31／65／120 分鐘系統性 soak；極密語 30s 葉節仍可能缺口；辨識品質／人工評分非 OpenCC 能解。 |
 | 14 | **品牌／商標** | PD-012：公開名稱不以 Qwen 暗示官方關係；發佈前品牌檢視。 |
 
 ---
@@ -110,7 +128,8 @@
 
 ## 建議下一輪開工順序
 
-1. 真實 Metal 長音檔 soak 與效能／記憶體測量
-2. 檢查分段交界的漏字／重複，必要時才加入 overlap 與去重
-3. 失敗後從已完成段落續跑（長檔重工優化）
-4. Runtime installer／簽署／公證（P3，與產品發佈時程綁定）
+1. 受控真實 Gemini `MAX_TOKENS` 與 segment coverage 回歸
+2. 30 分鐘多人 speaker roster 與 30／173 分鐘 Qwen soak
+3. 真實 active cloud job、High Contrast、Reduce Motion 與 recovery cleanup GUI 驗收
+4. PD-015 自動檢查更新
+5. Runtime installer／簽署／公證（P3，與產品發佈時程綁定）
