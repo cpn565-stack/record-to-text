@@ -131,11 +131,6 @@ struct MainView: View {
                 Text(viewModel.appSubtitle)
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                Text(RecordToTextApp.windowTitle)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .textSelection(.enabled)
-                    .help(RecordToTextApp.bundlePathLabel)
             }
 
             Spacer()
