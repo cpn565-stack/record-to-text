@@ -374,7 +374,7 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
 
         let parentTruncatedText = "這段截斷文字不得進入正式稿"
         let leftChildText = "[00:00 - 00:02]\n講者 1：左子段完整稿。"
-        let childError = GoogleAIStudioError.requestFailed(statusCode: 500, message: "Internal server error")
+        let childError = GoogleAIStudioError.requestFailed(statusCode: 400, message: "Invalid argument")
 
         let transport = MockAIStudioTransport(responses: [
             .success((finishReason: "MAX_TOKENS", text: parentTruncatedText)),
@@ -454,7 +454,8 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
             XCTAssertEqual(manifest.segments[1].status, .failed)
             XCTAssertEqual(manifest.segments[1].completedEventCount, 0)
             XCTAssertEqual(manifest.segments[1].splitDepth, 1)
-            XCTAssertTrue(manifest.segments[1].failureMessage?.contains("500") == true)
+            XCTAssertTrue(manifest.segments[1].failureMessage?.contains("400") == true)
+            XCTAssertTrue(manifest.segments[1].failureMessage?.contains("Invalid argument") == true)
 
             // 3. Assert partial transcript in recovery contains completed child and NOT parent truncated text
             let partialTranscriptURL = recoveryDir.appendingPathComponent("partial-transcript.txt")
