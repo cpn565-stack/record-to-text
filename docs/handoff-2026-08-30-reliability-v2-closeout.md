@@ -7,8 +7,9 @@
 - 分支：`codex/record-to-text-reliability-v2`
 - 產品版本：`0.2.0 (1)`
 - 工作 2 自動化停點：`9c218344509d51b4c0fecbecec2e91a52725d2ca`
-- `9c21834` 本機與 `origin/codex/record-to-text-reliability-v2` 已確認一致。
-- 工作 3 是 docs-only 同步；沒有修改、重寫或回退 `Sources/`、`Tests/` 的已驗證實作。
+- 工作 3 docs-only commit：`30153df docs: reconcile reliability v2 status after 0.2.0`
+- `30153df` 對應 GitHub Actions Run `33264569435`：178 項 XCTest、development DMG、App bundle 驗證與 artifact 上傳均成功。
+- 工作 3 沒有修改、重寫或回退 `Sources/`、`Tests/` 的已驗證實作。
 
 ## 工作 1：XCTest CI 修復
 
@@ -65,6 +66,6 @@
 
 1. 先讀本交班、`docs/NEXT_STEPS.md` 與 `docs/reliability-v2-validation.md`。
 2. 先確認 branch、HEAD、remote SHA 與工作樹，不要 reset／revert。
-3. 不要重做工作 1、2；完整自動化證據以 `9c21834`／Run `33263989282` 為準。
+3. 不要重做工作 1、2；程式自動化證據以 `9c21834`／Run `33263989282` 為準，docs-only 發布證據以 `30153df`／Run `33264569435` 為準。
 4. 下一輪優先取得真實 runtime 證據；mock／XCTest／CI 不能代替真實 Gemini、MLX、GUI、簽署或正式發布。
 5. 若要測真實雲端，先設定支出上限，使用短音檔與單一受控案例，避免重複大量付費測試。

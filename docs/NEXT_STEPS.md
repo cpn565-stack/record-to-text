@@ -70,7 +70,7 @@
 |---|---|
 | **工作 1：恢復完整 XCTest CI** | `1d6870c` 修正 optional XCTest 編譯；GitHub Actions Run `33251816818` 通過 175 項 XCTest。 |
 | **工作 2：MAX_TOKENS 自適應切段整合測試** | `fdeaef9`、`a3ac87d`、`9c21834` 直接以 `TranscriptionEngine.run` 驗證父段截斷後子段成功、非重試錯誤與最大深度 fail-closed。 |
-| **目前完整 CI** | `9c21834` 對應 Run `33263989282`：178 項 XCTest、development DMG、App bundle 驗證與 artifact 上傳全部通過。 |
+| **目前完整 CI** | 工作 2：`9c21834`／Run `33263989282`；docs-only 收尾：`30153df`／Run `33264569435`。兩者均通過 178 項 XCTest、development DMG、App bundle 驗證與 artifact 上傳。 |
 
 以上是自動化、決定性證據；沒有呼叫真實 Google API，也沒有取代真實長音或 GUI 驗收。
 

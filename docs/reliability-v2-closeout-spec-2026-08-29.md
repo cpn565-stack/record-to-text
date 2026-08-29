@@ -23,7 +23,7 @@
 |---|---|---|
 | 1. XCTest／CI 修復 | `1d6870c`；GitHub Actions Run `33251816818` | 175 項 XCTest，0 failures。 |
 | 2. MAX_TOKENS 整合測試 | `fdeaef9`、`a3ac87d`、`9c21834`；Run `33263989282` | 178 項 XCTest，成功／子段失敗／最大深度三條整合路徑全綠。 |
-| 3. 文件一致性 | 2026-08-30 docs-only 同步 | 更新 CHANGELOG、決策、NEXT_STEPS、validation 與歷史 handoff；不修改 Sources／Tests。 |
+| 3. 文件一致性 | `30153df`；Run `33264569435` | 更新 CHANGELOG、決策、NEXT_STEPS、validation 與歷史 handoff；不修改 Sources／Tests，分支 CI 仍通過 178 項 XCTest。 |
 
 工作 2 的證據來自本地 URLProtocol／短音檔 fixture 與完整 CI，不是付費 Gemini API 的實機證據。
 

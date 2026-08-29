@@ -5,7 +5,8 @@
 - 基準 commit：`7b3c426`
 - 實作分支：`codex/record-to-text-reliability-v2`
 - 目前自動化停點：`9c218344509d51b4c0fecbecec2e91a52725d2ca`
-- 最新完整 CI：GitHub Actions Run `33263989282`，178 項 XCTest，0 failures；development DMG、App bundle 驗證與 artifact 上傳均成功。
+- 工作 2 CI：`9c21834`／Run `33263989282`，178 項 XCTest，0 failures。
+- 最新 docs-only 分支 CI：`30153df`／Run `33264569435`，同樣通過 178 項 XCTest、development DMG、App bundle 驗證與 artifact 上傳。
 - 私人錄音、逐字稿與絕對路徑不得加入 Git。
 - Mock／self-test 只能證明契約與流程，不能代替真實 Gemini、MLX、GUI 或長音驗收。
 
