@@ -98,6 +98,7 @@ public final class TranscriptionEngine {
     private let vertexAIBackend: VertexAIGeminiBackend
     private let sleepPrevention: SleepPreventionService
     private let maximumASRSegmentDuration: TimeInterval
+    private let cloudAdaptiveMinimumChildDuration: TimeInterval
     private let cancellationLock = NSLock()
     private var cancellationRequested = false
 
@@ -184,7 +185,7 @@ public final class TranscriptionEngine {
         }
     }
 
-    public init(
+    public convenience init(
         runtime: ResolvedRuntime,
         paths: ApplicationPaths,
         runner: ProcessRunner = ProcessRunner(),
@@ -193,6 +194,31 @@ public final class TranscriptionEngine {
         sleepPrevention: SleepPreventionService = SleepPreventionService(),
         maximumASRSegmentDuration: TimeInterval =
             AudioSegmentPlanner.productionMaximumDuration
+    ) {
+        self.init(
+            runtime: runtime,
+            paths: paths,
+            runner: runner,
+            googleAIStudioBackend: googleAIStudioBackend,
+            vertexAIBackend: vertexAIBackend,
+            sleepPrevention: sleepPrevention,
+            maximumASRSegmentDuration: maximumASRSegmentDuration,
+            cloudAdaptiveMinimumChildDuration:
+                CloudAdaptiveSegmentPlanner.productionMinimumChildDuration
+        )
+    }
+
+    internal init(
+        runtime: ResolvedRuntime,
+        paths: ApplicationPaths,
+        runner: ProcessRunner = ProcessRunner(),
+        googleAIStudioBackend: GoogleAIStudioBackend? = nil,
+        vertexAIBackend: VertexAIGeminiBackend? = nil,
+        sleepPrevention: SleepPreventionService = SleepPreventionService(),
+        maximumASRSegmentDuration: TimeInterval =
+            AudioSegmentPlanner.productionMaximumDuration,
+        cloudAdaptiveMinimumChildDuration: TimeInterval =
+            CloudAdaptiveSegmentPlanner.productionMinimumChildDuration
     ) {
         self.runtime = runtime
         self.paths = paths
@@ -209,6 +235,7 @@ public final class TranscriptionEngine {
         self.vertexAIBackend = vertexAIBackend ?? VertexAIGeminiBackend(authService: GCloudAuthService(runner: runner))
         self.sleepPrevention = sleepPrevention
         self.maximumASRSegmentDuration = maximumASRSegmentDuration
+        self.cloudAdaptiveMinimumChildDuration = cloudAdaptiveMinimumChildDuration
     }
 
     public func run(
@@ -1277,7 +1304,8 @@ public final class TranscriptionEngine {
         return CloudAdaptiveSegmentPlanner.splitBoundary(
             duration: record.durationSeconds,
             splitDepth: record.splitDepth ?? 0,
-            silences: silences
+            silences: silences,
+            minimumChildDuration: cloudAdaptiveMinimumChildDuration
         )
     }
 
