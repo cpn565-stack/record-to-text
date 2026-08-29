@@ -107,6 +107,24 @@ private final class MockAIStudioTransport: @unchecked Sendable {
                 let data = try JSONSerialization.data(withJSONObject: payload)
                 return (response, data)
             case let .failure(error):
+                if let studioError = error as? GoogleAIStudioError,
+                   case let .requestFailed(statusCode, message) = studioError {
+                    let response = HTTPURLResponse(
+                        url: url,
+                        statusCode: statusCode,
+                        httpVersion: nil,
+                        headerFields: ["Content-Type": "application/json"]
+                    )!
+                    let payload: [String: Any] = [
+                        "error": [
+                            "code": statusCode,
+                            "message": message,
+                            "status": "INVALID_ARGUMENT"
+                        ]
+                    ]
+                    let data = try JSONSerialization.data(withJSONObject: payload)
+                    return (response, data)
+                }
                 throw error
             }
         }
