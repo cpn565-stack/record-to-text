@@ -3,15 +3,17 @@ import XCTest
 @testable import RecordToTextCore
 
 final class CloudAdaptiveSegmentationTests: XCTestCase {
-    func testSplitBoundaryPrefersNearestEligibleSilence() {
-        let boundary = CloudAdaptiveSegmentPlanner.splitBoundary(
-            duration: 1_200,
-            splitDepth: 0,
-            silences: [
-                DetectedSilence(startSeconds: 480, endSeconds: 481),
-                DetectedSilence(startSeconds: 618, endSeconds: 620),
-                DetectedSilence(startSeconds: 900, endSeconds: 901)
-            ]
+    func testSplitBoundaryPrefersNearestEligibleSilence() throws {
+        let boundary = try XCTUnwrap(
+            CloudAdaptiveSegmentPlanner.splitBoundary(
+                duration: 1_200,
+                splitDepth: 0,
+                silences: [
+                    DetectedSilence(startSeconds: 480, endSeconds: 481),
+                    DetectedSilence(startSeconds: 618, endSeconds: 620),
+                    DetectedSilence(startSeconds: 900, endSeconds: 901)
+                ]
+            )
         )
         XCTAssertEqual(boundary, 619, accuracy: 0.001)
     }
