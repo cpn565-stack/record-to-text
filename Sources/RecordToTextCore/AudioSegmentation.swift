@@ -58,6 +58,7 @@ public enum AudioSegmentStatus: String, Codable, Equatable, Sendable {
     case transcribing
     case completed
     case completedWithGaps
+    case blockedBySafety
     case failed
 }
 
@@ -171,6 +172,18 @@ public struct AudioSegmentManifest: Codable, Equatable, Sendable {
     }
 
     public func validatedCompletedSegments() throws -> [AudioSegmentRecord] {
+        try validatedSegments(allowingSafetyBlocks: false)
+    }
+
+    public func validatedSegmentsAllowingSafetyBlocks() throws
+        -> [AudioSegmentRecord]
+    {
+        try validatedSegments(allowingSafetyBlocks: true)
+    }
+
+    private func validatedSegments(
+        allowingSafetyBlocks: Bool
+    ) throws -> [AudioSegmentRecord] {
         guard expectedSegmentCount > 0, segments.count == expectedSegmentCount else {
             throw AudioSegmentationError.segmentCountMismatch(
                 expected: expectedSegmentCount,
@@ -186,11 +199,14 @@ public struct AudioSegmentManifest: Codable, Equatable, Sendable {
             )
         }
         for segment in segments {
-            guard
-                (segment.status == .completed
-                    || segment.status == .completedWithGaps),
-                segment.completedEventCount == 1
-            else {
+            let isCompleted = (
+                segment.status == .completed
+                    || segment.status == .completedWithGaps
+            ) && segment.completedEventCount == 1
+            let isAllowedSafetyGap = allowingSafetyBlocks
+                && segment.status == .blockedBySafety
+                && segment.completedEventCount == 0
+            guard isCompleted || isAllowedSafetyGap else {
                 throw AudioSegmentationError.segmentIncomplete(
                     index: segment.segmentIndex,
                     status: segment.status,

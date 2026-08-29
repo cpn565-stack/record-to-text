@@ -659,6 +659,13 @@ struct SettingsView: View {
         .onAppear {
             viewModel.refreshSelectedModelCacheStatus()
         }
+        .overlay(alignment: .topTrailing) {
+            if viewModel.isModelCacheStatusRefreshing {
+                ProgressView()
+                    .controlSize(.small)
+                    .help("正在背景檢查模型快取")
+            }
+        }
     }
 
     private var localQwenRuntimeSettings: some View {

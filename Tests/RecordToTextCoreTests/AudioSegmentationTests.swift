@@ -150,6 +150,34 @@ final class AudioSegmentationTests: XCTestCase {
         }
     }
 
+    func testManifestAllowsOnlyExplicitSafetyGapForPartialCloudOutput() throws {
+        let plan = try AudioSegmentPlanner.makePlan(sourceDuration: 31 * 60)
+        var manifest = makeManifest(plan: plan)
+        try manifest.mark(
+            segmentIndex: 2,
+            status: .blockedBySafety,
+            completedEventCount: 0,
+            failureMessage: "Google safety block"
+        )
+
+        XCTAssertThrowsError(try manifest.validatedCompletedSegments())
+        XCTAssertEqual(
+            try manifest.validatedSegmentsAllowingSafetyBlocks()
+                .map(\.status),
+            [.completed, .blockedBySafety]
+        )
+
+        try manifest.mark(
+            segmentIndex: 2,
+            status: .failed,
+            completedEventCount: 0,
+            failureMessage: "HTTP 503"
+        )
+        XCTAssertThrowsError(
+            try manifest.validatedSegmentsAllowingSafetyBlocks()
+        )
+    }
+
     func testManifestRejectsRepeatedCompletionEvent() throws {
         let plan = try AudioSegmentPlanner.makePlan(sourceDuration: 31 * 60)
         var manifest = makeManifest(plan: plan)

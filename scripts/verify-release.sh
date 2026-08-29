@@ -7,6 +7,8 @@ REQUIRE_UNIVERSAL="${REQUIRE_UNIVERSAL:-0}"
 ALLOW_UNSIGNED="${ALLOW_UNSIGNED:-0}"
 CHECK_APP_SIZE="${CHECK_APP_SIZE:-0}"
 MAX_APP_BYTES="${MAX_APP_BYTES:-268435456}"
+EXPECTED_VERSION="${EXPECTED_VERSION:-}"
+EXPECTED_BUILD_NUMBER="${EXPECTED_BUILD_NUMBER:-}"
 
 if [[ -z "${APP_PATH}" || ! -d "${APP_PATH}" ]]; then
   print -u2 "Usage: $0 <record-to-text.app> [record-to-text.dmg]"
@@ -27,6 +29,21 @@ if [[ "${PLIST_EXECUTABLE}" != "record-to-text" ]]; then
   print -u2 "Expected CFBundleExecutable record-to-text; found ${PLIST_EXECUTABLE}."
   exit 1
 fi
+PLIST_VERSION="$(/usr/libexec/PlistBuddy \
+  -c "Print :CFBundleShortVersionString" \
+  "${APP_PATH}/Contents/Info.plist")"
+PLIST_BUILD="$(/usr/libexec/PlistBuddy \
+  -c "Print :CFBundleVersion" \
+  "${APP_PATH}/Contents/Info.plist")"
+if [[ -n "${EXPECTED_VERSION}" && "${PLIST_VERSION}" != "${EXPECTED_VERSION}" ]]; then
+  print -u2 "Expected version ${EXPECTED_VERSION}; found ${PLIST_VERSION}."
+  exit 1
+fi
+if [[ -n "${EXPECTED_BUILD_NUMBER}" && "${PLIST_BUILD}" != "${EXPECTED_BUILD_NUMBER}" ]]; then
+  print -u2 "Expected build ${EXPECTED_BUILD_NUMBER}; found ${PLIST_BUILD}."
+  exit 1
+fi
+print "Version: ${PLIST_VERSION} (${PLIST_BUILD})"
 MINIMUM_OS="$(/usr/libexec/PlistBuddy \
   -c "Print :LSMinimumSystemVersion" \
   "${APP_PATH}/Contents/Info.plist")"
@@ -62,12 +79,20 @@ if [[ -n "${FORBIDDEN}" ]]; then
 fi
 
 RESOURCE_BUNDLE="${APP_PATH}/Contents/Resources/record-to-text_RecordToTextApp.bundle"
-for helper in qwen_asr_mlx_runner.py qwen_asr_transformers_runner.py; do
+for helper in qwen_asr_chunking.py qwen_asr_mlx_runner.py qwen_asr_transformers_runner.py; do
   if [[ ! -f "${RESOURCE_BUNDLE}/${helper}" ]]; then
     print -u2 "Missing packaged helper resource: ${RESOURCE_BUNDLE}/${helper}"
     exit 1
   fi
 done
+
+PACKAGED_CACHE="$(find "${RESOURCE_BUNDLE}" \
+  \( -name '__pycache__' -o -name '*.pyc' \) -print)"
+if [[ -n "${PACKAGED_CACHE}" ]]; then
+  print -u2 "Generated Python cache must not be packaged in the App:"
+  print -u2 "${PACKAGED_CACHE}"
+  exit 1
+fi
 
 for tool in ffmpeg ffprobe; do
   bundled_tool="${APP_PATH}/Contents/Helpers/${tool}"

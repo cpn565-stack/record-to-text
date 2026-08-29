@@ -224,6 +224,58 @@ final class GeminiCloudResponseValidationTests: XCTestCase {
         }
     }
 
+    func testPipelineContinuesOnlyForExplicitGoogleSafetyBlocks() {
+        let safetyDiagnostics = GeminiPromptBlockDiagnostics(
+            httpStatusCode: 200,
+            blockReason: "PROHIBITED_CONTENT"
+        )
+
+        XCTAssertTrue(
+            TranscriptionEngine.isExplicitGoogleSafetyBlock(
+                GoogleAIStudioError.promptBlocked(safetyDiagnostics)
+            )
+        )
+        XCTAssertTrue(
+            TranscriptionEngine.isExplicitGoogleSafetyBlock(
+                VertexAIError.prohibitedContent("SAFETY")
+            )
+        )
+        XCTAssertFalse(
+            TranscriptionEngine.isExplicitGoogleSafetyBlock(
+                GoogleAIStudioError.promptBlocked(
+                    Self.sampleOtherDiagnostics
+                )
+            )
+        )
+        XCTAssertFalse(
+            TranscriptionEngine.isExplicitGoogleSafetyBlock(
+                VertexAIError.requestFailed(
+                    statusCode: 503,
+                    message: "unavailable"
+                )
+            )
+        )
+    }
+
+    func testSafetyGapMarkerIncludesSegmentAndTimeRange() {
+        let marker = TranscriptionEngine.cloudSafetyGapMarker(
+            for: AudioSegmentRecord(
+                segmentIndex: 2,
+                segmentCount: 4,
+                startSeconds: 1_200,
+                endSeconds: 2_400,
+                audioPath: "/tmp/segment-0002.mp3",
+                outputPath: "/tmp/segment-0002.txt",
+                status: .blockedBySafety,
+                failureMessage: "blocked"
+            )
+        )
+
+        XCTAssertTrue(marker.contains("第 2/4 段未完成"))
+        XCTAssertTrue(marker.contains("00:20:00–00:40:00"))
+        XCTAssertTrue(marker.contains("重送未完成片段"))
+    }
+
     private static let sampleOtherDiagnostics = GeminiPromptBlockDiagnostics(
         httpStatusCode: 200,
         blockReason: "OTHER",

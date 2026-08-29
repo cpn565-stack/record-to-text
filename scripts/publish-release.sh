@@ -1,11 +1,24 @@
 #!/bin/zsh
 set -euo pipefail
 
-VERSION="${1:-}"
-DMG_PATH="${2:-}"
+SCRIPT_DIR="${0:A:h}"
+PROJECT_DIR="${SCRIPT_DIR:h}"
+source "${PROJECT_DIR}/Config/version.env"
 
-if [[ -z "${VERSION}" || -z "${DMG_PATH}" || ! -f "${DMG_PATH}" ]]; then
-  print -u2 "Usage: $0 <version> <record-to-text.dmg>"
+if (( $# == 1 )); then
+  VERSION="${MARKETING_VERSION}"
+  DMG_PATH="$1"
+else
+  VERSION="${1:-${MARKETING_VERSION}}"
+  DMG_PATH="${2:-}"
+fi
+
+if [[ -z "${DMG_PATH}" || ! -f "${DMG_PATH}" ]]; then
+  print -u2 "Usage: $0 [version] <record-to-text.dmg>"
+  exit 1
+fi
+if [[ "${VERSION}" != "${MARKETING_VERSION}" ]]; then
+  print -u2 "Release version ${VERSION} does not match Config/version.env ${MARKETING_VERSION}."
   exit 1
 fi
 if [[ "${DMG_PATH}" != *.dmg ]]; then
@@ -13,6 +26,7 @@ if [[ "${DMG_PATH}" != *.dmg ]]; then
   exit 1
 fi
 
+"${SCRIPT_DIR}/check-version.sh"
 gh auth status
 hdiutil verify "${DMG_PATH}"
 codesign --verify --verbose=2 "${DMG_PATH}"

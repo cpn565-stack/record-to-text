@@ -4,7 +4,7 @@
 
 - 分支：`codex/record-to-text-reliability-v2`
 - 基準：`7b3c426 feat: harden Gemini transcription and add model controls`
-- 目前修改尚未 commit、尚未 push。
+- Reliability v2 主體已以 `5e7ff57` commit 並 push；Phase 4–6 後續修改尚未 commit、尚未 push。
 - 工作樹通過 `git diff --check`。
 - 私人錄音、逐字稿、API Key、token 均未加入工作樹。
 
@@ -14,7 +14,7 @@
 
 - Python：22 項 chunking tests 通過。
 - Python：3 項 MLX runner contract tests 通過。
-- Swift executable self-test：67 passed, 0 failed。
+- Swift executable self-test：68 passed, 0 failed。
 - Mock pipeline：10 項通過。
 - Core／App／工具均可建置。
 - `dist/record-to-text.app` 建置及 ad-hoc signing 成功。
@@ -28,6 +28,14 @@
 - CI 增加本分支 push 與 `workflow_dispatch` 入口。
 - 新增 `docs/reliability-v2-validation.md`，定義自動與真實驗收矩陣。
 - CI 修改尚未推送，因此 GitHub Actions 尚未執行。
+
+## 階段 4–6：後續實作
+
+- 啟動模型快取與復原掃描已移到背景 utility task，並加入過期結果 gate。
+- 復原畫面顯示掃描中、上次完成時間，文案不再誤稱全部情境都無法斷點續跑。
+- 版本收旂到 `Config/version.env`；CI 產生 development DMG 與 SHA-256 artifact。
+- 移除一次性 patcher／workflow，並防止 Python cache 進入 App bundle。
+- 此階段完整驗證結果以本次最終 `scripts/run-checks.sh` 與 development DMG 建置為準。
 
 ## 階段 1：MAX_TOKENS 已完成自動化實作與本機契約驗證
 

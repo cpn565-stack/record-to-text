@@ -42,11 +42,12 @@ struct RecordToTextApp: App {
     @StateObject private var viewModel = AppViewModel()
 
     var body: some Scene {
-        WindowGroup("record-to-text") {
+        WindowGroup(Self.windowTitle) {
             MainView(viewModel: viewModel)
                 .frame(minWidth: 760, minHeight: 680)
                 .onAppear {
                     appDelegate.viewModel = viewModel
+                    Self.applyWindowTitle()
                 }
         }
         .defaultSize(width: 900, height: 780)
@@ -82,6 +83,27 @@ struct RecordToTextApp: App {
 
         Settings {
             SettingsView(viewModel: viewModel)
+        }
+    }
+
+    static var windowTitle: String {
+        "record-to-text \(bundleVersionLabel)"
+    }
+
+    static var bundleVersionLabel: String {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "0.0"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        return "\(version) (\(build))"
+    }
+
+    static var bundlePathLabel: String {
+        Bundle.main.bundleURL.path
+    }
+
+    private static func applyWindowTitle() {
+        for window in NSApp.windows where window.title.hasPrefix("record-to-text") {
+            window.title = windowTitle
         }
     }
 }

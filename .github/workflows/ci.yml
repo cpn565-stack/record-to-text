@@ -21,18 +21,41 @@ jobs:
       - name: Install integration-test tools
         run: brew install ffmpeg opencc
 
+      - name: Validate version and repository hygiene
+        run: |
+          scripts/check-version.sh
+          scripts/repo-hygiene.sh
+
       - name: Build and test
         env:
           REQUIRE_XCTEST: "1"
+          SKIP_APP_BUNDLE: "1"
         run: scripts/run-checks.sh
 
-      - name: Build unsigned App bundle
+      - name: Build development delivery artifact
         env:
-          ADHOC_SIGN: "0"
-        run: scripts/build-app.sh
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: scripts/package-development.sh
 
       - name: Verify functional App bundle contents
         env:
           ALLOW_UNSIGNED: "1"
-          CHECK_APP_SIZE: "0"
-        run: scripts/verify-release.sh dist/record-to-text.app
+          CHECK_APP_SIZE: "1"
+          MAX_APP_BYTES: "157286400"
+        run: |
+          source Config/version.env
+          EXPECTED_VERSION="${MARKETING_VERSION}" \
+          EXPECTED_BUILD_NUMBER="${GITHUB_RUN_NUMBER}" \
+          scripts/verify-release.sh \
+            dist/record-to-text.app \
+            "dist/record-to-text-${MARKETING_VERSION}-development.dmg"
+
+      - name: Upload development App artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: record-to-text-macos-${{ github.sha }}
+          path: |
+            dist/record-to-text-*-development.dmg
+            dist/record-to-text-*-development.dmg.sha256
+          if-no-files-found: error
+          retention-days: 14

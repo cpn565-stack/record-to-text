@@ -1,3 +1,4 @@
+import AppKit
 import RecordToTextCore
 import SwiftUI
 import UniformTypeIdentifiers
@@ -6,12 +7,12 @@ struct MainView: View {
     @ObservedObject var viewModel: AppViewModel
     @State private var isDropTargeted = false
     @State private var isClearFinishedJobsPresented = false
+    @State private var isTranscriptionSettingsExpanded = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 titleBlock
-                terminologyCard
                 intakeCard
                 queueCard
             }
@@ -130,6 +131,11 @@ struct MainView: View {
                 Text(viewModel.appSubtitle)
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                Text(RecordToTextApp.windowTitle)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .textSelection(.enabled)
+                    .help(RecordToTextApp.bundlePathLabel)
             }
 
             Spacer()
@@ -181,85 +187,123 @@ struct MainView: View {
         return choice.backendType == .localQwen ? "apple.logo" : "cloud.fill"
     }
 
-    private var terminologyCard: some View {
-        AppCard {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(alignment: .firstTextBaseline) {
-                    Label("專有名詞", systemImage: "character.book.closed")
-                        .font(.headline)
-                    Spacer()
-                    Text("\(viewModel.promptTermCount) 個詞彙")
-                        .font(.caption.weight(.medium))
-                        .foregroundColor(viewModel.promptErrorMessage == nil ? .secondary : .red)
-                }
+    private var transcriptionSettingsDisclosure: some View {
+        DisclosureGroup(
+            isExpanded: $isTranscriptionSettingsExpanded
+        ) {
+            terminologyEditor
+                .padding(.top, 10)
+        } label: {
+            HStack(spacing: 8) {
+                Label("轉錄設定", systemImage: "slider.horizontal.3")
+                    .font(.subheadline.weight(.semibold))
 
-                HStack(spacing: 10) {
-                    Picker(
-                        "專案詞庫",
-                        selection: Binding(
-                            get: { viewModel.settings.lastSelectedGlossaryID },
-                            set: { viewModel.selectGlossary($0) }
-                        )
-                    ) {
-                        Text("不使用專案詞庫").tag(String?.none)
-                        ForEach(viewModel.glossaryCollection.glossaries) { glossary in
-                            Text(glossary.name).tag(Optional(glossary.id))
-                        }
-                    }
-                    .frame(maxWidth: 330)
-
-                    Button("管理詞庫…") {
-                        viewModel.isGlossaryManagerPresented = true
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("本次補充")
-                        .font(.subheadline.weight(.medium))
-
-                    TextEditor(
-                        text: Binding(
-                            get: { viewModel.settings.lastTemporaryTerms },
-                            set: { viewModel.setTemporaryTerms($0) }
-                        )
+                Text("\(selectedGlossarySummary) · \(viewModel.promptTermCount) 個詞彙")
+                    .font(.caption)
+                    .foregroundStyle(
+                        viewModel.promptErrorMessage == nil
+                            ? Color.secondary
+                            : Color.red
                     )
-                    .font(.body)
-                    .scrollContentBackground(.hidden)
-                    .padding(8)
-                    .frame(minHeight: 84, maxHeight: 116)
-                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
-                    }
-                    .accessibilityLabel("本次補充專有名詞")
+                    .lineLimit(1)
 
-                    Text("可用逗號、頓號、分號、空格（中文詞彙）或換行分隔。加入檔案時會鎖定為該工作的 Snapshot。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                Spacer()
 
-                if let error = viewModel.promptErrorMessage {
-                    Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                } else {
-                    Button {
-                        viewModel.isPromptPreviewPresented = true
-                    } label: {
-                        Label("預覽實際送入模型的 Prompt", systemImage: "doc.text.magnifyingglass")
-                    }
-                    .buttonStyle(.link)
-                }
+                Text("加入檔案時鎖定")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityHint("展開後可調整專案詞庫與本次補充詞彙")
+    }
+
+    private var terminologyEditor: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Picker(
+                    "專案詞庫",
+                    selection: Binding(
+                        get: { viewModel.settings.lastSelectedGlossaryID },
+                        set: { viewModel.selectGlossary($0) }
+                    )
+                ) {
+                    Text("不使用專案詞庫").tag(String?.none)
+                    ForEach(viewModel.glossaryCollection.glossaries) { glossary in
+                        Text(glossary.name).tag(Optional(glossary.id))
+                    }
+                }
+                .frame(maxWidth: 330)
+
+                Button("管理詞庫…") {
+                    viewModel.isGlossaryManagerPresented = true
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("本次補充")
+                    .font(.subheadline.weight(.medium))
+
+                TextEditor(
+                    text: Binding(
+                        get: { viewModel.settings.lastTemporaryTerms },
+                        set: { viewModel.setTemporaryTerms($0) }
+                    )
+                )
+                .font(.body)
+                .scrollContentBackground(.hidden)
+                .padding(8)
+                .frame(minHeight: 84, maxHeight: 116)
+                .background(
+                    Color(nsColor: .textBackgroundColor),
+                    in: RoundedRectangle(cornerRadius: 8)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                }
+                .accessibilityLabel("本次補充專有名詞")
+
+                Text("可用逗號、頓號、分號、空格（中文詞彙）或換行分隔。加入檔案時會鎖定為該工作的 Snapshot。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let error = viewModel.promptErrorMessage {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            } else {
+                Button {
+                    viewModel.isPromptPreviewPresented = true
+                } label: {
+                    Label("預覽實際送入模型的 Prompt", systemImage: "doc.text.magnifyingglass")
+                }
+                .buttonStyle(.link)
+            }
+        }
+    }
+
+    private var selectedGlossarySummary: String {
+        guard let selectedID = viewModel.settings.lastSelectedGlossaryID,
+              let selected = viewModel.glossaryCollection.glossaries
+                .first(where: { $0.id == selectedID })
+        else {
+            return "不使用專案詞庫"
+        }
+        return selected.name
     }
 
     private var intakeCard: some View {
         AppCard {
             VStack(spacing: 14) {
+                transcriptionSettingsDisclosure
+
+                Divider()
+
                 DropZoneView(
                     isTargeted: isDropTargeted,
+                    compact: !viewModel.jobs.isEmpty,
                     chooseFiles: { viewModel.chooseAudioFiles() }
                 )
                 // Finder supplies dropped files as `public.file-url` item
@@ -268,6 +312,22 @@ struct MainView: View {
                 // can return an empty URL array on macOS.
                 .onDrop(of: [UTType.fileURL], isTargeted: $isDropTargeted) { providers in
                     handleFileDrop(providers)
+                }
+
+                if viewModel.hasQueuedJobs {
+                    HStack(spacing: 10) {
+                        Button {
+                            viewModel.startQueuedJobs()
+                        } label: {
+                            Label("開始轉文字", systemImage: "play.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .help("開始處理佇列中等待的錄音")
+
+                        splitQueuedAction
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 HStack(spacing: 10) {
@@ -298,26 +358,11 @@ struct MainView: View {
                             .textSelection(.enabled)
                     }
                     Spacer()
-                    Text("等待手動開始")
+                    Text(viewModel.hasQueuedJobs ? "加入後不會自動開始" : "等待加入檔案")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
 
-                if viewModel.hasQueuedJobs {
-                    HStack(spacing: 10) {
-                        Button {
-                            viewModel.startQueuedJobs()
-                        } label: {
-                            Label("開始轉文字", systemImage: "play.fill")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.large)
-                        .help("開始處理佇列中等待的錄音（一次一個）")
-
-                        splitQueuedAction
-                    }
-                }
             }
         }
     }
@@ -395,18 +440,6 @@ struct MainView: View {
                     Label("工作佇列", systemImage: "list.bullet.rectangle")
                         .font(.headline)
                     Spacer()
-
-                    if viewModel.hasQueuedJobs {
-                        Button {
-                            viewModel.startQueuedJobs()
-                        } label: {
-                            Label("開始轉文字", systemImage: "play.fill")
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .help("開始處理佇列中等待的錄音")
-
-                        splitQueuedAction
-                    }
 
                     if viewModel.hasActiveJob {
                         Button(role: .destructive) {
@@ -521,9 +554,39 @@ struct MainView: View {
 
 private struct DropZoneView: View {
     let isTargeted: Bool
+    let compact: Bool
     let chooseFiles: () -> Void
 
     var body: some View {
+        Group {
+            if compact {
+                compactContent
+            } else {
+                expandedContent
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, compact ? 10 : 28)
+        .padding(.horizontal, compact ? 12 : 0)
+        .background(
+            isTargeted ? Color.accentColor.opacity(0.09) : Color(nsColor: .controlBackgroundColor),
+            in: RoundedRectangle(cornerRadius: compact ? 10 : 12)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: compact ? 10 : 12)
+                .strokeBorder(
+                    isTargeted ? Color.accentColor : Color(nsColor: .separatorColor),
+                    style: StrokeStyle(lineWidth: isTargeted ? 2 : 1, dash: [7, 5])
+                )
+        }
+        .contentShape(RoundedRectangle(cornerRadius: compact ? 10 : 12))
+        .animation(.easeOut(duration: 0.15), value: isTargeted)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("錄音檔拖放區")
+        .accessibilityHint("拖入支援的錄音檔，或按下按鈕選擇檔案")
+    }
+
+    private var expandedContent: some View {
         VStack(spacing: 10) {
             Image(systemName: isTargeted ? "arrow.down.doc.fill" : "waveform.badge.plus")
                 .font(.system(size: 36, weight: .light))
@@ -538,51 +601,200 @@ private struct DropZoneView: View {
                     .foregroundStyle(.secondary)
             }
 
-            HStack(spacing: 10) {
-                Button("選擇錄音檔…", action: chooseFiles)
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
+            Button("選擇錄音檔…", action: chooseFiles)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+        }
+    }
+
+    private var compactContent: some View {
+        HStack(spacing: 12) {
+            Image(systemName: isTargeted ? "arrow.down.doc.fill" : "waveform.badge.plus")
+                .font(.system(size: 18, weight: .light))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(isTargeted ? Color.accentColor : .secondary)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(isTargeted ? "放開以加入佇列" : "將錄音拖到這裡")
+                    .font(.subheadline.weight(.semibold))
+                Text("M4A、MP3、WAV、AAC、FLAC")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
-            Text("加入後可在「開始轉文字」旁切分，再依序處理。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+
+            Button("選擇錄音檔…", action: chooseFiles)
+                .buttonStyle(.bordered)
+                .controlSize(.regular)
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 28)
-        .background(
-            isTargeted ? Color.accentColor.opacity(0.09) : Color(nsColor: .controlBackgroundColor),
-            in: RoundedRectangle(cornerRadius: 12)
+    }
+}
+
+private struct BreathingProgressBar: View {
+    let completedSegments: Int
+    let totalSegments: Int
+    let currentSegmentStartedAt: Date
+    let estimatedSegmentSeconds: TimeInterval
+    let isCurrentSegmentInFlight: Bool
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isBreathing = false
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: reduceMotion ? 1 : 0.35)) { context in
+            GeometryReader { proxy in
+                let fraction = displayedFraction(at: context.date)
+                let activeWidth = max(min(proxy.size.width * fraction, proxy.size.width), fraction > 0 ? 6 : 0)
+
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.primary.opacity(0.07))
+
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color.accentColor.opacity(0.98),
+                                    Color.accentColor.opacity(0.74)
+                                ],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .overlay {
+                            Capsule()
+                                .fill(
+                                    LinearGradient(
+                                        colors: [
+                                            Color.clear,
+                                            Color.cyan.opacity(0.44),
+                                            Color.white.opacity(0.18)
+                                        ],
+                                        startPoint: .leading,
+                                        endPoint: .trailing
+                                    )
+                                )
+                                .opacity(
+                                    reduceMotion
+                                        ? 0.28
+                                        : (isBreathing ? 0.72 : 0.14)
+                                )
+                        }
+                        .frame(width: activeWidth)
+                }
+            }
+        }
+        .frame(height: 6)
+        .onAppear {
+            isBreathing = !reduceMotion
+        }
+        .onChange(of: reduceMotion) { _, shouldReduceMotion in
+            isBreathing = !shouldReduceMotion
+        }
+        .accessibilityHidden(true)
+    }
+
+    private func displayedFraction(at now: Date) -> Double {
+        let total = Double(max(totalSegments, 1))
+        let completed = min(max(Double(completedSegments) / total, 0), 1)
+        guard isCurrentSegmentInFlight, completed < 1 else {
+            return completed
+        }
+        let estimate = max(estimatedSegmentSeconds, 20)
+        let elapsed = max(now.timeIntervalSince(currentSegmentStartedAt), 0)
+        let slot = min(0.90, elapsed / estimate)
+        return min(completed + slot / total, 1)
+    }
+}
+
+private struct CloudSegmentProgressState {
+    enum Phase {
+        case preparing
+        case waiting
+        case completed
+        case postProcessing
+    }
+
+    let currentSegment: Int
+    let completedSegments: Int
+    let totalSegments: Int
+    let phase: Phase
+
+    init?(unit: String?) {
+        let parts = (unit ?? "").split(
+            separator: "|",
+            omittingEmptySubsequences: false
         )
-        .overlay {
-            RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(
-                    isTargeted ? Color.accentColor : Color(nsColor: .separatorColor),
-                    style: StrokeStyle(lineWidth: isTargeted ? 2 : 1, dash: [7, 5])
-                )
+        guard parts.count == 3,
+              let segment = Int(parts[1]),
+              let total = Int(parts[2]),
+              total > 0,
+              segment >= 1,
+              segment <= total
+        else {
+            return nil
         }
-        .contentShape(RoundedRectangle(cornerRadius: 12))
-        .animation(.easeOut(duration: 0.15), value: isTargeted)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("錄音檔拖放區")
-        .accessibilityHint("拖入支援的錄音檔，或按下按鈕選擇檔案")
+
+        switch parts[0] {
+        case "preparing":
+            phase = .preparing
+            completedSegments = segment - 1
+        case "waiting":
+            phase = .waiting
+            completedSegments = segment - 1
+        case "percent":
+            phase = .completed
+            completedSegments = segment
+        case "postprocessing":
+            phase = .postProcessing
+            completedSegments = total
+        default:
+            return nil
+        }
+        currentSegment = segment
+        totalSegments = total
+    }
+
+    var percentage: Int {
+        Int(
+            (Double(completedSegments) / Double(totalSegments) * 100)
+                .rounded()
+        )
     }
 }
 
 private struct JobRowView: View {
     let job: TranscriptionJob
     @ObservedObject var viewModel: AppViewModel
-    @State private var isLogExpanded = false
     @State private var isDeleteRecoveryPresented = false
     @State private var isDeleteJobPresented = false
+    @State private var trackedSegment: Int?
+    @State private var currentSegmentStartedAt = Date()
 
     var body: some View {
         rowContent
         .padding(12)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+        .background(
+            Color(nsColor: .controlBackgroundColor),
+            in: RoundedRectangle(cornerRadius: 10)
+        )
         .overlay {
             RoundedRectangle(cornerRadius: 10)
-                .stroke(Color(nsColor: .separatorColor).opacity(0.7), lineWidth: 1)
+                .stroke(
+                    Color(nsColor: .separatorColor).opacity(0.48),
+                    lineWidth: 1
+                )
+        }
+        .overlay(alignment: .leading) {
+            if isActiveJob {
+                Capsule()
+                    .fill(Color.accentColor)
+                    .frame(width: 3)
+                    .padding(.vertical, 10)
+                    .padding(.leading, 2)
+                    .allowsHitTesting(false)
+            }
         }
         .contextMenu {
             if job.stage == .completed {
@@ -599,6 +811,11 @@ private struct JobRowView: View {
                 }
                 Button("用目前設定建立新工作") {
                     viewModel.retryJob(job.id, usingCurrentSettings: true)
+                }
+            }
+            if !job.logLines.isEmpty {
+                Button("複製除錯資訊") {
+                    JobDebugClipboard.copy(job)
                 }
             }
             if job.stage.isTerminal {
@@ -634,14 +851,21 @@ private struct JobRowView: View {
         }
     }
 
+    private var isActiveJob: Bool {
+        job.id == viewModel.activeJobID
+    }
+
     @ViewBuilder
     private var rowContent: some View {
         VStack(alignment: .leading, spacing: 10) {
             rowHeader
             progressSection
-            cloudMetadataSection
             failureSection
             logSection
+        }
+        .onAppear(perform: rememberCurrentSegment)
+        .onChange(of: job.progressUnit) { _, _ in
+            rememberCurrentSegment()
         }
     }
 
@@ -678,16 +902,13 @@ private struct JobRowView: View {
 
     @ViewBuilder
     private var progressSection: some View {
-        if job.progressUnit?.hasPrefix("waiting") == true,
-           job.id == viewModel.activeJobID {
-            VStack(alignment: .leading, spacing: 4) {
-                ProgressView()
-                    .controlSize(.small)
-                Text(waitingProgressLabel(job.progressUnit))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            .accessibilityLabel(waitingProgressLabel(job.progressUnit))
+        if job.snapshot.backendType != .localQwen,
+           job.id == viewModel.activeJobID,
+           let segmentProgress = CloudSegmentProgressState(
+               unit: job.progressUnit
+           )
+        {
+            cloudSegmentProgress(segmentProgress)
         } else if let current = job.progressCurrent,
                   let total = job.progressTotal,
                   total > 0 {
@@ -704,44 +925,68 @@ private struct JobRowView: View {
         }
     }
 
-    private func waitingProgressLabel(_ unit: String?) -> String {
-        let parts = (unit ?? "").split(separator: "|")
-        if parts.count == 3 {
-            return "等待 Gemini 回應 · 第 \(parts[1])／\(parts[2]) 段（無虛構百分比）"
+    @ViewBuilder
+    private func cloudSegmentProgress(
+        _ progress: CloudSegmentProgressState
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            BreathingProgressBar(
+                completedSegments: progress.completedSegments,
+                totalSegments: progress.totalSegments,
+                currentSegmentStartedAt: currentSegmentStartedAt,
+                estimatedSegmentSeconds: estimatedSegmentSeconds,
+                isCurrentSegmentInFlight: progress.phase == .preparing
+                    || progress.phase == .waiting
+            )
+
+            Text(cloudSegmentProgressLabel(progress))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
-        return "等待 Gemini 回應（無虛構百分比）"
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(cloudSegmentProgressLabel(progress))
     }
 
-    @ViewBuilder
-    private var cloudMetadataSection: some View {
-        if job.snapshot.backendType != .localQwen {
-            let metadata = job.resolvedCloudSegmentMetadata
-            VStack(alignment: .leading, spacing: 3) {
-                Text(job.cloudModelSummary ?? job.snapshot.requestedModelID)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                if !metadata.isEmpty {
-                    let usage = CloudTranscriptionMetadataAggregator
-                        .totalUsage(metadata)
-                    let retries = CloudTranscriptionMetadataAggregator
-                        .totalRetryCount(metadata)
-                    HStack(spacing: 8) {
-                        if let total = usage?.totalTokenCount {
-                            Text("總 token \(total)")
-                        }
-                        if let thoughts = usage?.thoughtsTokenCount {
-                            Text("thinking \(thoughts)")
-                        }
-                        if retries > 0 {
-                            Text("重試 \(retries)")
-                        }
-                    }
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                }
-            }
+    private func cloudSegmentProgressLabel(
+        _ progress: CloudSegmentProgressState
+    ) -> String {
+        let completed = "已完成 \(progress.completedSegments)／\(progress.totalSegments) 段"
+        switch progress.phase {
+        case .preparing:
+            return "正在準備第 \(progress.currentSegment)／\(progress.totalSegments) 段 · \(completed)"
+        case .waiting:
+            return "Gemini 轉錄中 · 第 \(progress.currentSegment)／\(progress.totalSegments) 段 · \(completed)"
+        case .completed:
+            return "Gemini \(completed)"
+        case .postProcessing:
+            return "所有分段已完成 · \(job.stage.displayName) · \(completed)"
         }
+    }
+
+    private var estimatedSegmentSeconds: TimeInterval {
+        let latencies = job.resolvedCloudSegmentMetadata.compactMap(\.latencySeconds)
+            .filter { $0 > 1 }
+        if let median = Self.median(latencies) {
+            return max(median, 20)
+        }
+        return 90
+    }
+
+    private func rememberCurrentSegment() {
+        let segment = CloudSegmentProgressState(unit: job.progressUnit)?.currentSegment
+        guard segment != trackedSegment else {
+            return
+        }
+        trackedSegment = segment
+        currentSegmentStartedAt = Date()
+    }
+
+    private static func median(_ values: [Double]) -> Double? {
+        guard !values.isEmpty else {
+            return nil
+        }
+        let sorted = values.sorted()
+        return sorted[sorted.count / 2]
     }
 
     @ViewBuilder
@@ -750,7 +995,11 @@ private struct JobRowView: View {
             VStack(alignment: .leading, spacing: 5) {
                 Text(failure.userMessage)
                     .font(.caption)
-                    .foregroundStyle(job.stage == .cancelled ? Color.secondary : Color.red)
+                    .foregroundStyle(
+                        job.stage == .failed || job.stage == .interrupted
+                            ? Color.red
+                            : Color.secondary
+                    )
                 if failure.recoveryDirectory != nil {
                     HStack(spacing: 12) {
                         if failure.partialTranscriptPath != nil {
@@ -760,7 +1009,11 @@ private struct JobRowView: View {
                         }
 
                         if viewModel.canResumeCloudJob(job) {
-                            Button("從已完成片段續跑") {
+                            Button(
+                                job.stage == .completed
+                                    ? "重送未完成片段"
+                                    : "從已完成片段續跑"
+                            ) {
                                 viewModel.resumeCloudJobFromCheckpoint(job.id)
                             }
                             .buttonStyle(.link)
@@ -787,7 +1040,9 @@ private struct JobRowView: View {
             .padding(9)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                (job.stage == .cancelled ? Color.orange : Color.red)
+                (job.stage == .failed || job.stage == .interrupted
+                    ? Color.red
+                    : Color.orange)
                     .opacity(0.07),
                 in: RoundedRectangle(cornerRadius: 7)
             )
@@ -797,19 +1052,21 @@ private struct JobRowView: View {
     @ViewBuilder
     private var logSection: some View {
         if !job.logLines.isEmpty {
-            DisclosureGroup("執行日誌", isExpanded: $isLogExpanded) {
-                ScrollView {
-                    Text(job.logLines.joined(separator: "\n"))
-                        .font(.caption.monospaced())
+            VStack(alignment: .leading, spacing: 6) {
+                if let status = JobDebugClipboard.statusSummary(from: job.logLines) {
+                    Text(status)
+                        .font(.caption)
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(8)
                 }
-                .frame(maxHeight: 150)
-                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+
+                Button("複製除錯資訊") {
+                    JobDebugClipboard.copy(job)
+                }
+                .buttonStyle(.link)
+                .font(.caption)
+                .help("複製完整執行日誌、模型與失敗訊息，方便貼給除錯用")
             }
-            .font(.caption)
         }
     }
 
@@ -1110,6 +1367,91 @@ private struct RecentJobRow: View {
         default:
             return .secondary
         }
+    }
+}
+
+private enum JobDebugClipboard {
+    static func copy(_ job: TranscriptionJob) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(dump(job), forType: .string)
+    }
+
+    static func statusSummary(from lines: [String]) -> String? {
+        let human = lines.filter { !isDebugLine($0) }
+        guard !human.isEmpty else {
+            return nil
+        }
+        return human.suffix(2).joined(separator: "\n")
+    }
+
+    static func isDebugLine(_ line: String) -> Bool {
+        let markers = [
+            "HTTP ",
+            "JSON ",
+            "thinkingConfig",
+            "實際請求",
+            "response ",
+            "responseId",
+            "總 token",
+            "thinking token",
+            "promptTokenCount",
+            "audioTokenCount",
+            "promptFeedback",
+            "rawBytes=",
+            "modelVersion",
+            "轉錄請求送出",
+            "location global",
+            "Gemini 回應無法形成逐字稿",
+            "實際模型"
+        ]
+        return markers.contains { line.contains($0) }
+    }
+
+    static func dump(_ job: TranscriptionJob) -> String {
+        var lines: [String] = [
+            "record-to-text 除錯資訊",
+            "版本：\(bundleVersionLabel)",
+            "工作：\(job.id.uuidString)",
+            "檔名：\(job.displayName)",
+            "來源：\(job.sourcePath)",
+            "後端：\(job.snapshot.backendType.displayName)",
+            "模型：\(job.cloudModelSummary ?? job.snapshot.requestedModelID)",
+            "狀態：\(job.stage.displayName)"
+        ]
+        if let failure = job.failure {
+            lines.append("失敗：\(failure.userMessage)")
+            if !failure.technicalDetails.isEmpty {
+                lines.append("技術細節：\(failure.technicalDetails)")
+            }
+        }
+        let metadata = job.resolvedCloudSegmentMetadata
+        if !metadata.isEmpty {
+            let usage = CloudTranscriptionMetadataAggregator.totalUsage(metadata)
+            let retries = CloudTranscriptionMetadataAggregator.totalRetryCount(metadata)
+            if let total = usage?.totalTokenCount {
+                lines.append("總 token：\(total)")
+            }
+            if let thoughts = usage?.thoughtsTokenCount {
+                lines.append("thinking token：\(thoughts)")
+            }
+            if retries > 0 {
+                lines.append("重試：\(retries)")
+            }
+        }
+        lines.append("--- 執行日誌 ---")
+        if job.logLines.isEmpty {
+            lines.append("（無）")
+        } else {
+            lines.append(contentsOf: job.logLines)
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private static var bundleVersionLabel: String {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "0.0"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        return "\(version) (\(build))"
     }
 }
 

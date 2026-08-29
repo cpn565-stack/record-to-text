@@ -131,6 +131,8 @@ open /path/to/record-to-text.app
 - App 圖示（`Config/AppIcon.icns`）與 `scripts/build-app.sh` 開發用 `.app` 封裝。
 - XCTest（需完整 Xcode）、executable self-test、mock 管線（成功／失敗復原／取消／長音檔 fail-closed）。
 - 簽署、公證、DMG scripts；缺憑證時會停，不假裝正式發佈。
+- 啟動後的模型快取與復原盤點在 utility-priority 背景任務執行，不占用首個畫面的主執行緒。
+- CI 會建置經過驗證的未簽署測試 DMG 與 SHA-256，作為 14 天的可下載 artifact。
 
 ## 重要修正
 
@@ -145,6 +147,7 @@ open /path/to/record-to-text.app
 - [產品與技術決策](docs/product-decisions.md)
 - [需求追蹤](docs/product-spec.md)
 - [下一次接續](docs/NEXT_STEPS.md)
+- [測試版交付與安裝](docs/development-delivery.md)
 - [交班單](HANDOFF.md)
 
 ## 開發環境

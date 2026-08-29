@@ -48,6 +48,8 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var modelDownloadPhase: ModelDownloadPhase = .idle
     @Published private(set) var modelDownloadProgressLine: String = ""
     @Published private(set) var recoveryScanReport: RecoveryScanReport?
+    @Published private(set) var isRecoveryScanRunning = false
+    @Published private(set) var isModelCacheStatusRefreshing = false
     @Published private(set) var googleAIStudioCredentialStorageState:
         GoogleAIStudioCredentialStorageState = .absent
 
@@ -80,6 +82,10 @@ final class AppViewModel: ObservableObject {
     private var reusableEngine: TranscriptionEngine?
     private var reusableEngineRuntime: ResolvedRuntime?
     private var modelDownloadTask: Task<Void, Never>?
+    private var modelCacheStatusTask: Task<Void, Never>?
+    private var recoveryScanTask: Task<Void, Never>?
+    private var modelCacheRefreshGeneration = 0
+    private var recoveryScanGeneration = 0
     private var manualDrainRequested = false
     private var pendingDuplicateURLs: [URL] = []
     private var promptConsentJobID: UUID?
@@ -275,6 +281,8 @@ final class AppViewModel: ObservableObject {
         activeEngine?.cancelCurrentJob()
         reusableEngine?.cancelCurrentJob()
         modelDownloadTask?.cancel()
+        modelCacheStatusTask?.cancel()
+        recoveryScanTask?.cancel()
         modelDownloadRunner.cancelCurrent()
         settingsPersistTask?.cancel()
     }
@@ -655,17 +663,32 @@ final class AppViewModel: ObservableObject {
     func refreshSelectedModelCacheStatus() {
         let modelID = settings.selectedModelID
         let revision = selectedModelRevision
-        isSelectedModelCached = ModelCache.isDownloaded(
-            modelID: modelID,
-            revision: revision,
-            modelsDirectory: paths.models,
-            fileManager: fileManager
-        )
-        isSelectedModelInDefaultHFCache = ModelCache.isDownloadedInDefaultCache(
-            modelID: modelID,
-            revision: revision,
-            fileManager: fileManager
-        )
+        let modelsDirectory = paths.models
+        modelCacheStatusTask?.cancel()
+        modelCacheRefreshGeneration += 1
+        let generation = modelCacheRefreshGeneration
+        isModelCacheStatusRefreshing = true
+        modelCacheStatusTask = Task { [weak self] in
+            let status = await Task.detached(priority: .utility) {
+                StartupInventory.modelCache(
+                    modelID: modelID,
+                    revision: revision,
+                    modelsDirectory: modelsDirectory,
+                    fileManager: FileManager()
+                )
+            }.value
+            guard let self,
+                  !Task.isCancelled,
+                  generation == self.modelCacheRefreshGeneration
+            else {
+                return
+            }
+            self.isSelectedModelCached =
+                status.isAppManagedModelAvailable
+            self.isSelectedModelInDefaultHFCache =
+                status.isDefaultCacheModelAvailable
+            self.isModelCacheStatusRefreshing = false
+        }
     }
 
     func downloadSelectedModel() {
@@ -1086,7 +1109,8 @@ final class AppViewModel: ObservableObject {
         guard job.snapshot.backendType != .localQwen,
               job.stage == .failed
                 || job.stage == .cancelled
-                || job.stage == .interrupted,
+                || job.stage == .interrupted
+                || job.stage == .completed,
               let recoveryDirectory = job.failure?.recoveryDirectory
         else {
             return false
@@ -1152,7 +1176,7 @@ final class AppViewModel: ObservableObject {
             resumeFromRecoveryDirectory: recoveryDirectory
         )
         resumed.logLines.append(
-            "從雲端檢查點續跑；已完成片段會先驗證，只有未完成片段會重新上傳與轉錄。"
+            "重送未完成片段；已完成片段會先驗證並直接沿用，不會重新上傳或計費轉錄。"
         )
         jobs.insert(resumed, at: min(index + 1, jobs.count))
         persistJobs()
@@ -1356,8 +1380,8 @@ final class AppViewModel: ObservableObject {
     func refreshRecoveryScan() {
         // Always show the sheet when the user clicks the toolbar button,
         // even if there is nothing to clean up (empty state is intentional UI).
-        runRecoveryScan(presentIfNonEmpty: false)
         isRecoveryScanPresented = true
+        runRecoveryScan(presentIfNonEmpty: false)
     }
 
     func dismissRecoveryScan() {
@@ -1488,10 +1512,6 @@ final class AppViewModel: ObservableObject {
     }
 
     private func runRecoveryScan(presentIfNonEmpty: Bool) {
-        let scannedReport = RecoveryScanner.scan(
-            paths: paths,
-            fileManager: fileManager
-        )
         let activeRecoveryDirectoryPaths = Set(
             jobs.lazy.filter { !$0.stage.isTerminal }.map { job in
                 if let resumedDirectory = job.resumeFromRecoveryDirectory {
@@ -1506,41 +1526,36 @@ final class AppViewModel: ObservableObject {
                 ).standardizedFileURL.path
             }
         )
-        let report = Self.excludingActiveJobDirectories(
-            from: scannedReport,
-            activeRecoveryDirectoryPaths: activeRecoveryDirectoryPaths
-        )
-        recoveryScanReport = report
-        // Don't compete with first-run onboarding sheet.
-        if presentIfNonEmpty, !report.isEmpty, !isOnboardingPresented {
-            isRecoveryScanPresented = true
+        let scanPaths = paths
+        recoveryScanTask?.cancel()
+        recoveryScanGeneration += 1
+        let generation = recoveryScanGeneration
+        isRecoveryScanRunning = true
+        recoveryScanTask = Task { [weak self] in
+            let scannedReport = await Task.detached(priority: .utility) {
+                StartupInventory.recoveryReport(
+                    paths: scanPaths,
+                    activeRecoveryDirectoryPaths:
+                        activeRecoveryDirectoryPaths,
+                    fileManager: FileManager()
+                )
+            }.value
+            guard let self,
+                  !Task.isCancelled,
+                  generation == self.recoveryScanGeneration
+            else {
+                return
+            }
+            self.recoveryScanReport = scannedReport
+            self.isRecoveryScanRunning = false
+            // Don't compete with first-run onboarding sheet.
+            if presentIfNonEmpty,
+               !scannedReport.isEmpty,
+               !self.isOnboardingPresented
+            {
+                self.isRecoveryScanPresented = true
+            }
         }
-    }
-
-    static func excludingActiveJobDirectories(
-        from report: RecoveryScanReport,
-        activeRecoveryDirectoryPaths: Set<String>
-    ) -> RecoveryScanReport {
-        guard !activeRecoveryDirectoryPaths.isEmpty else {
-            return report
-        }
-        return RecoveryScanReport(
-            scannedAt: report.scannedAt,
-            systemTempRoot: report.systemTempRoot,
-            tempRecoveryRoot: report.tempRecoveryRoot,
-            items: report.items.filter { item in
-                guard item.location == .tempRecovery else {
-                    return true
-                }
-                let path = URL(
-                    fileURLWithPath: item.directoryPath,
-                    isDirectory: true
-                ).standardizedFileURL.path
-                return !activeRecoveryDirectoryPaths.contains(path)
-            },
-            ignoredNonUUIDDirectoryCount:
-                report.ignoredNonUUIDDirectoryCount
-        )
     }
 
     func completeOnboarding() {
@@ -1740,9 +1755,41 @@ final class AppViewModel: ObservableObject {
                         : result.cloudSegmentMetadata
                 jobs[index].completedAt = Date()
                 jobs[index].progressUnit = nil
+                if !result.incompleteCloudSegmentIndices.isEmpty {
+                    let labels = result.incompleteCloudSegmentIndices
+                        .map(String.init)
+                        .joined(separator: "、")
+                    let recoveryPath = result.recoveryDirectory?.path
+                    let partialPath = result.recoveryDirectory.flatMap {
+                        let candidate = $0.appendingPathComponent(
+                            RecoveryScanner.partialTranscriptFileName
+                        )
+                        return fileManager.fileExists(atPath: candidate.path)
+                            ? candidate.path
+                            : nil
+                    }
+                    jobs[index].failure = JobFailure(
+                        stage: .completed,
+                        userMessage: "其餘片段已完成；第 \(labels) 段遭 Google 內容安全政策攔截，已在逐字稿標出缺口。",
+                        technicalDetails:
+                            "Google safety-blocked segments: \(labels)",
+                        recoverable: true,
+                        recoveryDirectory: recoveryPath,
+                        partialTranscriptPath: partialPath
+                    )
+                } else {
+                    jobs[index].failure = nil
+                }
                 appendCloudResultSummary(result, to: index)
                 let duration = Self.durationFormatter.string(from: result.duration) ?? "—"
-                if result.containsSkippedAudio {
+                if !result.incompleteCloudSegmentIndices.isEmpty {
+                    let labels = result.incompleteCloudSegmentIndices
+                        .map(String.init)
+                        .joined(separator: "、")
+                    jobs[index].logLines.append(
+                        "完成，但第 \(labels) 段遭 Google 安全性攔截；其餘片段已完成。耗時 \(duration)。"
+                    )
+                } else if result.containsSkippedAudio {
                     jobs[index].logLines.append(
                         "完成，但有音訊片段因 token 上限跳過；請查看逐字稿中的缺口標記。耗時 \(duration)。"
                     )

@@ -262,6 +262,53 @@ tests.check(
 
 tests.check(
     {
+        let activeID = UUID()
+        let stoppedID = UUID()
+        let activePath = "/tmp/recovery/\(activeID.uuidString)"
+        let report = RecoveryScanReport(
+            systemTempRoot: "/tmp/jobs",
+            tempRecoveryRoot: "/tmp/recovery",
+            items: [
+                RecoveryScanItem(
+                    jobID: activeID,
+                    location: .tempRecovery,
+                    kind: .orphaned,
+                    directoryPath: activePath,
+                    summary: "active",
+                    detail: "",
+                    hasNormalizedWAV: false,
+                    hasRecoveryJSON: false,
+                    hasSegmentManifest: false,
+                    recognizedFileNames: [],
+                    unknownEntryNames: []
+                ),
+                RecoveryScanItem(
+                    jobID: stoppedID,
+                    location: .tempRecovery,
+                    kind: .orphaned,
+                    directoryPath: "/tmp/recovery/\(stoppedID.uuidString)",
+                    summary: "stopped",
+                    detail: "",
+                    hasNormalizedWAV: false,
+                    hasRecoveryJSON: false,
+                    hasSegmentManifest: false,
+                    recognizedFileNames: [],
+                    unknownEntryNames: []
+                )
+            ],
+            ignoredNonUUIDDirectoryCount: 0
+        )
+        let filtered = StartupInventory.excludingActiveRecoveryDirectories(
+            from: report,
+            activeRecoveryDirectoryPaths: [activePath]
+        )
+        return filtered.items.map(\.jobID) == [stoppedID]
+    }(),
+    "StartupInventory keeps active recovery directories out of cleanup UX"
+)
+
+tests.check(
+    {
         do {
             let root = FileManager.default.temporaryDirectory
                 .appendingPathComponent("record-to-text-selftest-recovery-\(UUID().uuidString)")
@@ -1733,6 +1780,78 @@ tests.check(
             && !description.contains("HTTP 400")
     }(),
     "Vertex promptFeedback PROHIBITED_CONTENT stays a policy block without fake HTTP 400"
+)
+
+tests.check(
+    {
+        let safetyDiagnostics = GeminiPromptBlockDiagnostics(
+            httpStatusCode: 200,
+            blockReason: "PROHIBITED_CONTENT"
+        )
+        let otherDiagnostics = GeminiPromptBlockDiagnostics(
+            httpStatusCode: 200,
+            blockReason: "OTHER"
+        )
+        return GoogleAIStudioError
+            .promptBlocked(safetyDiagnostics)
+            .isExplicitSafetyPolicyBlock
+            && VertexAIError
+                .prohibitedContent("SAFETY")
+                .isExplicitSafetyPolicyBlock
+            && !GoogleAIStudioError
+                .promptBlocked(otherDiagnostics)
+                .isExplicitSafetyPolicyBlock
+            && !VertexAIError
+                .requestFailed(statusCode: 503, message: "unavailable")
+                .isExplicitSafetyPolicyBlock
+    }(),
+    "only explicit Google safety policy errors qualify for segment isolation"
+)
+
+tests.check(
+    try {
+        let manifest = AudioSegmentManifest(
+            jobID: UUID(),
+            sourceDurationSeconds: 2_400,
+            maximumSegmentDurationSeconds: 1_200,
+            expectedSegmentCount: 2,
+            segments: [
+                AudioSegmentRecord(
+                    segmentIndex: 1,
+                    segmentCount: 2,
+                    startSeconds: 0,
+                    endSeconds: 1_200,
+                    audioPath: "/tmp/segment-0001.mp3",
+                    outputPath: "/tmp/segment-0001.txt",
+                    status: .completed,
+                    completedEventCount: 1
+                ),
+                AudioSegmentRecord(
+                    segmentIndex: 2,
+                    segmentCount: 2,
+                    startSeconds: 1_200,
+                    endSeconds: 2_400,
+                    audioPath: "/tmp/segment-0002.mp3",
+                    outputPath: "/tmp/segment-0002.txt",
+                    status: .blockedBySafety,
+                    failureMessage: "Google safety block"
+                )
+            ]
+        )
+        let statuses = try manifest
+            .validatedSegmentsAllowingSafetyBlocks()
+            .map(\.status)
+        guard statuses == [.completed, .blockedBySafety] else {
+            return false
+        }
+        do {
+            _ = try manifest.validatedCompletedSegments()
+            return false
+        } catch AudioSegmentationError.segmentIncomplete {
+            return true
+        }
+    }(),
+    "cloud manifest allows an explicit safety gap but not a fully-complete claim"
 )
 
 tests.check(

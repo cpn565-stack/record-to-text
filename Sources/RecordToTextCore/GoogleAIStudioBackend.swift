@@ -57,6 +57,17 @@ public enum GoogleAIStudioError: LocalizedError, Equatable {
             return "轉錄程序已取消。"
         }
     }
+
+    public var isExplicitSafetyPolicyBlock: Bool {
+        switch self {
+        case .prohibitedContent:
+            return true
+        case let .promptBlocked(diagnostics):
+            return diagnostics.isExplicitSafetyPolicy
+        default:
+            return false
+        }
+    }
 }
 
 public final class GoogleAIStudioBackend: @unchecked Sendable {

@@ -4,8 +4,20 @@
 
 ## [Unreleased]
 
+### Planned
+
+- 自動檢查更新（PD-015）：預設約每 7 天檢查 GitHub Releases；有新版再提示；可手動檢查；細節見 `docs/NEXT_STEPS.md`。
+
+## [0.2.0] - 2026-08-29
+
 ### Added
 
+- 主畫面把轉錄設定收成摺疊列；進行中工作只留左邊藍線，不再整張洗色。
+- 雲端目前段用前段耗時中位數往前填進度，最多到該格 90%；已完成段才實心填滿。
+- 執行日誌改為白話狀態加「複製除錯資訊」，完整 HTTP／token 紀錄不再直接攤在卡片上。
+- 佇列有工作時縮小拖放區；「開始轉文字」移到進件區下方。
+- 啟動後的模型快取與復原掃描改在背景盤點，復原畫面顯示掃描狀態與完成時間。
+- 單一版本來源、版本 contract 檢查、repo hygiene gate 與未簽署測試 DMG／SHA-256 交付流程。
 - Gemini 雲端傳輸強固化（雙層架構）：
   - 傳輸層改造：全面以工作暫存檔串流上傳 (`upload(for:fromFile:)`) 替代 in-memory `httpBody`，遞迴檢測並攔截 POSIX 40 (`EMSGSIZE`) 與 `_kCFStreamErrorCodeKey: 40`，自動以 Ephemeral TCP Session 重試 1 次。
   - 音訊上傳分離：Google AI Studio 預設啟用官方 Files API 串流傳輸音訊，Vertex AI 支援 GCS Bucket 參照（`gs://...`），大幅降低推論 API 的 Payload 體積與斷線風險。
@@ -31,6 +43,7 @@
 - 最近工作標示來源或輸出檔案已移動／刪除；相同 runtime 的佇列工作重用 engine 與長駐 helper。
 - 錄音加入佇列後，可在「開始轉文字」旁將單一錄音切成前後兩個時間範圍工作：前半先處理，後半排隊；兩段各自輸出有順序的 TXT。
 - 可從前端選取多份 TXT，依分段編號排序後合併成新檔；拒絕空白／不合法輸出且不覆寫既有檔案。
+- 視窗標題顯示行銷版本與 build，方便分辨同 bundle id 的多份 App。
 
 ### Fixed
 
@@ -43,6 +56,9 @@
 
 ### Changed
 
+- 雲端轉錄等待時改用會移動的橫向 progress bar，同時顯示目前分段與已完成段數；移除內部進度推理語句。
+- CI 改為只打包一次 App，並上傳可追溯 commit 的測試 artifact；App 體積上限改為自動門檻。
+- SwiftPM 資源從整個 `Resources` 目錄改為明確的 Python helper 清單，不再將本機 `__pycache__` 打包。
 - 長音檔 coordinator 預切由 30 分鐘改為 **20 分鐘**；ASR 預設 `maximumTokens` 由 8192 提高到 **16384**（helper 上限）；helper 內部 generate 窗口由 1200 秒改為 **120 秒**，避免單段 20 分鐘密語仍撞 token 上限。
 - MLX helper 的一般錯誤仍維持 fail-closed；不可再切的 token-limit leaf 則改以明確缺口標記處理，不保留可能截斷的文字。
 - MLX helper 的最小約 30 秒片段若仍達 token 上限，會插入明確缺口標記、跳過該片段並繼續後續音訊；App 日誌會提示輸出含缺口。
@@ -56,9 +72,9 @@
 - Helper 改用最小環境變數白名單，不繼承終端機或 CI 的無關憑證。
 - `recentJobLimit` 只裁切最近摘要與 terminal history，不再刪除 queued／active／interrupted ledger 工作。
 
-### Planned
+### Removed
 
-- 自動檢查更新（PD-015）：預設約每 7 天檢查 GitHub Releases；有新版再提示；可手動檢查；細節見 `docs/NEXT_STEPS.md`。
+- 已完成使命的 Gemini 3.7 一次性 apply／fix patcher 與對應 workflow。
 
 ### Known limitations
 

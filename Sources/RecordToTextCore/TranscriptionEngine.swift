@@ -20,6 +20,15 @@ public struct PipelineExecutionError: LocalizedError {
     }
 }
 
+private struct CloudSafetyGapSummaryError: LocalizedError {
+    let segmentIndices: [Int]
+
+    var errorDescription: String? {
+        let labels = segmentIndices.map(String.init).joined(separator: "、")
+        return "第 \(labels) 段遭 Google 內容安全政策攔截；其餘片段已繼續完成。"
+    }
+}
+
 private final class PipelineStageTracker: @unchecked Sendable {
     private let lock = NSLock()
     private var stage: TranscriptionStage
@@ -102,6 +111,32 @@ public final class TranscriptionEngine {
         plannedStart: Double
     ) -> Double {
         (sourceSlice?.startSeconds ?? 0) + plannedStart
+    }
+
+    static func isExplicitGoogleSafetyBlock(_ error: Error) -> Bool {
+        if let studioError = error as? GoogleAIStudioError {
+            return studioError.isExplicitSafetyPolicyBlock
+        }
+        if let vertexError = error as? VertexAIError {
+            return vertexError.isExplicitSafetyPolicyBlock
+        }
+        return false
+    }
+
+    static func cloudSafetyGapMarker(for record: AudioSegmentRecord) -> String {
+        let start = cloudTimestamp(record.startSeconds)
+        let end = cloudTimestamp(record.endSeconds)
+        return "【第 \(record.segmentIndex)/\(record.segmentCount) 段未完成｜\(start)–\(end)｜Google 內容安全政策攔截；可使用「重送未完成片段」再試】"
+    }
+
+    private static func cloudTimestamp(_ seconds: TimeInterval) -> String {
+        let rounded = max(Int(seconds.rounded()), 0)
+        return String(
+            format: "%02d:%02d:%02d",
+            rounded / 3_600,
+            (rounded % 3_600) / 60,
+            rounded % 60
+        )
     }
 
     /// 先合併所有分段逐字稿，再依設定最多產生一次摘要。
@@ -1480,9 +1515,7 @@ public final class TranscriptionEngine {
             let segmentLabel = totalSegments > 1
                 ? " 第 \(segmentIndex)/\(totalSegments) 段"
                 : ""
-            let waitingUnit = totalSegments > 1
-                ? "waiting|\(segmentIndex)|\(totalSegments)"
-                : "waiting"
+            let waitingUnit = "waiting|\(segmentIndex)|\(totalSegments)"
 
             if
                 (record.status == .completed
@@ -1509,9 +1542,7 @@ public final class TranscriptionEngine {
                     .progress(
                         current: maxProgress,
                         total: 100,
-                        unit: totalSegments > 1
-                            ? "percent|\(segmentIndex)|\(totalSegments)"
-                            : "percent"
+                        unit: "percent|\(segmentIndex)|\(totalSegments)"
                     )
                 )
                 zeroBasedIndex += 1
@@ -1521,6 +1552,13 @@ public final class TranscriptionEngine {
             do {
                 currentStage.set(.convertingAudio)
                 update(.stage(.convertingAudio))
+                update(
+                    .progress(
+                        current: baseProgress,
+                        total: 100,
+                        unit: "preparing|\(segmentIndex)|\(totalSegments)"
+                    )
+                )
                 update(
                     .log(
                         level: "info",
@@ -1541,9 +1579,9 @@ public final class TranscriptionEngine {
                             : 0
                         update(
                             .progress(
-                                current: 2.0 + fraction * 6.0,
+                                current: baseProgress + fraction * 6.0,
                                 total: 100,
-                                unit: "percent"
+                                unit: "preparing|\(segmentIndex)|\(totalSegments)"
                             )
                         )
                     }
@@ -1585,7 +1623,7 @@ public final class TranscriptionEngine {
                 update(
                     .log(
                         level: "info",
-                        message: "正在由 \(modelDisplay)\(segmentLabel) 忠實轉錄；等待期間顯示不確定進度，不虛構完成百分比。"
+                        message: "正在由 \(modelDisplay)\(segmentLabel) 忠實轉錄；Google 正在處理音訊，完成後會更新進度。"
                     )
                 )
                 try segmentManifest.mark(
@@ -1651,9 +1689,7 @@ public final class TranscriptionEngine {
                     .progress(
                         current: maxProgress,
                         total: 100,
-                        unit: totalSegments > 1
-                            ? "percent|\(segmentIndex)|\(totalSegments)"
-                            : "percent"
+                        unit: "percent|\(segmentIndex)|\(totalSegments)"
                     )
                 )
                 zeroBasedIndex += 1
@@ -1735,6 +1771,32 @@ public final class TranscriptionEngine {
                 try? writeSegmentManifest(segmentManifest, to: segmentManifestURL)
                 throw CancellationError()
             } catch {
+                if Self.isExplicitGoogleSafetyBlock(error) {
+                    try? segmentManifest.mark(
+                        segmentIndex: segmentIndex,
+                        status: .blockedBySafety,
+                        failureMessage: error.localizedDescription
+                    )
+                    try? writeSegmentManifest(
+                        segmentManifest,
+                        to: segmentManifestURL
+                    )
+                    update(
+                        .warning(
+                            code: "cloud_segment_blocked_by_safety",
+                            message: "第 \(segmentIndex)/\(totalSegments) 段遭 Google 內容安全政策攔截；已標記為未完成並繼續處理後續片段。"
+                        )
+                    )
+                    update(
+                        .progress(
+                            current: maxProgress,
+                            total: 100,
+                            unit: "percent|\(segmentIndex)|\(totalSegments)"
+                        )
+                    )
+                    zeroBasedIndex += 1
+                    continue
+                }
                 try? segmentManifest.mark(
                     segmentIndex: segmentIndex,
                     status: .failed,
@@ -1757,13 +1819,22 @@ public final class TranscriptionEngine {
             }
         }
 
-        let completedSegments = try segmentManifest.validatedCompletedSegments()
-        let completedSegmentTexts = try completedSegments.map { record in
-            speakerRoster.normalizingSpeakerLabels(in: try TextFileValidator.readNonEmptyUTF8(
-                at: URL(fileURLWithPath: record.outputPath)
-            ))
+        let mergeableSegments = try segmentManifest
+            .validatedSegmentsAllowingSafetyBlocks()
+        let blockedSegments = mergeableSegments.filter {
+            $0.status == .blockedBySafety
         }
-        let segmentMetadata = completedSegments.compactMap(\.cloudMetadata)
+        let completedSegmentTexts = try mergeableSegments.map { record in
+            if record.status == .blockedBySafety {
+                return Self.cloudSafetyGapMarker(for: record)
+            }
+            return speakerRoster.normalizingSpeakerLabels(
+                in: try TextFileValidator.readNonEmptyUTF8(
+                    at: URL(fileURLWithPath: record.outputPath)
+                )
+            )
+        }
+        let segmentMetadata = mergeableSegments.compactMap(\.cloudMetadata)
         let mergedText: String
         if let finalizeTranscript {
             mergedText = await finalizeTranscript(completedSegmentTexts)
@@ -1779,9 +1850,15 @@ public final class TranscriptionEngine {
         try AtomicFileWriter.writeText(validatedRaw, to: cloudRawURL)
 
         try Task.checkCancellation()
-        update(.progress(current: 92, total: 100, unit: "percent"))
         currentStage.set(.convertingTraditionalChinese)
         update(.stage(.convertingTraditionalChinese))
+        update(
+            .progress(
+                current: 100,
+                total: 100,
+                unit: "postprocessing|\(mergeableSegments.count)|\(mergeableSegments.count)"
+            )
+        )
         update(
             .log(
                 level: "info",
@@ -1798,9 +1875,15 @@ public final class TranscriptionEngine {
         )
 
         try Task.checkCancellation()
-        update(.progress(current: 98, total: 100, unit: "percent"))
         currentStage.set(.writingOutput)
         update(.stage(.writingOutput))
+        update(
+            .progress(
+                current: 100,
+                total: 100,
+                unit: "postprocessing|\(mergeableSegments.count)|\(mergeableSegments.count)"
+            )
+        )
         let finalOutputURL = try writeUniqueText(
             finalTranscribedText,
             sourceURL: sourceURL,
@@ -1811,11 +1894,51 @@ public final class TranscriptionEngine {
             )
         )
 
-        update(.progress(current: 100, total: 100, unit: "percent"))
+        var gapRecoveryDirectory: URL?
+        if !blockedSegments.isEmpty {
+            let blockedIndices = blockedSegments.map(\.segmentIndex)
+            let hasReusableTranscript = mergeableSegments.contains {
+                $0.status == .completed || $0.status == .completedWithGaps
+            }
+            if hasReusableTranscript {
+                let recoveryDirectory = paths.tempRecovery.appendingPathComponent(
+                    job.id.uuidString,
+                    isDirectory: true
+                )
+                do {
+                    gapRecoveryDirectory = try preserveCloudRecoveryData(
+                        job: job,
+                        stage: .transcribing,
+                        error: CloudSafetyGapSummaryError(
+                            segmentIndices: blockedIndices
+                        ),
+                        segmentManifestURL: segmentManifestURL,
+                        recoveryDirectory: recoveryDirectory
+                    )
+                } catch {
+                    update(
+                        .warning(
+                            code: "cloud_gap_recovery_incomplete",
+                            message: "其餘片段已產生輸出，但無法保存「只重送未完成片段」的檢查點：\(error.localizedDescription)"
+                        )
+                    )
+                }
+            }
+        }
+
+        update(
+            .progress(
+                current: 100,
+                total: 100,
+                unit: "postprocessing|\(mergeableSegments.count)|\(mergeableSegments.count)"
+            )
+        )
         update(
             .log(
                 level: "info",
-                message: "轉錄完成！已儲存至：\(finalOutputURL.lastPathComponent)"
+                message: blockedSegments.isEmpty
+                    ? "轉錄完成！已儲存至：\(finalOutputURL.lastPathComponent)"
+                    : "其餘片段已完成，未完成片段已在稿件中標記。已儲存至：\(finalOutputURL.lastPathComponent)"
             )
         )
         update(.stage(.completed))
@@ -1823,8 +1946,10 @@ public final class TranscriptionEngine {
             outputURL: finalOutputURL,
             rawOutputURL: nil,
             duration: Date().timeIntervalSince(startedAt),
-            containsSkippedAudio: false,
-            cloudSegmentMetadata: segmentMetadata
+            containsSkippedAudio: !blockedSegments.isEmpty,
+            cloudSegmentMetadata: segmentMetadata,
+            incompleteCloudSegmentIndices: blockedSegments.map(\.segmentIndex),
+            recoveryDirectory: gapRecoveryDirectory
         )
     }
 

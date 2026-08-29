@@ -12,6 +12,9 @@ export CLANG_MODULE_CACHE_PATH="${BUILD_DIR}/ModuleCache"
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
+"${PROJECT_DIR}/scripts/check-version.sh"
+"${PROJECT_DIR}/scripts/repo-hygiene.sh"
+
 "${PYTHON_BIN}" -B Tests/qwen_asr_chunking_test.py
 "${PYTHON_BIN}" -B Tests/qwen_asr_mlx_runner_test.py
 
@@ -59,7 +62,11 @@ else
   print "SKIP swift test: full Xcode is not available; Python, executable, and pipeline tests passed."
 fi
 
-"${PROJECT_DIR}/scripts/build-app.sh"
+if [[ "${SKIP_APP_BUNDLE:-0}" == "1" ]]; then
+  print "SKIP App bundle build: SKIP_APP_BUNDLE=1"
+else
+  "${PROJECT_DIR}/scripts/build-app.sh"
+fi
 
 git diff --check
 

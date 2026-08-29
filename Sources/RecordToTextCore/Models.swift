@@ -1183,19 +1183,25 @@ public struct PipelineResult: Equatable, Sendable {
     public let duration: TimeInterval
     public let containsSkippedAudio: Bool
     public let cloudSegmentMetadata: [CloudTranscriptionMetadata]
+    public let incompleteCloudSegmentIndices: [Int]
+    public let recoveryDirectory: URL?
 
     public init(
         outputURL: URL,
         rawOutputURL: URL?,
         duration: TimeInterval,
         containsSkippedAudio: Bool = false,
-        cloudSegmentMetadata: [CloudTranscriptionMetadata] = []
+        cloudSegmentMetadata: [CloudTranscriptionMetadata] = [],
+        incompleteCloudSegmentIndices: [Int] = [],
+        recoveryDirectory: URL? = nil
     ) {
         self.outputURL = outputURL
         self.rawOutputURL = rawOutputURL
         self.duration = duration
         self.containsSkippedAudio = containsSkippedAudio
         self.cloudSegmentMetadata = cloudSegmentMetadata
+        self.incompleteCloudSegmentIndices = incompleteCloudSegmentIndices
+        self.recoveryDirectory = recoveryDirectory
     }
 }
 

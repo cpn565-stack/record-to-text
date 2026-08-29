@@ -9,7 +9,14 @@ struct RecoveryScanView: View {
         VStack(alignment: .leading, spacing: 16) {
             header
             summaryRow
-            if let report = viewModel.recoveryScanReport, !report.items.isEmpty {
+            if viewModel.isRecoveryScanRunning,
+               viewModel.recoveryScanReport == nil
+            {
+                ProgressView("正在掃描 App 管理的復原資料…")
+                    .frame(maxWidth: .infinity, minHeight: 200)
+            } else if let report = viewModel.recoveryScanReport,
+                      !report.items.isEmpty
+            {
                 List {
                     ForEach(report.items) { item in
                         RecoveryScanRow(
@@ -36,15 +43,28 @@ struct RecoveryScanView: View {
                 .foregroundStyle(.secondary)
 
             HStack {
-                Button("重新掃描") {
+                Button {
                     viewModel.refreshRecoveryScan()
+                } label: {
+                    if viewModel.isRecoveryScanRunning {
+                        Label("掃描中…", systemImage: "arrow.triangle.2.circlepath")
+                    } else {
+                        Text("重新掃描")
+                    }
                 }
+                .disabled(viewModel.isRecoveryScanRunning)
                 if hasNonRecoverableItems {
                     Button("清除孤立與損壞…", role: .destructive) {
                         viewModel.requestBulkCleanupNonRecoverable()
                     }
+                    .disabled(viewModel.isRecoveryScanRunning)
                 }
                 Spacer()
+                if let scannedAt = viewModel.recoveryScanReport?.scannedAt {
+                    Text("上次完成：\(scannedAt.formatted(date: .omitted, time: .standard))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Button("關閉") {
                     viewModel.dismissRecoveryScan()
                 }
@@ -125,7 +145,7 @@ struct RecoveryScanView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("復原掃描")
                 .font(.title2.weight(.semibold))
-            Text("盤點系統暫存與 Temp-Recovery；可取回已完成的部分稿，或把仍存在的原始錄音重新加入並從頭轉錄。本功能不會自動斷點續跑。")
+            Text("盤點系統暫存與 Temp-Recovery；可取回部分稿、顯示復原資料，或重新加入原始錄音。相容的雲端片段與 Qwen chunk 續跑會顯示在原工作卡片上。")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }
@@ -134,6 +154,11 @@ struct RecoveryScanView: View {
     private var summaryRow: some View {
         let report = viewModel.recoveryScanReport
         return HStack(spacing: 16) {
+            if viewModel.isRecoveryScanRunning {
+                ProgressView()
+                    .controlSize(.small)
+                    .help("正在背景掃描")
+            }
             summaryChip(
                 title: "可取回／可重加",
                 count: report?.recoverableCount ?? 0,

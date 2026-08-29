@@ -57,6 +57,14 @@
 | 15 | **前端等分切片佇列** | 錄音加入佇列後，可在「開始轉文字」旁將單一來源切成前後兩個時間範圍工作；第一段先處理，第二段留在佇列，各自產生有順序的 TXT。 |
 | 7 | **手動 TXT 合併** | 可選取多份 TXT，依分段編號排序合併成新檔；原始檔案不覆寫，後續 LLM 可直接使用。 |
 
+## 已完成（2026-08-28，Reliability v2 Phase 4–6）
+
+| 階段 | 結果 |
+|---|---|
+| **4 啟動效能與復原 UX（P1）** | 模型快取與 RecoveryScanner 改在 utility-priority 背景任務執行；加入取消／generation gate，避免舊結果覆蓋新選擇；復原畫面顯示掃描中與完成時間。 |
+| **5 CI、版本、安裝與交付（P1）** | `Config/version.env` 成為單一版本來源；CI 避免重複 App bundle 建置，強制 150 MiB 體積門檻，產生未簽署測試 DMG 與 SHA-256 artifact。 |
+| **6 架構整理、repo 清理、體積（P2）** | 啟動盤點邏輯抽成 `StartupInventory`；移除一次性 Gemini patcher；SwiftPM 改為明確打包 3 支 helper，防止 `__pycache__` 進入 App；加入 repo hygiene 與建置體積 gate。 |
+
 ## 待修改／尚未做（優先序）
 
 ### P2 — 產品規劃已定、程式未做

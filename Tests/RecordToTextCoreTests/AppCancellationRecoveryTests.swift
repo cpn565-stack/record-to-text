@@ -195,7 +195,7 @@ final class AppCancellationRecoveryTests: XCTestCase {
             ignoredNonUUIDDirectoryCount: 0
         )
 
-        let filtered = AppViewModel.excludingActiveJobDirectories(
+        let filtered = StartupInventory.excludingActiveRecoveryDirectories(
             from: report,
             activeRecoveryDirectoryPaths: [active.directoryPath]
         )
