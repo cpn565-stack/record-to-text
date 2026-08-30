@@ -78,7 +78,7 @@
 
 | 項目 | 尚缺證據 |
 |---|---|
-| **真實 Gemini 自適應切段** | 以受控短音檔驗證真實 AI Studio／Vertex `MAX_TOKENS`、子段 `STOP`、segment coverage 與成本。 |
+| **真實 Gemini 自適應切段** | 以受控 **≥ 8 分鐘**（建議 8–12 分鐘）音檔驗證真實 AI Studio／Vertex `MAX_TOKENS`、子段 `STOP`、segment coverage 與成本。5 分鐘檔不夠測 production 240 秒最小子段。規格見 [`real-gemini-adaptive-split-spec-2026-08-30.md`](real-gemini-adaptive-split-spec-2026-08-30.md)（待實作）。 |
 | **Speaker roster** | 30 分鐘多人錄音、相似姓名、中途加入第三位講者，確認 heuristic 不會錯併。 |
 | **Qwen soak／復原** | 30 分鐘與原 173 分鐘 BF16；timeout restart、手動 chunk resume、成功後 recovery cleanup。 |
 | **GUI／輔助使用** | 真實 active cloud job 的 90% 進度、High Contrast、Reduce Motion、recovery scan／resume／取消。 |
@@ -128,7 +128,7 @@
 
 ## 建議下一輪開工順序
 
-1. 受控真實 Gemini `MAX_TOKENS` 與 segment coverage 回歸
+1. 受控真實 Gemini `MAX_TOKENS` 與 segment coverage 回歸（規格：`docs/real-gemini-adaptive-split-spec-2026-08-30.md`，待實作；尚未授權付費呼叫）
 2. 30 分鐘多人 speaker roster 與 30／173 分鐘 Qwen soak
 3. 真實 active cloud job、High Contrast、Reduce Motion 與 recovery cleanup GUI 驗收
 4. PD-015 自動檢查更新
