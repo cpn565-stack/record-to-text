@@ -4,6 +4,8 @@
 基準 commit：`9c21834`（`codex/record-to-text-reliability-v2`）
 目前 checkpoint：**0.2.0 / Reliability v2 自動化收尾完成** — 仍不是可交付一般使用者的 Stable DMG。
 
+全盤優化與後續優先序見 [`post-0.2-optimization-spec-2026-08-30.md`](post-0.2-optimization-spec-2026-08-30.md)。
+
 ---
 
 ## 已完成（目前 reliability-v2 分支具備）
