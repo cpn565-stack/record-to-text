@@ -10,9 +10,9 @@ public enum GeminiThinkingLevel: String, Codable, CaseIterable, Sendable {
         case .low:
             return "低（速度優先）"
         case .medium:
-            return "中（模型預設）"
+            return "中"
         case .high:
-            return "高（品質／延遲較高）"
+            return "高（預設／品質優先）"
         }
     }
 }
@@ -26,7 +26,7 @@ public enum CloudFallbackPolicy: String, Codable, CaseIterable, Sendable {
         case .disabled:
             return "不自動切換模型（推薦）"
         case .flashOnly:
-            return "3.7 忙碌時允許改用 3.6 Flash"
+            return "3.8 / 3.7 忙碌時允許改用 3.6 Flash"
         }
     }
 }
@@ -103,7 +103,7 @@ public struct CloudTranscriptionMetadata: Codable, Equatable, Sendable {
         responseID: String? = nil,
         retryCount: Int = 0,
         fallbackReason: String? = nil,
-        thinkingLevel: GeminiThinkingLevel = .medium,
+        thinkingLevel: GeminiThinkingLevel = .high,
         latencySeconds: Double? = nil,
         usage: CloudUsageMetadata? = nil
     ) {
@@ -210,6 +210,20 @@ public extension TranscriptionJob {
         }
         return "要求：\(snapshot.requestedModelID)；實際：\(effective.joined(separator: ", "))"
     }
+
+    var cloudTokenSummary: String? {
+        guard snapshot.backendType != .localQwen else {
+            return nil
+        }
+        let metadata = resolvedCloudSegmentMetadata
+        guard !metadata.isEmpty else {
+            return nil
+        }
+        let usage = CloudTranscriptionMetadataAggregator.totalUsage(metadata)
+        let effective = CloudTranscriptionMetadataAggregator.uniqueEffectiveModelIDs(metadata)
+        let model = effective.first ?? snapshot.requestedModelID
+        return usage?.summaryDisplay(modelID: model)
+    }
 }
 
 public extension RecentJobSummary {
@@ -224,5 +238,101 @@ public extension RecentJobSummary {
             return modelID
         }
         return "要求：\(modelID)；實際：\(effectiveModelIDs.joined(separator: ", "))"
+    }
+
+    var cloudTokenSummary: String? {
+        guard backendType != .localQwen else {
+            return nil
+        }
+        let model = effectiveModelIDs?.first ?? modelID
+        return cloudUsage?.summaryDisplay(modelID: model)
+    }
+}
+
+public extension CloudUsageMetadata {
+    /// 依據 Google 官方定價（美元 / 1M Tokens）估算任務成本
+    func estimatedCostUSD(modelID: String) -> Double? {
+        guard let total = totalTokenCount, total > 0 else {
+            return nil
+        }
+
+        let inputRatePer1M: Double
+        let outputRatePer1M: Double
+
+        if modelID.contains("3.8") || modelID.contains("3.7") {
+            // Gemini 3.8 Flash & 3.7 Flash: Input $0.75/1M, Output $3.75/1M
+            inputRatePer1M = 0.75
+            outputRatePer1M = 3.75
+        } else if modelID.contains("3.6") {
+            // Gemini 3.6 Flash: Audio input $0.70/1M, Output $0.40/1M
+            inputRatePer1M = 0.70
+            outputRatePer1M = 0.40
+        } else if modelID.contains("pro") {
+            // Gemini 3.1 Pro: Input $1.25/1M, Output $5.00/1M
+            inputRatePer1M = 1.25
+            outputRatePer1M = 5.00
+        } else {
+            // 預設以最新 Flash 費率標準計算
+            inputRatePer1M = 0.75
+            outputRatePer1M = 3.75
+        }
+
+        if let prompt = promptTokenCount, let candidates = candidatesTokenCount {
+            let promptCost = (Double(prompt) / 1_000_000.0) * inputRatePer1M
+            let candidateCost = (Double(candidates) / 1_000_000.0) * outputRatePer1M
+            return promptCost + candidateCost
+        } else {
+            // 若只有 totalTokenCount，錄音輸入約佔 95%，輸出約佔 5%
+            let estimatedPrompt = Double(total) * 0.95
+            let estimatedCandidate = Double(total) * 0.05
+            let promptCost = (estimatedPrompt / 1_000_000.0) * inputRatePer1M
+            let candidateCost = (estimatedCandidate / 1_000_000.0) * outputRatePer1M
+            return promptCost + candidateCost
+        }
+    }
+
+    /// 格式化 Token 數量（例如：79228 -> "79.2k", 1212 -> "1.2k", 500 -> "500"）
+    static func formatTokenCount(_ count: Int) -> String {
+        if count >= 1_000_000 {
+            let val = Double(count) / 1_000_000.0
+            return String(format: "%.1fm", val)
+        } else if count >= 1_000 {
+            let val = Double(count) / 1_000.0
+            return String(format: "%.1fk", val)
+        } else {
+            return "\(count)"
+        }
+    }
+
+    /// 格式化美元金額（例如：0.072 -> "$0.07"；若小於 0.01 則顯示 "< $0.01"）
+    static func formatCostUSD(_ cost: Double) -> String {
+        if cost <= 0 {
+            return "$0.00"
+        } else if cost < 0.01 {
+            return "< $0.01"
+        } else {
+            return String(format: "$%.2f", cost)
+        }
+    }
+
+    /// 產生格式如「79.2k tokens (思考 1.2k)，預估 $0.07」的完整顯示字串
+    func summaryDisplay(modelID: String) -> String? {
+        guard let total = totalTokenCount, total > 0 else {
+            return nil
+        }
+        var parts: [String] = []
+        let totalFormatted = Self.formatTokenCount(total)
+        if let thoughts = thoughtsTokenCount, thoughts > 0 {
+            let thoughtsFormatted = Self.formatTokenCount(thoughts)
+            parts.append("\(totalFormatted) tokens (思考 \(thoughtsFormatted))")
+        } else {
+            parts.append("\(totalFormatted) tokens")
+        }
+
+        if let cost = estimatedCostUSD(modelID: modelID) {
+            parts.append("預估 \(Self.formatCostUSD(cost))")
+        }
+
+        return parts.joined(separator: "，")
     }
 }

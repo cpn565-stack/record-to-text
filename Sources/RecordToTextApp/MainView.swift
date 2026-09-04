@@ -878,7 +878,7 @@ private struct JobRowView: View {
                     .truncationMode(.middle)
 
                 HStack(spacing: 7) {
-                    Text(job.stage.displayName)
+                    Text(job.statusWithCompletionTime())
                         .font(.caption)
                         .foregroundStyle(statusColor)
 
@@ -886,6 +886,18 @@ private struct JobRowView: View {
                     // Completed jobs stay as plain「完成」with no counting clock.
                     if job.id == viewModel.activeJobID {
                         JobElapsedView(startedAt: job.startedAt)
+                    }
+                    if let cloudModel = job.cloudModelSummary {
+                        Text("・\(cloudModel)")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    if let tokenSummary = job.cloudTokenSummary {
+                        Text("・\(tokenSummary)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
                     }
                 }
             }
@@ -1228,7 +1240,7 @@ private struct RecentJobRow: View {
                     .truncationMode(.middle)
 
                 HStack(spacing: 7) {
-                    Text(summary.stage.displayName)
+                    Text(summary.statusWithCompletionTime())
                         .font(.caption)
                         .foregroundStyle(statusColor)
                     if let fileStatusName = fileStatus.displayName {
@@ -1244,6 +1256,12 @@ private struct RecentJobRow: View {
                     if let cloudModel = summary.cloudModelSummary {
                         Text("・\(cloudModel)")
                             .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    if let tokenSummary = summary.cloudTokenSummary {
+                        Text("・\(tokenSummary)")
+                            .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
@@ -1428,6 +1446,9 @@ private enum JobDebugClipboard {
             }
             if let thoughts = usage?.thoughtsTokenCount {
                 lines.append("thinking token：\(thoughts)")
+            }
+            if let cost = usage?.estimatedCostUSD(modelID: job.snapshot.requestedModelID) {
+                lines.append("預估費用：\(CloudUsageMetadata.formatCostUSD(cost))")
             }
             if retries > 0 {
                 lines.append("重試：\(retries)")

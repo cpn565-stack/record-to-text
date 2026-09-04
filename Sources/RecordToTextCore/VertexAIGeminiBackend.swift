@@ -83,7 +83,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             modelID: String = "gemini-3.7-flash",
             gcsBucket: String? = nil,
             includeSummary: Bool = false,
-            thinkingLevel: GeminiThinkingLevel = .medium,
+            thinkingLevel: GeminiThinkingLevel = .high,
             fallbackPolicy: CloudFallbackPolicy = .disabled
         ) {
             self.projectID = projectID
@@ -284,7 +284,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         } catch let error as VertexAIError {
             guard
                 fallbackPolicy == .flashOnly,
-                preferredModelID.contains("3.7"),
+                preferredModelID.contains("3.7") || preferredModelID.contains("3.8"),
                 Self.isRetryableServerFailure(error)
             else {
                 throw error
@@ -294,7 +294,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             let reason = error.localizedDescription
             logger?(
                 "warning",
-                "Gemini 3.7 重試後仍不可用；依使用者設定改用 \(fallbackModel)。原始原因：\(reason)"
+                "Gemini 重試後仍不可用；依使用者設定改用 \(fallbackModel)。原始原因：\(reason)"
             )
             return try await executeWithRetries(
                 requestedModelID: preferredModelID,

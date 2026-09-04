@@ -1888,6 +1888,9 @@ final class AppViewModel: ObservableObject {
         if let thoughts = usage?.thoughtsTokenCount {
             parts.append("thinking token \(thoughts)")
         }
+        if let cost = usage?.estimatedCostUSD(modelID: effectiveModels.first ?? "") {
+            parts.append("預估 \(CloudUsageMetadata.formatCostUSD(cost))")
+        }
         jobs[index].logLines.append(parts.joined(separator: "；") + "。")
     }
 

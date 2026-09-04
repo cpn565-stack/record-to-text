@@ -82,7 +82,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             apiKey: String? = nil,
             modelID: String = "gemini-3.7-flash",
             useFilesAPI: Bool = true,
-            thinkingLevel: GeminiThinkingLevel = .medium,
+            thinkingLevel: GeminiThinkingLevel = .high,
             fallbackPolicy: CloudFallbackPolicy = .disabled
         ) {
             self.apiKey = apiKey
@@ -287,7 +287,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         } catch let error as GoogleAIStudioError {
             guard
                 fallbackPolicy == .flashOnly,
-                preferredModelID.contains("3.7"),
+                preferredModelID.contains("3.7") || preferredModelID.contains("3.8"),
                 Self.isRetryableServerFailure(error)
             else {
                 throw error
@@ -297,7 +297,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             let reason = error.localizedDescription
             logger?(
                 "warning",
-                "Gemini 3.7 重試後仍不可用；依使用者設定改用 \(fallbackModel)。原始原因：\(reason)"
+                "Gemini 重試後仍不可用；依使用者設定改用 \(fallbackModel)。原始原因：\(reason)"
             )
             return try await executeWithRetries(
                 requestedModelID: preferredModelID,

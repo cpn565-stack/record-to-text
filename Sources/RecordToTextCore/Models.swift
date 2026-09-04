@@ -158,14 +158,19 @@ public struct GeminiModelDescriptor: Identifiable, Hashable, Sendable {
 
     public static let presetModels: [GeminiModelDescriptor] = [
         GeminiModelDescriptor(
+            id: "gemini-3.8-flash",
+            displayName: "Gemini 3.8 Flash",
+            note: "最新 Flash 模型，極速轉錄、中文語音理解力頂級（推薦）"
+        ),
+        GeminiModelDescriptor(
             id: "gemini-3.7-flash",
             displayName: "Gemini 3.7 Flash",
-            note: "極速轉錄、中文語音理解力頂級，適合日常會議與課程（推薦）"
+            note: "極速轉錄、中文語音理解力頂級，適合日常會議與課程"
         ),
         GeminiModelDescriptor(
             id: "gemini-3.6-flash",
             displayName: "Gemini 3.6 Flash",
-            note: "速度極快且高可用，當 3.7 遇到尖峰負載 (503) 時的絕佳替代選擇"
+            note: "速度極快且高可用，當 3.8/3.7 遇到尖峰負載 (503) 時的絕佳替代選擇"
         ),
         GeminiModelDescriptor(
             id: "gemini-3.1-pro-preview",
@@ -285,7 +290,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         vertexAIModelID: String = "gemini-3.7-flash",
         vertexAIGCSBucket: String? = nil,
         vertexAIIncludeSummary: Bool = false,
-        geminiThinkingLevel: GeminiThinkingLevel = .medium,
+        geminiThinkingLevel: GeminiThinkingLevel = .high,
         cloudFallbackPolicy: CloudFallbackPolicy = .disabled,
         silenceAwareCloudSegmentation: Bool = true,
         customGCloudPath: String? = nil
@@ -361,7 +366,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         geminiThinkingLevel = try container.decodeIfPresent(
             GeminiThinkingLevel.self,
             forKey: .geminiThinkingLevel
-        ) ?? .medium
+        ) ?? .high
         cloudFallbackPolicy = try container.decodeIfPresent(
             CloudFallbackPolicy.self,
             forKey: .cloudFallbackPolicy
@@ -625,7 +630,7 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
         vertexAIModelID: String = "gemini-3.7-flash",
         vertexAIGCSBucket: String? = nil,
         vertexAIIncludeSummary: Bool = false,
-        geminiThinkingLevel: GeminiThinkingLevel = .medium,
+        geminiThinkingLevel: GeminiThinkingLevel = .high,
         cloudFallbackPolicy: CloudFallbackPolicy = .disabled,
         silenceAwareCloudSegmentation: Bool = true
     ) {
@@ -694,7 +699,7 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
         geminiThinkingLevel = try container.decodeIfPresent(
             GeminiThinkingLevel.self,
             forKey: .geminiThinkingLevel
-        ) ?? .medium
+        ) ?? .high
         cloudFallbackPolicy = try container.decodeIfPresent(
             CloudFallbackPolicy.self,
             forKey: .cloudFallbackPolicy
@@ -1060,6 +1065,48 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
         default:
             return .available
         }
+    }
+
+    public func statusWithCompletionTime(
+        now: Date = Date(),
+        calendar: Calendar = .current
+    ) -> String {
+        guard stage == .completed, let date = completedAt ?? startedAt else {
+            return stage.displayName
+        }
+        let timeString = Self.formatCompletionDate(date, now: now, calendar: calendar)
+        return "完成 \(timeString)"
+    }
+
+    public static func formatCompletionDate(
+        _ date: Date,
+        now: Date = Date(),
+        calendar: Calendar = .current
+    ) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_Hant_TW")
+        formatter.timeZone = calendar.timeZone
+        if calendar.isDate(date, inSameDayAs: now) {
+            formatter.dateFormat = "HH:mm"
+        } else if calendar.isDate(date, equalTo: now, toGranularity: .year) {
+            formatter.dateFormat = "M/d"
+        } else {
+            formatter.dateFormat = "yyyy/M/d"
+        }
+        return formatter.string(from: date)
+    }
+}
+
+public extension TranscriptionJob {
+    func statusWithCompletionTime(
+        now: Date = Date(),
+        calendar: Calendar = .current
+    ) -> String {
+        guard stage == .completed, let date = completedAt ?? startedAt else {
+            return stage.displayName
+        }
+        let timeString = RecentJobSummary.formatCompletionDate(date, now: now, calendar: calendar)
+        return "完成 \(timeString)"
     }
 }
 

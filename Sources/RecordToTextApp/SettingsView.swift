@@ -382,7 +382,7 @@ struct SettingsView: View {
                             "自訂模型 ID (Model ID)",
                             text: Binding(
                                 get: { viewModel.settings.googleAIStudioModelID },
-                                set: { viewModel.setSetting(\.googleAIStudioModelID, to: $0.isEmpty ? "gemini-3.7-flash" : $0) }
+                                set: { viewModel.setSetting(\.googleAIStudioModelID, to: $0.isEmpty ? "gemini-3.8-flash" : $0) }
                             )
                         )
                         .textFieldStyle(.roundedBorder)
@@ -456,7 +456,7 @@ struct SettingsView: View {
                             "自訂模型 ID (Model ID)",
                             text: Binding(
                                 get: { viewModel.settings.vertexAIModelID },
-                                set: { viewModel.setSetting(\.vertexAIModelID, to: $0.isEmpty ? "gemini-3.7-flash" : $0) }
+                                set: { viewModel.setSetting(\.vertexAIModelID, to: $0.isEmpty ? "gemini-3.8-flash" : $0) }
                             )
                         )
                         .textFieldStyle(.roundedBorder)
@@ -498,7 +498,7 @@ struct SettingsView: View {
                     Divider()
 
                     Picker(
-                        "Gemini 3.7 思考強度",
+                        "Gemini 思考強度",
                         selection: setting(\.geminiThinkingLevel)
                     ) {
                         ForEach(GeminiThinkingLevel.allCases, id: \.self) { level in
@@ -517,7 +517,7 @@ struct SettingsView: View {
                             Text(policy.displayName).tag(policy)
                         }
                     }
-                    Text("預設不自動換模型，避免同一份長錄音混用不同模型。允許 fallback 時只會從 3.7 改用 3.6 Flash，不會自動改用 Pro。")
+                    Text("預設不自動換模型，避免同一份長錄音混用不同模型。允許 fallback 時只會從 3.8/3.7 改用 3.6 Flash，不會自動改用 Pro。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 

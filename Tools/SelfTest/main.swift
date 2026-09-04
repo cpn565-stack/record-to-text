@@ -1112,28 +1112,35 @@ tests.check(
 tests.check(
     {
         let presets = GeminiModelDescriptor.presetModels
-        return presets.contains(where: { $0.id == "gemini-3.7-flash" })
+        return presets.contains(where: { $0.id == "gemini-3.8-flash" })
+            && presets.contains(where: { $0.id == "gemini-3.7-flash" })
             && presets.contains(where: { $0.id == "gemini-3.6-flash" })
             && presets.contains(where: { $0.id == "gemini-3.1-pro-preview" })
     }(),
-    "GeminiModelDescriptor contains 3.7 Flash, 3.6 Flash and 3.1 Pro presets"
+    "GeminiModelDescriptor contains 3.8 Flash, 3.7 Flash, 3.6 Flash and 3.1 Pro presets"
 )
 
 tests.check(
     {
         let base = AppSettings(defaultOutputDirectory: "/tmp/output")
         let qwen = QuickTranscriptionChoice.qwen3ASR1_7BBF16.applying(to: base)
-        let vertex = QuickTranscriptionChoice.vertexGemini37Flash.applying(to: qwen)
-        let aiStudio = QuickTranscriptionChoice.aiStudioGemini37Flash.applying(
-            to: vertex
+        let vertex37 = QuickTranscriptionChoice.vertexGemini37Flash.applying(to: qwen)
+        let aiStudio37 = QuickTranscriptionChoice.aiStudioGemini37Flash.applying(
+            to: vertex37
         )
+        let vertex38 = QuickTranscriptionChoice.vertexGemini38Flash.applying(to: aiStudio37)
+        let aiStudio38 = QuickTranscriptionChoice.aiStudioGemini38Flash.applying(to: vertex38)
         return QuickTranscriptionChoice.qwen3ASR1_7BBF16.matches(qwen)
             && qwen.backendType == .localQwen
             && qwen.selectedModelID == ASRModelDescriptor.appleSiliconBF16.id
-            && QuickTranscriptionChoice.vertexGemini37Flash.matches(vertex)
-            && vertex.vertexAIModelID == "gemini-3.7-flash"
-            && QuickTranscriptionChoice.aiStudioGemini37Flash.matches(aiStudio)
-            && aiStudio.googleAIStudioModelID == "gemini-3.7-flash"
+            && QuickTranscriptionChoice.vertexGemini37Flash.matches(vertex37)
+            && vertex37.vertexAIModelID == "gemini-3.7-flash"
+            && QuickTranscriptionChoice.aiStudioGemini37Flash.matches(aiStudio37)
+            && aiStudio37.googleAIStudioModelID == "gemini-3.7-flash"
+            && QuickTranscriptionChoice.vertexGemini38Flash.matches(vertex38)
+            && vertex38.vertexAIModelID == "gemini-3.8-flash"
+            && QuickTranscriptionChoice.aiStudioGemini38Flash.matches(aiStudio38)
+            && aiStudio38.googleAIStudioModelID == "gemini-3.8-flash"
     }(),
     "Main-window quick model choices switch backend and matching model together"
 )
@@ -1185,7 +1192,7 @@ tests.check(
         )
         let high = GeminiGenerationConfig.make(
             maxOutputTokens: 16_384,
-            modelID: "gemini-3.7-flash",
+            modelID: "gemini-3.8-flash",
             thinkingLevel: .high
         )
         let custom = GeminiGenerationConfig.make(
@@ -1200,6 +1207,58 @@ tests.check(
             && custom["thinkingConfig"] == nil
     }(),
     "Gemini thinking level is included in Gemini 3 generation config"
+)
+
+tests.check(
+    {
+        let usage = CloudUsageMetadata(
+            promptTokenCount: 75_000,
+            candidatesTokenCount: 4_228,
+            thoughtsTokenCount: 1_212,
+            totalTokenCount: 79_228
+        )
+        let display = usage.summaryDisplay(modelID: "gemini-3.8-flash")
+        let cost = usage.estimatedCostUSD(modelID: "gemini-3.8-flash")
+        return display == "79.2k tokens (思考 1.2k)，預估 $0.07"
+            && cost != nil
+            && CloudUsageMetadata.formatCostUSD(cost!) == "$0.07"
+    }(),
+    "CloudUsageMetadata accurately estimates Gemini 3.8 Flash cost and formats token summary"
+)
+
+tests.check(
+    {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 8 * 3600)!
+        let nowComponents = DateComponents(year: 2026, month: 9, day: 3, hour: 12, minute: 0)
+        let now = calendar.date(from: nowComponents)!
+        let today = calendar.date(from: DateComponents(year: 2026, month: 9, day: 3, hour: 23, minute: 56))!
+        let yesterday = calendar.date(from: DateComponents(year: 2026, month: 9, day: 2, hour: 14, minute: 30))!
+
+        let todaySummary = RecentJobSummary(
+            id: UUID(),
+            sourcePath: "/tmp/a.m4a",
+            outputPath: "/tmp/a.txt",
+            stage: .completed,
+            startedAt: today,
+            completedAt: today,
+            modelID: "gemini-3.8-flash",
+            glossaryName: nil
+        )
+        let yesterdaySummary = RecentJobSummary(
+            id: UUID(),
+            sourcePath: "/tmp/b.m4a",
+            outputPath: "/tmp/b.txt",
+            stage: .completed,
+            startedAt: yesterday,
+            completedAt: yesterday,
+            modelID: "gemini-3.8-flash",
+            glossaryName: nil
+        )
+        return todaySummary.statusWithCompletionTime(now: now, calendar: calendar) == "完成 23:56"
+            && yesterdaySummary.statusWithCompletionTime(now: now, calendar: calendar) == "完成 9/2"
+    }(),
+    "RecentJobSummary formats completion time as HH:mm for today and M/d for earlier days"
 )
 
 // MARK: - Gemini Cloud Transport Hardening Tests
