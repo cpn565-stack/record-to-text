@@ -6,16 +6,11 @@ PROJECT_DIR="${SCRIPT_DIR:h}"
 cd "${PROJECT_DIR}"
 
 REPOSITORY_FILES=()
-while IFS= read -r -d '' repository_file; do
+for repository_file in ${(0)"$(git ls-files -z; git ls-files --others --exclude-standard -z)"}; do
   if [[ -f "${repository_file}" ]]; then
     REPOSITORY_FILES+=("${repository_file}")
   fi
-done < <(
-  {
-    git ls-files -z
-    git ls-files --others --exclude-standard -z
-  }
-)
+done
 
 FORBIDDEN_TRACKED="$(print -rl -- "${REPOSITORY_FILES[@]}" | rg \
   '(^|/)(__pycache__|DerivedData)(/|$)|\.pyc$|^scripts/(apply|fix)-gemini-3\.7-|^\.github/workflows/apply-gemini-3\.7-hardening\.yml$' \
