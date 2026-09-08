@@ -1768,10 +1768,21 @@ public final class TranscriptionEngine {
                     continue
                 }
 
+                let terminalError = CloudOutputTruncatedError(
+                    partialText: truncation.partialText,
+                    finishMessage: [
+                        truncation.finishMessage,
+                        String(format:
+                            "已停止自動重試：目前片段 %.1f 秒、切分深度 %d；最多切分 %d 層，子段不得短於 %.0f 秒。",
+                            record.durationSeconds, record.splitDepth ?? 0,
+                            CloudAdaptiveSegmentPlanner.productionMaximumSplitDepth,
+                            cloudAdaptiveMinimumChildDuration)
+                    ].compactMap { $0 }.joined(separator: "；")
+                )
                 try? segmentManifest.mark(
                     segmentIndex: segmentIndex,
                     status: .failed,
-                    failureMessage: truncation.localizedDescription
+                    failureMessage: terminalError.localizedDescription
                 )
                 try? writeSegmentManifest(
                     segmentManifest,
@@ -1779,16 +1790,16 @@ public final class TranscriptionEngine {
                 )
                 try? writePartialTranscript(
                     from: segmentManifestURL,
-                    error: truncation,
+                    error: terminalError,
                     to: workingDirectory
                 )
                 if totalSegments == 1 {
-                    throw truncation
+                    throw terminalError
                 }
                 throw AudioSegmentationError.segmentTranscriptionFailed(
                     index: segmentIndex,
                     count: totalSegments,
-                    reason: truncation.localizedDescription
+                    reason: terminalError.localizedDescription
                 )
             } catch is CancellationError {
                 try? segmentManifest.mark(

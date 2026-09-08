@@ -1,7 +1,7 @@
 import Foundation
 import Security
 
-protocol GoogleAIStudioCredentialStoring {
+protocol GoogleAIStudioCredentialStoring: Sendable {
     func loadAPIKey() throws -> String?
     func saveAPIKey(_ apiKey: String?) throws
 }

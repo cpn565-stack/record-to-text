@@ -50,6 +50,8 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var recoveryScanReport: RecoveryScanReport?
     @Published private(set) var isRecoveryScanRunning = false
     @Published private(set) var isModelCacheStatusRefreshing = false
+    @Published private(set) var isGoogleAIStudioCredentialLoading = true
+    private var credentialLoadingTask: Task<Void, Never>?
     @Published private(set) var googleAIStudioCredentialStorageState:
         GoogleAIStudioCredentialStorageState = .absent
 
@@ -172,33 +174,7 @@ final class AppViewModel: ObservableObject {
         }.first
         let hasLegacySettingsCredential = legacySettingsAPIKey != nil
         let hasLegacyLedgerCredential = legacyLedgerAPIKey != nil
-        var legacyCredentialStoreSynchronized = false
-        var loadedCredentialStorageState: GoogleAIStudioCredentialStorageState = .absent
-        do {
-            let storedAPIKey = try credentialStore.loadAPIKey()
-            let resolvedAPIKey = storedAPIKey
-                ?? legacySettingsAPIKey
-                ?? legacyLedgerAPIKey
-            if storedAPIKey == nil, resolvedAPIKey != nil {
-                try credentialStore.saveAPIKey(resolvedAPIKey)
-            }
-            loadedSettings.googleAIStudioAPIKey = resolvedAPIKey
-            legacyCredentialStoreSynchronized = hasLegacySettingsCredential
-                || hasLegacyLedgerCredential
-            loadedCredentialStorageState = resolvedAPIKey == nil ? .absent : .stored
-        } catch {
-            // Keep the legacy files untouched until Keychain is available.
-            // Persisting a redacted replacement now would irreversibly lose
-            // the only credential copy.
-            loadedSettings.googleAIStudioAPIKey = legacySettingsAPIKey
-                ?? legacyLedgerAPIKey
-            loadedCredentialStorageState = loadedSettings.googleAIStudioAPIKey == nil
-                ? .unavailable
-                : .memoryOnly
-            startupMessages.append(
-                "Google AI Studio API Key 無法遷移到 Keychain：\(error.localizedDescription)\n舊版檔案已保留未改寫；Keychain 可用前，相關設定或工作記錄可能無法儲存。"
-            )
-        }
+        loadedSettings.googleAIStudioAPIKey = legacySettingsAPIKey ?? legacyLedgerAPIKey
 
         var summaries = loadedRecentJobs.jobs
         var didInterruptJobs = false
@@ -242,9 +218,8 @@ final class AppViewModel: ObservableObject {
         self.isOnboardingPresented = !loadedSettings.hasCompletedOnboarding
         self.legacySettingsCredentialMigrationPending = hasLegacySettingsCredential
         self.legacyLedgerCredentialMigrationPending = hasLegacyLedgerCredential
-        self.credentialStoreSynchronizedForLegacyMigration =
-            legacyCredentialStoreSynchronized
-        self.googleAIStudioCredentialStorageState = loadedCredentialStorageState
+        self.googleAIStudioCredentialStorageState =
+            loadedSettings.googleAIStudioAPIKey == nil ? .absent : .memoryOnly
 
         if !startupMessages.isEmpty {
             self.alert = UserFacingAlert(
@@ -253,17 +228,10 @@ final class AppViewModel: ObservableObject {
             )
         }
 
-        if hasLegacySettingsCredential, legacyCredentialStoreSynchronized {
-            // Rewrites the old file immediately with the decode-only secret
-            // field omitted by AppSettings.encode(to:), even if Keychain was
-            // unavailable and the credential is memory-only for this launch.
-            persistSettings()
-        }
-
-        if didInterruptJobs || (hasLegacyLedgerCredential && legacyCredentialStoreSynchronized) {
-            // Also sanitizes legacy job snapshots while preserving retry data.
+        if didInterruptJobs {
             persistJobs()
         }
+        beginCredentialLoading(legacyAPIKey: legacySettingsAPIKey ?? legacyLedgerAPIKey)
 
         // Model-cache and recovery scans touch many directories; defer them
         // past the first frame so launch stays responsive. Both only publish
@@ -275,7 +243,54 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    /// A dedicated queue keeps blocking Keychain calls off both the main actor
+    /// and Swift's cooperative executor. Only one startup read may be in flight.
+    private func beginCredentialLoading(legacyAPIKey: String?) {
+        let store = credentialStore
+        credentialLoadingTask = Task { [weak self] in
+            let outcome: Result<String?, Error> = await withCheckedContinuation { continuation in
+                DispatchQueue(label: "record-to-text.credential-startup", qos: .userInitiated).async {
+                    let result = Result<String?, Error> {
+                        let stored = try store.loadAPIKey()
+                        let resolved = stored ?? legacyAPIKey
+                        if stored == nil, resolved != nil {
+                            try store.saveAPIKey(resolved)
+                        }
+                        return resolved
+                    }
+                    continuation.resume(returning: result)
+                }
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.isGoogleAIStudioCredentialLoading = false
+            switch outcome {
+            case let .success(key):
+                // Merge into current settings so edits made during loading survive.
+                self.settings.googleAIStudioAPIKey = key
+                self.googleAIStudioCredentialStorageState = key == nil ? .absent : .stored
+                self.credentialStoreSynchronizedForLegacyMigration =
+                    self.hasPendingGoogleAIStudioCredentialMigration
+                self.persistSettings()
+                self.persistJobs()
+            case let .failure(error):
+                self.googleAIStudioCredentialStorageState =
+                    self.settings.googleAIStudioAPIKey == nil ? .unavailable : .memoryOnly
+                let message = "Google AI Studio API Key 無法從 Keychain 載入：\(error.localizedDescription)。可在設定中重試；其他功能仍可使用。"
+                self.alert = UserFacingAlert(
+                    title: "部分資料未能載入",
+                    message: [self.alert?.message, message].compactMap { $0 }.joined(separator: "\n\n")
+                )
+            }
+            self.scheduleQueueIfNeeded()
+        }
+    }
+
+    func waitForCredentialLoading() async {
+        await credentialLoadingTask?.value
+    }
+
     deinit {
+        credentialLoadingTask?.cancel()
         queueTask?.cancel()
         activeExecutionTask?.cancel()
         activeEngine?.cancelCurrentJob()
@@ -474,6 +489,9 @@ final class AppViewModel: ObservableObject {
     }
 
     var googleAIStudioCredentialStorageDescription: String {
+        if isGoogleAIStudioCredentialLoading {
+            return "正在載入 Google AI Studio 設定；其他功能可繼續使用，AI Studio 工作會在載入後開始。"
+        }
         switch googleAIStudioCredentialStorageState {
         case .absent:
             return "尚未儲存憑證。貼上後請按「儲存到 Keychain」。"
@@ -498,6 +516,7 @@ final class AppViewModel: ObservableObject {
     /// copy for UI display and transient request execution.
     @discardableResult
     func setGoogleAIStudioAPIKey(_ apiKey: String?) -> Bool {
+        guard !isGoogleAIStudioCredentialLoading else { return false }
         let normalized = Self.normalizedAPIKey(apiKey)
         if normalized == nil {
             return clearGoogleAIStudioAPIKey()
@@ -739,6 +758,7 @@ final class AppViewModel: ObservableObject {
 
     @discardableResult
     func resetSettings(keepGlossaries: Bool) -> Bool {
+        guard !isGoogleAIStudioCredentialLoading else { return false }
         let shouldClearCredential = Self.normalizedAPIKey(
             settings.googleAIStudioAPIKey
         ) != nil
@@ -1666,6 +1686,10 @@ final class AppViewModel: ObservableObject {
             return
         }
 
+        if isGoogleAIStudioCredentialLoading,
+           jobs.first(where: { $0.stage == .queued })?.snapshot.backendType == .googleAIStudio {
+            return
+        }
         queueTask = Task { [weak self] in
             await self?.drainQueue()
         }
@@ -1676,6 +1700,11 @@ final class AppViewModel: ObservableObject {
               !queuePausedForEnvironment,
               !queuePausedForPromptConsent,
               let nextJobID = jobs.first(where: { $0.stage == .queued })?.id {
+            if isGoogleAIStudioCredentialLoading,
+               jobs.first(where: { $0.id == nextJobID })?.snapshot.backendType == .googleAIStudio {
+                queueTask = nil
+                return
+            }
             await runJob(nextJobID)
         }
 
@@ -2501,6 +2530,7 @@ final class AppViewModel: ObservableObject {
     private func ensureLegacyCredentialStoreIsSynchronized(
         credential explicitCredential: String? = nil
     ) -> Bool {
+        guard !isGoogleAIStudioCredentialLoading else { return false }
         if credentialStoreSynchronizedForLegacyMigration {
             return true
         }

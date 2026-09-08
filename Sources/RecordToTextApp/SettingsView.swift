@@ -295,6 +295,7 @@ struct SettingsView: View {
                             prompt: Text("請貼上 Gemini API Key (AIza...)")
                         )
                         .textFieldStyle(.roundedBorder)
+                        .disabled(viewModel.isGoogleAIStudioCredentialLoading)
 
                         HStack {
                             Button("儲存到 Keychain") {
@@ -303,7 +304,7 @@ struct SettingsView: View {
                                 apiKeyTestSucceeded = nil
                             }
                             .disabled(
-                                GoogleAIStudioAPIKeyDraftPolicy.shouldDisableSave(
+                                viewModel.isGoogleAIStudioCredentialLoading || GoogleAIStudioAPIKeyDraftPolicy.shouldDisableSave(
                                     normalizedDraft: normalizedAPIKeyDraft,
                                     normalizedInMemoryAPIKey: normalizedInMemoryAPIKey,
                                     storageState: viewModel
@@ -316,7 +317,7 @@ struct SettingsView: View {
                             Button("測試 API Key 連線") {
                                 testGoogleAIStudioAPIKey()
                             }
-                            .disabled(isTestingAPIKey || normalizedAPIKeyDraft == nil)
+                            .disabled(viewModel.isGoogleAIStudioCredentialLoading || isTestingAPIKey || normalizedAPIKeyDraft == nil)
 
                             Button("清除", role: .destructive) {
                                 let attemptedDraft = apiKeyDraft
@@ -332,10 +333,11 @@ struct SettingsView: View {
                                 apiKeyTestSucceeded = nil
                             }
                             .disabled(
-                                viewModel.googleAIStudioCredentialStorageState
-                                    == .absent
+                                viewModel.isGoogleAIStudioCredentialLoading || (
+                                    viewModel.googleAIStudioCredentialStorageState == .absent
                                     && normalizedInMemoryAPIKey == nil
                                     && normalizedAPIKeyDraft == nil
+                                )
                             )
 
                             if isTestingAPIKey {

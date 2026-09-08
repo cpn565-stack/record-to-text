@@ -219,8 +219,8 @@ public struct AudioSegmentManifest: Codable, Equatable, Sendable {
 }
 
 public enum CloudAdaptiveSegmentPlanner {
-    public static let productionMaximumSplitDepth = 2
-    public static let productionMinimumChildDuration: TimeInterval = 240
+    public static let productionMaximumSplitDepth = 4
+    public static let productionMinimumChildDuration: TimeInterval = 60
 
     public static func splitBoundary(
         duration: TimeInterval,

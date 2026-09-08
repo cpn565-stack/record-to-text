@@ -131,6 +131,12 @@ struct MainView: View {
                 Text(viewModel.appSubtitle)
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                if viewModel.isGoogleAIStudioCredentialLoading,
+                   viewModel.settings.backendType == .googleAIStudio {
+                    Text("正在載入 AI Studio 設定；工作會在載入後開始，其他功能仍可使用。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Spacer()

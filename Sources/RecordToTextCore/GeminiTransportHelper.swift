@@ -2,6 +2,26 @@ import Foundation
 
 public enum GeminiTransportHelper {
     /// 檢查錯誤是否為 POSIX 40 (EMSGSIZE: Message too long) 或相關底層 CFStream 錯誤
+    /// Retry only temporary URL loading failures. Unknown errors and cancellation
+    /// must not become automatic generation retries.
+    public static func isTransientNetworkFailure(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        guard nsError.domain == NSURLErrorDomain else { return false }
+        return [
+            URLError.timedOut.rawValue,
+            URLError.networkConnectionLost.rawValue,
+            URLError.notConnectedToInternet.rawValue,
+            URLError.cannotConnectToHost.rawValue,
+            URLError.cannotFindHost.rawValue,
+            URLError.dnsLookupFailed.rawValue
+        ].contains(nsError.code)
+    }
+
+    public static func isNetworkCancellation(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        return nsError.domain == NSURLErrorDomain && nsError.code == URLError.cancelled.rawValue
+    }
+
     public static func isPOSIXMessageTooLarge(_ error: Error) -> Bool {
         var current: Error? = error
         var visited = Set<String>()

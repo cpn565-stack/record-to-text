@@ -146,7 +146,7 @@ public struct CloudOutputTruncatedError: LocalizedError, Equatable, Sendable {
         let detail = finishMessage?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let suffix = detail.flatMap { $0.isEmpty ? nil : "：\($0)" } ?? ""
-        return "Gemini 輸出達 maxOutputTokens，逐字稿可能被截斷\(suffix)。App 將切小該段後重試，不會把這份部分文字當成正式完成稿。"
+        return "Gemini 輸出達 maxOutputTokens，逐字稿可能被截斷\(suffix)。這份部分文字不會當成正式完成稿。"
     }
 }
 

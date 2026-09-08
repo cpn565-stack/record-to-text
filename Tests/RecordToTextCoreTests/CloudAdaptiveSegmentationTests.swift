@@ -76,7 +76,21 @@ private final class MockAIStudioTransport: @unchecked Sendable {
         }
 
         if urlString.contains(":generateContent") && request.httpMethod == "POST" {
-            lock.withLock { generateRequests.append(request) }
+            var capturedRequest = request
+            if capturedRequest.httpBody == nil, let stream = request.httpBodyStream {
+                stream.open()
+                defer { stream.close() }
+                var data = Data()
+                var buffer = [UInt8](repeating: 0, count: 4096)
+                while true {
+                    let count = stream.read(&buffer, maxLength: buffer.count)
+                    if count == 0 { break }
+                    if count < 0 { throw stream.streamError ?? URLError(.cannotDecodeRawData) }
+                    data.append(contentsOf: buffer.prefix(count))
+                }
+                capturedRequest.httpBody = data
+            }
+            lock.withLock { generateRequests.append(capturedRequest) }
             let outcome: Result<(finishReason: String, text: String), Error> = lock.withLock {
                 guard !generateResponses.isEmpty else {
                     return .failure(GoogleAIStudioError.emptyResponse)
@@ -158,6 +172,31 @@ private final class MockAIStudioTransport: @unchecked Sendable {
 }
 
 final class CloudAdaptiveSegmentationTests: XCTestCase {
+    func testNetworkRetryReusesUploadedFile() async throws {
+        let transport = MockAIStudioTransport(responses: [
+            .failure(URLError(.networkConnectionLost)),
+            .success((finishReason: "STOP", text: "完整逐字稿"))
+        ])
+        MockAdaptiveCloudURLProtocol.handler = { try transport.handle(request: $0) }
+        defer { MockAdaptiveCloudURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockAdaptiveCloudURLProtocol.self]
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+        let backend = GoogleAIStudioBackend(urlSession: session,
+            configuration: .init(apiKey: "mock", modelID: "gemini-3.8-flash"))
+        let text = try await backend.transcribe(audioData: Data("audio".utf8))
+        XCTAssertEqual(text, "完整逐字稿")
+        XCTAssertEqual(transport.recordedGenerateRequests.count, 2)
+        XCTAssertEqual(transport.createdFiles.count, 1)
+        XCTAssertEqual(transport.deletedFiles.count, 1)
+    }
+
+    func testPreviouslyBlockedFiveAndSevenMinuteSegmentsCanSplit() {
+        XCTAssertEqual(CloudAdaptiveSegmentPlanner.splitBoundary(duration: 300, splitDepth: 2), 150)
+        XCTAssertEqual(CloudAdaptiveSegmentPlanner.splitBoundary(duration: 430, splitDepth: 1), 215)
+    }
+
     func testSplitBoundaryPrefersNearestEligibleSilence() throws {
         let boundary = try XCTUnwrap(
             CloudAdaptiveSegmentPlanner.splitBoundary(
@@ -240,6 +279,14 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
     }
 
     func testAdaptiveSegmentationSucceedsAfterMaxTokensTruncation() async throws {
+        try await assertAdaptiveRecovery(parentTruncatedText: "這段截斷文字不得進入正式稿")
+    }
+
+    func testAdaptiveSegmentationRecoversFromEmptyMaxTokens() async throws {
+        try await assertAdaptiveRecovery(parentTruncatedText: "")
+    }
+
+    private func assertAdaptiveRecovery(parentTruncatedText: String) async throws {
         let root = try TestSupport.makeTemporaryDirectory()
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
 
@@ -266,7 +313,6 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
             ffmpegURL: candidate.ffmpeg
         )
 
-        let parentTruncatedText = "這段截斷文字不得進入正式稿"
         let leftChildText = "[00:00 - 00:02]\n講者 1：左子段完整稿。"
         let rightChildText = "[00:02 - 00:04]\n講者 1：右子段完整稿。"
 
@@ -326,6 +372,12 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
 
         // 1. Assert cloud requests sequence: Parent -> Left Child -> Right Child
         XCTAssertEqual(transport.recordedGenerateRequests.count, 3)
+        for request in transport.recordedGenerateRequests {
+            let body = try XCTUnwrap(request.httpBody)
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            let config = try XCTUnwrap(json["generationConfig"] as? [String: Any])
+            XCTAssertEqual(config["maxOutputTokens"] as? Int, 65_536)
+        }
         XCTAssertEqual(transport.createdFiles.count, 3)
         XCTAssertEqual(transport.deletedFiles.count, 3)
 
@@ -349,7 +401,9 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
         let finalContent = try String(contentsOf: result.outputURL, encoding: .utf8)
         XCTAssertTrue(finalContent.contains("左子段完整稿"))
         XCTAssertTrue(finalContent.contains("右子段完整稿"))
-        XCTAssertFalse(finalContent.contains(parentTruncatedText), "Parent truncated text must NOT enter final transcript")
+        if !parentTruncatedText.isEmpty {
+            XCTAssertFalse(finalContent.contains(parentTruncatedText), "Parent truncated text must NOT enter final transcript")
+        }
         XCTAssertFalse(finalContent.contains("未完成"), "No incomplete draft markers in final transcript")
         XCTAssertFalse(finalContent.contains("跳過"), "No skipped audio markers in final transcript")
 
@@ -520,13 +574,13 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
             ffmpegURL: candidate.ffmpeg
         )
 
-        // Depth 0: parent (4s) -> MAX_TOKENS -> splits to Depth 1 (2s each)
-        // Depth 1: child A (2s) -> MAX_TOKENS -> splits to Depth 2 (1s each)
-        // Depth 2: grandchild A1 (1s) -> MAX_TOKENS -> reaches maxDepth 2, cannot split further
+        // Repeated truncation must stop at the production depth limit.
         let transport = MockAIStudioTransport(responses: [
             .success((finishReason: "MAX_TOKENS", text: "截斷文字 0")),
             .success((finishReason: "MAX_TOKENS", text: "截斷文字 1")),
-            .success((finishReason: "MAX_TOKENS", text: "截斷文字 2"))
+            .success((finishReason: "MAX_TOKENS", text: "截斷文字 2")),
+            .success((finishReason: "MAX_TOKENS", text: "截斷文字 3")),
+            .success((finishReason: "MAX_TOKENS", text: "截斷文字 4"))
         ])
         MockAdaptiveCloudURLProtocol.handler = { request in
             try transport.handle(request: request)
@@ -550,7 +604,7 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
             runtime: candidate,
             paths: paths,
             googleAIStudioBackend: backend,
-            cloudAdaptiveMinimumChildDuration: 0.5
+            cloudAdaptiveMinimumChildDuration: 0.1
         )
 
         let snapshot = JobSnapshot(
@@ -595,7 +649,10 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
             )
             // Grandchild A1 (segment 1) failed
             XCTAssertEqual(manifest.segments[0].status, .failed)
-            XCTAssertEqual(manifest.segments[0].splitDepth, 2)
+            XCTAssertEqual(manifest.segments[0].splitDepth, 4)
+            XCTAssertEqual(transport.recordedGenerateRequests.count, 5)
+            XCTAssertTrue(manifest.segments[0].failureMessage?.contains("已停止自動重試") == true)
+            XCTAssertFalse(manifest.segments[0].failureMessage?.contains("將切小") == true)
         }
     }
 

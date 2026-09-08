@@ -49,6 +49,88 @@ private final class LockedCounter: @unchecked Sendable {
 }
 
 final class GeminiCloudResponseValidationTests: XCTestCase {
+    func testNetworkRetryStopsAfterFourAttemptsWithoutModelFallback() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AIStudioMockURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let calls = LockedCounter()
+        AIStudioMockURLProtocol.handler = { request in
+            calls.increment()
+            XCTAssertTrue(request.url!.absoluteString.contains("gemini-3.8-flash"))
+            throw URLError(.notConnectedToInternet)
+        }
+        defer { AIStudioMockURLProtocol.handler = nil; session.invalidateAndCancel() }
+        let backend = GoogleAIStudioBackend(urlSession: session,
+            configuration: .init(apiKey: "mock", modelID: "gemini-3.8-flash", useFilesAPI: false, fallbackPolicy: .flashOnly))
+        do {
+            _ = try await backend.transcribe(audioData: Data("audio".utf8))
+            XCTFail("Expected exhausted retries")
+        } catch {
+            XCTAssertEqual((error as NSError).code, URLError.notConnectedToInternet.rawValue)
+        }
+        XCTAssertEqual(calls.value, 4)
+    }
+
+    func testCancelDuringNetworkBackoffDoesNotSendAnotherRequest() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AIStudioMockURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let calls = LockedCounter()
+        let waiting = expectation(description: "entered retry backoff")
+        AIStudioMockURLProtocol.handler = { _ in
+            calls.increment()
+            throw URLError(.networkConnectionLost)
+        }
+        defer { AIStudioMockURLProtocol.handler = nil; session.invalidateAndCancel() }
+        let backend = GoogleAIStudioBackend(urlSession: session,
+            configuration: .init(apiKey: "mock", modelID: "gemini-3.8-flash", useFilesAPI: false))
+        let task = Task {
+            try await backend.transcribe(audioData: Data("audio".utf8), logger: { _, message in
+                if message.contains("網路暫時中斷") { waiting.fulfill() }
+            })
+        }
+        await fulfillment(of: [waiting], timeout: 3)
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        XCTAssertEqual(calls.value, 1)
+    }
+
+    func testAIStudioRetriesTransientNetworkFailure() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AIStudioMockURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let calls = LockedCounter()
+        AIStudioMockURLProtocol.handler = { request in
+            calls.increment()
+            if calls.value == 1 { throw URLError(.networkConnectionLost) }
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                    self.responseData())
+        }
+        defer { AIStudioMockURLProtocol.handler = nil; session.invalidateAndCancel() }
+        let backend = GoogleAIStudioBackend(urlSession: session,
+            configuration: .init(apiKey: "mock", modelID: "gemini-3.8-flash", useFilesAPI: false))
+        let result = try await backend.transcribe(audioData: Data("audio".utf8))
+        XCTAssertEqual(result, "忠實逐字稿")
+        XCTAssertEqual(calls.value, 2)
+    }
+
+    func testMaxTokensWithoutContentStillRequestsAdaptiveRecovery() throws {
+        for content in ["", #","content":{"parts":[{"thought":true,"text":"internal"}]}"#] {
+            let data = Data(("{\"candidates\":[{\"finishReason\":\"MAX_TOKENS\"" + content + "}]}").utf8)
+            XCTAssertThrowsError(try GoogleAIStudioBackend().parseCandidateText(from: data)) {
+                XCTAssertTrue($0 is CloudOutputTruncatedError)
+            }
+            XCTAssertThrowsError(try VertexAIGeminiBackend().parseCandidateText(from: data)) {
+                XCTAssertTrue($0 is CloudOutputTruncatedError)
+            }
+        }
+    }
+
     func testAIStudioAcceptsOnlyStopWithNonEmptyText() throws {
         let backend = GoogleAIStudioBackend()
         XCTAssertEqual(
@@ -74,7 +156,7 @@ final class GeminiCloudResponseValidationTests: XCTestCase {
                 from: responseData(finishReason: "MAX_TOKENS", text: "   ")
             )
         ) { error in
-            XCTAssertEqual(error as? GoogleAIStudioError, .emptyResponse)
+            XCTAssertEqual(error as? CloudOutputTruncatedError, CloudOutputTruncatedError(partialText: "", finishMessage: "output limit"))
         }
 
         XCTAssertThrowsError(
@@ -114,7 +196,7 @@ final class GeminiCloudResponseValidationTests: XCTestCase {
                 from: responseData(finishReason: "MAX_TOKENS", text: "   ")
             )
         ) { error in
-            XCTAssertEqual(error as? VertexAIError, .emptyResponse)
+            XCTAssertEqual(error as? CloudOutputTruncatedError, CloudOutputTruncatedError(partialText: "", finishMessage: "output limit"))
         }
 
         XCTAssertThrowsError(

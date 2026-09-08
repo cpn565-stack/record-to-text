@@ -5,7 +5,56 @@ import XCTest
 
 @MainActor
 final class AppCredentialMigrationTests: XCTestCase {
-    func testSuccessfulMigrationStoresKeyBeforeRedactingLegacyFiles() throws {
+    func testSlowCredentialReadDoesNotBlockInitializer() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = FakeCredentialStore()
+        store.loadDelay = 0.4
+        let start = Date()
+        let model = AppViewModel(paths: ApplicationPaths(root: root), credentialStore: store)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 0.2)
+        _ = model.settings
+        await model.waitForCredentialLoading()
+    }
+
+    func testLoadingKeepsUIEditableAndRejectsConflictingCredentialWrites() async throws {
+        let fixture = try makeLegacyFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.paths.root) }
+        let store = FakeCredentialStore(storedAPIKey: "loaded-key")
+        store.loadDelay = 0.3
+        let model = AppViewModel(paths: fixture.paths, credentialStore: store)
+        XCTAssertTrue(model.isGoogleAIStudioCredentialLoading)
+        model.setSetting(\.recentJobLimit, to: 17)
+        XCTAssertEqual(model.settings.recentJobLimit, 17)
+        XCTAssertFalse(model.setGoogleAIStudioAPIKey("must-not-overwrite"))
+        XCTAssertTrue(try fileContainsSecret(fixture.paths.settings))
+        await model.waitForCredentialLoading()
+        XCTAssertFalse(model.isGoogleAIStudioCredentialLoading)
+        XCTAssertEqual(model.settings.recentJobLimit, 17)
+        XCTAssertEqual(model.settings.googleAIStudioAPIKey, "loaded-key")
+        XCTAssertEqual(store.saveCallCount, 0)
+        XCTAssertFalse(try fileContainsSecret(fixture.paths.settings))
+    }
+
+    func testAIStudioJobStaysQueuedDuringCredentialLoading() async throws {
+        let fixture = try makeLegacyFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.paths.root) }
+        let store = FakeCredentialStore()
+        store.loadDelay = 0.4
+        let model = AppViewModel(paths: fixture.paths, credentialStore: store)
+        model.retryJob(fixture.jobID)
+        let queued = try XCTUnwrap(model.jobs.first(where: { $0.stage == .queued }))
+        model.startQueuedJobs()
+        await Task.yield()
+        XCTAssertNil(model.activeJobID)
+        XCTAssertEqual(model.jobs.first(where: { $0.id == queued.id })?.stage, .queued)
+        // Cancel the pending work before loading finishes; no real API is called.
+        model.removeQueuedJob(queued.id)
+        await model.waitForCredentialLoading()
+        XCTAssertFalse(model.jobs.contains(where: { $0.id == queued.id }))
+    }
+
+    func testSuccessfulMigrationStoresKeyBeforeRedactingLegacyFiles() async throws {
         let fixture = try makeLegacyFixture()
         defer { try? FileManager.default.removeItem(at: fixture.paths.root) }
         let store = FakeCredentialStore()
@@ -14,6 +63,7 @@ final class AppCredentialMigrationTests: XCTestCase {
             paths: fixture.paths,
             credentialStore: store
         )
+        await viewModel.waitForCredentialLoading()
 
         XCTAssertEqual(store.storedAPIKey, "settings-legacy-secret")
         XCTAssertEqual(
@@ -24,7 +74,7 @@ final class AppCredentialMigrationTests: XCTestCase {
         XCTAssertFalse(try fileContainsSecret(fixture.paths.jobLedger))
     }
 
-    func testFailedMigrationLeavesLegacyFilesUntouchedAcrossPersistenceAttempts() throws {
+    func testFailedMigrationLeavesLegacyFilesUntouchedAcrossPersistenceAttempts() async throws {
         let fixture = try makeLegacyFixture()
         defer { try? FileManager.default.removeItem(at: fixture.paths.root) }
         let originalSettings = try Data(contentsOf: fixture.paths.settings)
@@ -35,6 +85,7 @@ final class AppCredentialMigrationTests: XCTestCase {
             paths: fixture.paths,
             credentialStore: store
         )
+        await viewModel.waitForCredentialLoading()
         viewModel.setSetting(\.recentJobLimit, to: 11)
 
         XCTAssertEqual(try Data(contentsOf: fixture.paths.settings), originalSettings)
@@ -52,7 +103,7 @@ final class AppCredentialMigrationTests: XCTestCase {
         )
     }
 
-    func testExistingKeychainValueWinsAndLegacyFilesAreRedacted() throws {
+    func testExistingKeychainValueWinsAndLegacyFilesAreRedacted() async throws {
         let fixture = try makeLegacyFixture()
         defer { try? FileManager.default.removeItem(at: fixture.paths.root) }
         let store = FakeCredentialStore(storedAPIKey: "keychain-secret")
@@ -61,6 +112,7 @@ final class AppCredentialMigrationTests: XCTestCase {
             paths: fixture.paths,
             credentialStore: store
         )
+        await viewModel.waitForCredentialLoading()
 
         XCTAssertEqual(viewModel.settings.googleAIStudioAPIKey, "keychain-secret")
         XCTAssertEqual(store.saveCallCount, 0)
@@ -68,7 +120,7 @@ final class AppCredentialMigrationTests: XCTestCase {
         XCTAssertFalse(try fileContainsSecret(fixture.paths.jobLedger))
     }
 
-    func testClearAfterMigrationRecoverySanitizesLedgerAndCannotResurrectKey() throws {
+    func testClearAfterMigrationRecoverySanitizesLedgerAndCannotResurrectKey() async throws {
         let fixture = try makeLegacyFixture()
         defer { try? FileManager.default.removeItem(at: fixture.paths.root) }
         let store = FakeCredentialStore(failure: .unavailable)
@@ -76,6 +128,7 @@ final class AppCredentialMigrationTests: XCTestCase {
             paths: fixture.paths,
             credentialStore: store
         )
+        await firstLaunch.waitForCredentialLoading()
         XCTAssertTrue(try fileContainsSecret(fixture.paths.settings))
         XCTAssertTrue(try fileContainsSecret(fixture.paths.jobLedger))
 
@@ -89,12 +142,13 @@ final class AppCredentialMigrationTests: XCTestCase {
             paths: fixture.paths,
             credentialStore: store
         )
+        await secondLaunch.waitForCredentialLoading()
         XCTAssertEqual(secondLaunch.settings.googleAIStudioAPIKey, nil)
         XCTAssertEqual(store.storedAPIKey, nil)
         XCTAssertEqual(secondLaunch.googleAIStudioCredentialStorageState, .absent)
     }
 
-    func testSaveAndDeleteFailuresRemainVisibleAndRetryable() throws {
+    func testSaveAndDeleteFailuresRemainVisibleAndRetryable() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("credential-state-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -102,6 +156,7 @@ final class AppCredentialMigrationTests: XCTestCase {
         try paths.createDirectories()
         let store = FakeCredentialStore()
         let viewModel = AppViewModel(paths: paths, credentialStore: store)
+        await viewModel.waitForCredentialLoading()
 
         store.failure = .unavailable
         XCTAssertFalse(viewModel.setGoogleAIStudioAPIKey("retry-key"))
@@ -125,7 +180,7 @@ final class AppCredentialMigrationTests: XCTestCase {
         XCTAssertEqual(viewModel.googleAIStudioCredentialStorageState, .absent)
     }
 
-    func testClearKeepsKeychainValueWhenLegacySettingsRedactionFails() throws {
+    func testClearKeepsKeychainValueWhenLegacySettingsRedactionFails() async throws {
         let fixture = try makeLegacyFixture()
         defer { try? FileManager.default.removeItem(at: fixture.paths.root) }
         let store = FakeCredentialStore(failure: .unavailable)
@@ -136,6 +191,7 @@ final class AppCredentialMigrationTests: XCTestCase {
                 throw PersistenceFailure.settings
             }
         )
+        await viewModel.waitForCredentialLoading()
 
         store.failure = nil
         XCTAssertFalse(viewModel.setGoogleAIStudioAPIKey(nil))
@@ -153,7 +209,7 @@ final class AppCredentialMigrationTests: XCTestCase {
         XCTAssertEqual(viewModel.alert?.title, "無法清除 API Key")
     }
 
-    func testResetKeepsKeychainValueWhenLegacyLedgerRedactionFails() throws {
+    func testResetKeepsKeychainValueWhenLegacyLedgerRedactionFails() async throws {
         let fixture = try makeLegacyFixture()
         defer { try? FileManager.default.removeItem(at: fixture.paths.root) }
         let store = FakeCredentialStore(failure: .unavailable)
@@ -164,6 +220,7 @@ final class AppCredentialMigrationTests: XCTestCase {
                 throw PersistenceFailure.ledger
             }
         )
+        await viewModel.waitForCredentialLoading()
 
         store.failure = nil
         XCTAssertFalse(viewModel.resetSettings(keepGlossaries: true))
@@ -183,7 +240,7 @@ final class AppCredentialMigrationTests: XCTestCase {
         XCTAssertEqual(viewModel.alert?.title, "無法清除 API Key")
     }
 
-    func testDeleteThatMutatesThenThrowsRestoresPreviousKey() throws {
+    func testDeleteThatMutatesThenThrowsRestoresPreviousKey() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("credential-restore-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -191,6 +248,7 @@ final class AppCredentialMigrationTests: XCTestCase {
         try paths.createDirectories()
         let store = FakeCredentialStore(storedAPIKey: "existing-key")
         let viewModel = AppViewModel(paths: paths, credentialStore: store)
+        await viewModel.waitForCredentialLoading()
 
         store.failNextSaveAfterMutation = true
         XCTAssertFalse(viewModel.setGoogleAIStudioAPIKey(nil))
@@ -205,7 +263,7 @@ final class AppCredentialMigrationTests: XCTestCase {
         XCTAssertEqual(viewModel.alert?.title, "無法清除 API Key")
     }
 
-    func testStoredKeyWithFailedLegacyRedactionRemainsRetryable() throws {
+    func testStoredKeyWithFailedLegacyRedactionRemainsRetryable() async throws {
         let fixture = try makeLegacyFixture()
         defer { try? FileManager.default.removeItem(at: fixture.paths.root) }
         let store = FakeCredentialStore(failure: .unavailable)
@@ -216,6 +274,7 @@ final class AppCredentialMigrationTests: XCTestCase {
                 throw PersistenceFailure.settings
             }
         )
+        await viewModel.waitForCredentialLoading()
 
         store.failure = nil
         XCTAssertFalse(
@@ -378,11 +437,12 @@ private enum PersistenceFailure: Error {
     case ledger
 }
 
-private final class FakeCredentialStore: GoogleAIStudioCredentialStoring {
+private final class FakeCredentialStore: GoogleAIStudioCredentialStoring, @unchecked Sendable {
     enum Failure: Error {
         case unavailable
     }
 
+    var loadDelay: TimeInterval = 0
     var storedAPIKey: String?
     var saveCallCount = 0
     var saveRequests: [SaveRequest] = []
@@ -400,6 +460,7 @@ private final class FakeCredentialStore: GoogleAIStudioCredentialStoring {
     }
 
     func loadAPIKey() throws -> String? {
+        Thread.sleep(forTimeInterval: loadDelay)
         if let failure {
             throw failure
         }

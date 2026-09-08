@@ -3,6 +3,25 @@ import XCTest
 @testable import RecordToTextCore
 
 final class GeminiBackendObservabilityTests: XCTestCase {
+    func testNetworkRetryClassificationDoesNotRetryPermanentErrorsOrCancellation() {
+        for code in [URLError.timedOut, .networkConnectionLost, .notConnectedToInternet,
+                     .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed] {
+            XCTAssertTrue(GeminiTransportHelper.isTransientNetworkFailure(URLError(code)))
+        }
+        for code in [URLError.cancelled, .badURL, .secureConnectionFailed, .userAuthenticationRequired] {
+            XCTAssertFalse(GeminiTransportHelper.isTransientNetworkFailure(URLError(code)))
+        }
+        XCTAssertFalse(GeminiTransportHelper.isTransientNetworkFailure(NSError(domain: "other", code: -1001)))
+        XCTAssertTrue(GeminiTransportHelper.isNetworkCancellation(URLError(.cancelled)))
+    }
+
+    func testTranscriptionOutputBudgetKeepsUnknownModelsConservative() {
+        for model in ["gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash"] {
+            XCTAssertEqual(GeminiGenerationConfig.transcriptionOutputTokens(modelID: model), 65_536)
+        }
+        XCTAssertEqual(GeminiGenerationConfig.transcriptionOutputTokens(modelID: "custom-model"), 16_384)
+    }
+
     func testMetadataParserCapturesModelVersionResponseAndUsage() throws {
         let data = Data(
             #"{"modelVersion":"gemini-3.7-flash-202608","responseId":"resp-123","usageMetadata":{"promptTokenCount":120,"cachedContentTokenCount":20,"candidatesTokenCount":50,"thoughtsTokenCount":12,"totalTokenCount":182,"trafficType":"ON_DEMAND"}}"#.utf8

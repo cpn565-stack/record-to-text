@@ -445,6 +445,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         var lastError: Error?
 
         for attempt in 1...policy.maximumAttempts {
+            try Task.checkCancellation()
             do {
                 let generated = try await generateTranscript(
                     requestedModelID: requestedModelID,
@@ -467,19 +468,23 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                 return generated.result
             } catch is CancellationError {
                 throw CancellationError()
-            } catch let error as VertexAIError {
-                let retryAfter: Double?
-                let retryable: Bool
-                switch error {
-                case let .rateLimited(_, delay):
-                    retryAfter = delay
-                    retryable = true
-                case let .requestFailed(statusCode, _):
-                    retryAfter = nil
-                    retryable = policy.isRetryableStatusCode(statusCode)
-                default:
-                    retryAfter = nil
-                    retryable = false
+            } catch {
+                if Task.isCancelled || GeminiTransportHelper.isNetworkCancellation(error) {
+                    throw CancellationError()
+                }
+                let isNetworkFailure = GeminiTransportHelper.isTransientNetworkFailure(error)
+                var retryAfter: Double?
+                var retryable = isNetworkFailure
+                if let serviceError = error as? VertexAIError {
+                    switch serviceError {
+                    case let .rateLimited(_, delay):
+                        retryAfter = delay
+                        retryable = true
+                    case let .requestFailed(statusCode, _):
+                        retryable = policy.isRetryableStatusCode(statusCode)
+                    default:
+                        retryable = false
+                    }
                 }
                 guard retryable else {
                     throw error
@@ -492,9 +497,10 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                     forAttempt: attempt,
                     retryAfterSeconds: retryAfter
                 )
+                let reason = isNetworkFailure ? "網路暫時中斷" : "暫時忙碌"
                 logger?(
                     "info",
-                    "Vertex Gemini \(effectiveModelID) 暫時忙碌，\(String(format: "%.1f", delay)) 秒後進行第 \(attempt + 1) 次嘗試。"
+                    "Vertex Gemini \(effectiveModelID) \(reason)，\(String(format: "%.1f", delay)) 秒後進行第 \(attempt + 1) 次嘗試。"
                 )
                 try await Task.sleep(
                     nanoseconds: UInt64(delay * 1_000_000_000)
@@ -555,7 +561,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                 timeOffsetSeconds: timeOffsetSeconds
             ),
             requestDescription: "轉錄",
-            maximumOutputTokens: 16_384,
+            maximumOutputTokens: GeminiGenerationConfig.transcriptionOutputTokens(modelID: effectiveModelID),
             thinkingLevel: thinkingLevel,
             workingDirectory: workingDirectory,
             logger: logger
@@ -665,7 +671,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         )
         logger?(
             "info",
-            "轉錄請求送出 thinkingConfig=\(thinkingLevel.rawValue)（模型 \(effectiveModelID)）。"
+            "轉錄請求送出 maxOutputTokens=\(generationConfig["maxOutputTokens"] as? Int ?? 0)，thinkingConfig=\(thinkingLevel.rawValue)（模型 \(effectiveModelID)）。"
         )
         let requestBody: [String: Any] = [
             "systemInstruction": [
@@ -1012,18 +1018,15 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             )
         }
 
-        guard let content = firstCandidate["content"] as? [String: Any],
-              let parts = content["parts"] as? [[String: Any]] else {
-            logger?(
-                "warning",
-                GeminiResponseInventory.summary(
-                    from: json,
-                    reason: "missing_candidate_parts",
-                    rawByteCount: data.count
-                )
-            )
+        if !GeminiTranscriptFinishReason.isTruncated(normalizedFinishReason),
+           (firstCandidate["content"] as? [String: Any])?["parts"] as? [[String: Any]] == nil {
+            logger?("warning", GeminiResponseInventory.summary(
+                from: json, reason: "missing_candidate_parts", rawByteCount: data.count
+            ))
             throw VertexAIError.emptyResponse
         }
+        let content = firstCandidate["content"] as? [String: Any]
+        let parts = content?["parts"] as? [[String: Any]] ?? []
 
         var textChunks: [String] = []
         for part in parts {
@@ -1037,6 +1040,16 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
 
         let combined = textChunks.joined().trimmingCharacters(in: .whitespacesAndNewlines)
         let sanitized = sanitizeTranscript(combined)
+        if GeminiTranscriptFinishReason.isTruncated(normalizedFinishReason) {
+            logger?(
+                "warning",
+                GeminiResponseInventory.summary(from: json, reason: "MAX_TOKENS", rawByteCount: data.count)
+            )
+            throw CloudOutputTruncatedError(
+                partialText: sanitized,
+                finishMessage: firstCandidate["finishMessage"] as? String
+            )
+        }
         guard !sanitized.isEmpty else {
             logger?(
                 "warning",
@@ -1049,16 +1062,6 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             throw VertexAIError.emptyResponse
         }
 
-        if GeminiTranscriptFinishReason.isTruncated(normalizedFinishReason) {
-            logger?(
-                "warning",
-                "Gemini 輸出達 maxOutputTokens；現有文字只保存為未完成草稿，將由 coordinator 切小重試。"
-            )
-            throw CloudOutputTruncatedError(
-                partialText: sanitized,
-                finishMessage: firstCandidate["finishMessage"] as? String
-            )
-        }
         guard GeminiTranscriptFinishReason.allowsUsableText(normalizedFinishReason) else {
             throw VertexAIError.incompleteResponse(
                 finishReason: normalizedFinishReason,

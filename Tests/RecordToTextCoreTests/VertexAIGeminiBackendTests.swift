@@ -73,6 +73,24 @@ final class VertexAIGeminiBackendTests: XCTestCase {
         super.tearDown()
     }
 
+    func testTransientNetworkTimeoutRetriesCurrentModel() async throws {
+        var requests = 0
+        MockURLProtocol.requestHandler = { request in
+            requests += 1
+            if requests == 1 { throw URLError(.timedOut) }
+            let data = Data(#"{"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":"完整逐字稿"}]}}]}"#.utf8)
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, data)
+        }
+        let backend = VertexAIGeminiBackend(
+            authService: GCloudAuthService(customGCloudPath: fakeGCloudURL.path),
+            urlSession: mockSession,
+            configuration: .init(projectID: "mock-project", location: "global", modelID: "gemini-3.8-flash")
+        )
+        let text = try await backend.transcribe(audioData: Data("audio".utf8))
+        XCTAssertEqual(text, "完整逐字稿")
+        XCTAssertEqual(requests, 2)
+    }
+
     func testSuccessfulTranscription() async throws {
         let expectedProject = "my-test-gcp-project"
         let expectedLocation = "asia-east1"
