@@ -152,7 +152,17 @@ struct MainView: View {
 
             Spacer()
 
-            quickModelMenu
+            VStack(alignment: .trailing, spacing: 4) {
+                Text("新錄音與尚未開始的工作")
+                    .font(.caption2).foregroundStyle(.secondary)
+                quickModelMenu
+                if let active = viewModel.jobs.first(where: { $0.id == viewModel.activeJobID }) {
+                    Text("正在執行：\(active.snapshot.engineDisplayName)")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("切換選單不會改變執行中或檢查點續跑的工作")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
         }
     }
 
@@ -184,7 +194,7 @@ struct MainView: View {
         .buttonBorderShape(.capsule)
         .controlSize(.small)
         .fixedSize()
-        .help("快速切換轉錄模型；只影響之後加入的錄音")
+        .help("切換新錄音與尚未開始工作的模型；執行中及檢查點續跑工作維持原設定")
         .accessibilityLabel("轉錄模型")
         .accessibilityValue(viewModel.selectedModelName)
         .accessibilityHint("點擊以切換 Qwen、Vertex AI 或 Google AI Studio")
@@ -221,7 +231,7 @@ struct MainView: View {
 
                 Spacer()
 
-                Text("加入檔案時鎖定")
+                Text("詞庫於加入時鎖定；模型可於開始前切換")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
@@ -893,6 +903,15 @@ private struct JobRowView: View {
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
                     .truncationMode(.middle)
+
+                Text(job.snapshot.engineDisplayName)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                if job.resumeFromRecoveryDirectory != nil {
+                    Text("檢查點續跑：沿用原後端與模型")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
 
                 HStack(spacing: 7) {
                     Text(job.statusWithCompletionTime())

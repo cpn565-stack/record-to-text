@@ -495,7 +495,29 @@ final class AppViewModel: ObservableObject {
             return
         }
         settings = updated
+        let engineKeys: [AnyKeyPath] = [\AppSettings.backendType, \AppSettings.selectedModels,
+            \AppSettings.googleAIStudioModelID, \AppSettings.vertexAIModelID,
+            \AppSettings.vertexAIProjectID, \AppSettings.vertexAILocation,
+            \AppSettings.vertexAIGCSBucket, \AppSettings.vertexAIIncludeSummary,
+            \AppSettings.geminiThinkingLevel, \AppSettings.cloudFallbackPolicy,
+            \AppSettings.silenceAwareCloudSegmentation]
+        if engineKeys.contains(keyPath) { synchronizeQueuedEngineSettings() }
         scheduleSettingsPersist()
+    }
+
+    /// Fresh queued jobs follow the visible selection; running and checkpoint jobs
+    /// keep their execution contract so we never switch an in-flight upload.
+    private func synchronizeQueuedEngineSettings() {
+        var changed = false
+        for index in jobs.indices where jobs[index].canUpdateQueuedEngine(activeJobID: activeJobID) {
+            let previous = jobs[index].snapshot
+            let next = previous.withEngineSettings(settings)
+            if previous != next {
+                jobs[index].snapshot = next
+                changed = true
+            }
+        }
+        if changed { persistJobs() }
     }
 
     func scheduleSettingsPersist() {
@@ -697,6 +719,7 @@ final class AppViewModel: ObservableObject {
 
     func selectQuickTranscriptionChoice(_ choice: QuickTranscriptionChoice) {
         settings = choice.applying(to: settings)
+        synchronizeQueuedEngineSettings()
         scheduleSettingsPersist()
 
         if choice.backendType == .localQwen {

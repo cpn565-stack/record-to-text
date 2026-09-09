@@ -11,6 +11,7 @@ public enum VertexAIError: LocalizedError, Equatable {
     case promptBlocked(GeminiPromptBlockDiagnostics)
     case incompleteResponse(finishReason: String, message: String?)
     case emptyResponse
+    case emptyCompletedResponse
     case invalidJSONResponse
     case transportMessageTooLarge
     case gcsBucketRequired
@@ -42,6 +43,8 @@ public enum VertexAIError: LocalizedError, Equatable {
             let detail = message?.trimmingCharacters(in: .whitespacesAndNewlines)
             let suffix = detail.map { "：\($0)" } ?? ""
             return "Vertex AI 回應未正常完成（\(finishReason)）\(suffix)。為避免輸出不完整逐字稿，本次工作已停止。"
+        case .emptyCompletedResponse:
+            return "Vertex AI 回報完成（STOP），但未提供逐字稿文字。已完成片段會保留，可稍後重試未完成片段。"
         case .emptyResponse:
             return "Vertex AI 未回傳任何文字內容或候選結果。"
         case .invalidJSONResponse:
@@ -487,6 +490,8 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                         retryable = true
                     case let .requestFailed(statusCode, _):
                         retryable = policy.isRetryableStatusCode(statusCode)
+                    case .emptyCompletedResponse:
+                        retryable = true
                     default:
                         retryable = false
                     }
@@ -496,6 +501,9 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                 }
                 lastError = error
                 guard attempt < policy.maximumAttempts else {
+                    if error as? VertexAIError == .emptyCompletedResponse {
+                        logger?("warning", "Vertex Gemini 連續嘗試後仍回傳 STOP 空內容，已達最多 \(policy.maximumAttempts) 次嘗試；停止自動重試並保留已完成片段。")
+                    }
                     break
                 }
                 let delay = policy.backoffSeconds(
@@ -503,7 +511,9 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                     retryAfterSeconds: retryAfter
                 )
                 try CloudBudgetContext.validateBackoff(seconds: delay)
-                let reason = isNetworkFailure ? "網路暫時中斷" : "暫時忙碌"
+                let reason = error as? VertexAIError == .emptyCompletedResponse
+                    ? "回報 STOP 但沒有逐字稿文字，將沿用同一模型與音訊重試"
+                    : isNetworkFailure ? "網路暫時中斷" : "暫時忙碌"
                 logger?(
                     "info",
                     "Vertex Gemini \(effectiveModelID) \(reason)，\(String(format: "%.1f", delay)) 秒後進行第 \(attempt + 1) 次嘗試。"
@@ -1040,7 +1050,8 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             logger?("warning", GeminiResponseInventory.summary(
                 from: json, reason: "missing_candidate_parts", rawByteCount: data.count
             ))
-            throw VertexAIError.emptyResponse
+            throw normalizedFinishReason == "STOP"
+                ? VertexAIError.emptyCompletedResponse : VertexAIError.emptyResponse
         }
         let content = firstCandidate["content"] as? [String: Any]
         let parts = content?["parts"] as? [[String: Any]] ?? []
@@ -1076,7 +1087,8 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                     rawByteCount: data.count
                 )
             )
-            throw VertexAIError.emptyResponse
+            throw normalizedFinishReason == "STOP"
+                ? VertexAIError.emptyCompletedResponse : VertexAIError.emptyResponse
         }
 
         guard GeminiTranscriptFinishReason.allowsUsableText(normalizedFinishReason) else {

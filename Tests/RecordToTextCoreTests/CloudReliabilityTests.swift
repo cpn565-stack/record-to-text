@@ -228,7 +228,7 @@ final class GeminiCloudResponseValidationTests: XCTestCase {
                 XCTAssertEqual($0 as? GoogleAIStudioError, .emptyResponse)
             }
             XCTAssertThrowsError(try vertex.parseCandidateText(from: data)) {
-                XCTAssertEqual($0 as? VertexAIError, .emptyResponse)
+                XCTAssertEqual($0 as? VertexAIError, data == noCandidates ? .emptyResponse : .emptyCompletedResponse)
             }
         }
     }

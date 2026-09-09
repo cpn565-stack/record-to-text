@@ -6,6 +6,50 @@ import XCTest
 
 @MainActor
 final class AppCredentialMigrationTests: XCTestCase {
+    func testQueuedJobFollowsQuickMenuAndSettingsWithoutChangingContent() async throws {
+        let root = try TestSupport.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = AppViewModel(paths: ApplicationPaths(root: root), credentialStore: FakeCredentialStore())
+        await model.waitForCredentialLoading()
+        model.setSetting(\.outputLocationMode, to: .fixedDirectory)
+        model.setSetting(\.defaultOutputDirectory, to: root.path)
+        model.selectQuickTranscriptionChoice(.qwen3ASR1_7BBF16)
+        model.addFiles([root.appendingPathComponent("fixture.wav")])
+        let original = try XCTUnwrap(model.jobs.first)
+        XCTAssertEqual(original.snapshot.backendType, .localQwen)
+        model.selectQuickTranscriptionChoice(.aiStudioGemini38Flash)
+        let queued = try XCTUnwrap(model.jobs.first)
+        XCTAssertEqual(queued.id, original.id)
+        XCTAssertEqual(queued.stage, .queued)
+        XCTAssertEqual(queued.snapshot.backendType, .googleAIStudio)
+        XCTAssertEqual(queued.snapshot.requestedModelID, "gemini-3.8-flash")
+        XCTAssertEqual(queued.snapshot.prompt, original.snapshot.prompt)
+        XCTAssertEqual(queued.snapshot.outputDirectory, original.snapshot.outputDirectory)
+        XCTAssertNil(queued.snapshot.googleAIStudioAPIKey)
+        model.setSetting(\.backendType, to: .vertexAI)
+        model.setSetting(\.vertexAIModelID, to: "custom-vertex")
+        XCTAssertEqual(model.jobs.first?.snapshot.requestedModelID, "custom-vertex")
+        XCTAssertEqual(model.jobs.first?.snapshot.backendType, .vertexAI)
+        try await model.flushJobPersistence()
+        let saved = try JSONRepository<JobLedgerCollection>(url: ApplicationPaths(root: root).jobLedger).load(default: .init(jobs: []))
+        XCTAssertEqual(saved.jobs.first?.snapshot.backendType, .vertexAI)
+    }
+
+    func testEngineChangesExcludeRunningAndCheckpointJobs() {
+        let snapshot = JobSnapshot(modelID: "fixture", glossaryID: nil, glossaryName: nil,
+            terms: [], prompt: "", outputLocationMode: .fixedDirectory,
+            outputDirectory: "/tmp", keepRawTranscript: false, backendType: .localQwen)
+        var job = TranscriptionJob(sourcePath: "/fixture.wav", snapshot: snapshot)
+        XCTAssertTrue(job.canUpdateQueuedEngine(activeJobID: nil))
+        XCTAssertFalse(job.canUpdateQueuedEngine(activeJobID: job.id))
+        job.resumeFromRecoveryDirectory = "/checkpoint"
+        XCTAssertFalse(job.canUpdateQueuedEngine(activeJobID: nil))
+        job.resumeFromRecoveryDirectory = nil
+        job.stage = .transcribing
+        XCTAssertFalse(job.canUpdateQueuedEngine(activeJobID: nil))
+        XCTAssertTrue(job.snapshot.engineDisplayName.contains("本機 Qwen"))
+    }
+
     func testActualMainActorPersistenceSubmissionBenchmark() async throws {
         for count in [10, 100, 1000] {
             let root = try TestSupport.makeTemporaryDirectory()

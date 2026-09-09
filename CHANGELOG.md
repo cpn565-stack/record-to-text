@@ -10,6 +10,8 @@
 
 ### Fixed
 
+- Vertex AI 回報 `STOP` 卻無逐字稿時，沿用同一模型與已準備音訊做有限次重試（含首次最多 4 次），共用原片段逾時預算；安全封鎖及不完整輸出不因此重試。
+- 切換引擎時同步更新尚未開始的一般排隊工作；執行中與檢查點續跑保留原設定。工作卡直接顯示後端與模型，避免選單與實際執行混淆。
 - 修正 adaptive segmentation XCTest 的 optional 編譯錯誤，恢復完整 Xcode CI；`9c21834` 對應的 GitHub Actions 已執行 178 項 XCTest，0 failures。
 
 ### Planned

@@ -73,14 +73,92 @@ final class VertexAIGeminiBackendTests: XCTestCase {
         super.tearDown()
     }
 
+    func testEmptyStopRetriesSameModelAndSucceeds() async throws {
+        var requests = 0
+        MockURLProtocol.requestHandler = { request in
+            requests += 1
+            XCTAssertTrue(request.url!.absoluteString.contains("gemini-3.8-flash:generateContent"))
+            let json = requests == 1
+                ? #"{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"thoughtsTokenCount":3308}}"#
+                : #"{"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":"完整逐字稿"}]}}]}"#
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(json.utf8))
+        }
+        let backend = VertexAIGeminiBackend(
+            authService: GCloudAuthService(customGCloudPath: fakeGCloudURL.path), urlSession: mockSession,
+            configuration: .init(projectID: "mock-project", location: "global", modelID: "gemini-3.8-flash"))
+        let result = try await backend.transcribe(audioData: Data("audio".utf8))
+        XCTAssertEqual(result, "完整逐字稿")
+        XCTAssertEqual(requests, 2)
+    }
+
+    func testRepeatedEmptyStopIsBoundedWithoutModelFallback() async throws {
+        var requests = 0
+        MockURLProtocol.requestHandler = { request in
+            requests += 1
+            XCTAssertTrue(request.url!.absoluteString.contains("gemini-3.8-flash:generateContent"))
+            let json = #"{"candidates":[{"finishReason":"STOP","content":{"parts":[{"thought":true,"text":"thinking"}]}}]}"#
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(json.utf8))
+        }
+        let backend = VertexAIGeminiBackend(
+            authService: GCloudAuthService(customGCloudPath: fakeGCloudURL.path), urlSession: mockSession,
+            configuration: .init(projectID: "mock-project", location: "global", modelID: "gemini-3.8-flash", fallbackPolicy: .flashOnly))
+        do {
+            _ = try await backend.transcribe(audioData: Data("audio".utf8))
+            XCTFail("Empty transcript accepted")
+        } catch is VertexAIError { }
+        XCTAssertEqual(requests, GeminiTransportHelper.RetryPolicy.maximumAttempts)
+    }
+
+    func testSafetyAndUnknownFinishReasonsNeverRetryEmptyContent() async throws {
+        for reason in ["SAFETY", "OTHER", "MISSING_FINISH_REASON"] {
+            var requests = 0
+            MockURLProtocol.requestHandler = { request in
+                requests += 1
+                let candidate: [String: Any] = reason == "MISSING_FINISH_REASON" ? [:] : ["finishReason": reason]
+                let data = try JSONSerialization.data(withJSONObject: ["candidates": [candidate]])
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, data)
+            }
+            let backend = VertexAIGeminiBackend(
+                authService: GCloudAuthService(customGCloudPath: fakeGCloudURL.path), urlSession: mockSession,
+                configuration: .init(projectID: "mock-project", location: "global", modelID: "gemini-3.8-flash"))
+            do {
+                _ = try await backend.transcribe(audioData: Data("audio".utf8))
+                XCTFail("Invalid response accepted")
+            } catch is VertexAIError { }
+            XCTAssertEqual(requests, 1, reason)
+        }
+    }
+
     func testRootBudgetStopsRetryAndFallback() async throws {
         var requests = 0
         MockURLProtocol.requestHandler = { request in
             requests += 1
             return (HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil, headerFields: nil)!, Data("busy".utf8))
         }
+        let auth = GCloudAuthService(customGCloudPath: fakeGCloudURL.path)
+        _ = try await auth.getAccessToken()
         let backend = VertexAIGeminiBackend(
-            authService: GCloudAuthService(customGCloudPath: fakeGCloudURL.path), urlSession: mockSession,
+            authService: auth, urlSession: mockSession,
+            configuration: .init(projectID: "mock-project", location: "global", modelID: "gemini-3.8-flash", fallbackPolicy: .flashOnly))
+        do {
+            _ = try await CloudBudgetContext.$current.withValue(CloudSegmentBudget(limit: .milliseconds(500))) {
+                try await backend.transcribe(audioData: Data("audio".utf8))
+            }
+            XCTFail("Budget permitted fallback")
+        } catch let error as CloudSegmentDeadlineExceeded { XCTAssertEqual(error.stage, "backoff") }
+        XCTAssertEqual(requests, 1)
+    }
+
+    func testEmptyStopRetryRespectsRootBudget() async throws {
+        var requests = 0
+        MockURLProtocol.requestHandler = { request in
+            requests += 1
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(#"{"candidates":[{"finishReason":"STOP"}]}"#.utf8))
+        }
+        let auth = GCloudAuthService(customGCloudPath: fakeGCloudURL.path)
+        _ = try await auth.getAccessToken()
+        let backend = VertexAIGeminiBackend(
+            authService: auth, urlSession: mockSession,
             configuration: .init(projectID: "mock-project", location: "global", modelID: "gemini-3.8-flash", fallbackPolicy: .flashOnly))
         do {
             _ = try await CloudBudgetContext.$current.withValue(CloudSegmentBudget(limit: .milliseconds(500))) {

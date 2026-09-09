@@ -267,6 +267,9 @@ struct SettingsView: View {
     private var runtimeSettings: some View {
         Form {
             Section("轉錄引擎管道 (ASR Backend)") {
+                Text("引擎設定套用至新錄音與尚未開始的工作；執行中及檢查點續跑工作沿用原設定，實際模型會顯示在工作卡片。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Picker(
                     "管道模式",
                     selection: Binding(
