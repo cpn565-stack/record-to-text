@@ -158,8 +158,9 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             )
         } else {
             do {
-                resolvedProjectID = try await authService.getDefaultProjectID()
+                resolvedProjectID = try await CloudBudgetContext.perform(stage: "auth") { try await authService.getDefaultProjectID() }
             } catch {
+                try CloudBudgetContext.check("auth")
                 throw VertexAIError.authenticationFailed(
                     "無法取得 GCP Project ID：\(error.localizedDescription)"
                 )
@@ -168,8 +169,9 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
 
         let accessToken: String
         do {
-            accessToken = try await authService.getAccessToken()
+            accessToken = try await CloudBudgetContext.perform(stage: "auth") { try await authService.getAccessToken() }
         } catch {
+            try CloudBudgetContext.check("auth")
             throw VertexAIError.authenticationFailed(error.localizedDescription)
         }
 
@@ -445,7 +447,10 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         var lastError: Error?
 
         for attempt in 1...policy.maximumAttempts {
-            try Task.checkCancellation()
+            try CloudBudgetContext.check("generation")
+            if let budget = CloudBudgetContext.current {
+                logger?("info", "budget root=\(budget.rootSegmentID) model=\(effectiveModelID) attempt=\(attempt) elapsed=\(budget.elapsed().secondsValue) remaining=\(budget.remaining().secondsValue)")
+            }
             do {
                 let generated = try await generateTranscript(
                     requestedModelID: requestedModelID,
@@ -497,14 +502,13 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                     forAttempt: attempt,
                     retryAfterSeconds: retryAfter
                 )
+                try CloudBudgetContext.validateBackoff(seconds: delay)
                 let reason = isNetworkFailure ? "網路暫時中斷" : "暫時忙碌"
                 logger?(
                     "info",
                     "Vertex Gemini \(effectiveModelID) \(reason)，\(String(format: "%.1f", delay)) 秒後進行第 \(attempt + 1) 次嘗試。"
                 )
-                try await Task.sleep(
-                    nanoseconds: UInt64(delay * 1_000_000_000)
-                )
+                try await CloudBudgetContext.backoff(seconds: delay)
             }
         }
 
@@ -594,8 +598,9 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             )
         } else {
             do {
-                resolvedProjectID = try await authService.getDefaultProjectID()
+                resolvedProjectID = try await CloudBudgetContext.perform(stage: "auth") { try await authService.getDefaultProjectID() }
             } catch {
+                try CloudBudgetContext.check("auth")
                 throw VertexAIError.authenticationFailed(
                     "無法取得 GCP Project ID：\(error.localizedDescription)"
                 )
@@ -604,8 +609,9 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
 
         let accessToken: String
         do {
-            accessToken = try await authService.getAccessToken()
+            accessToken = try await CloudBudgetContext.perform(stage: "auth") { try await authService.getAccessToken() }
         } catch {
+            try CloudBudgetContext.check("auth")
             throw VertexAIError.authenticationFailed(error.localizedDescription)
         }
 
@@ -728,7 +734,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         if httpResponse.statusCode == 401 {
             authService.invalidateToken()
             do {
-                let freshToken = try await authService.getAccessToken(forceRefresh: true)
+                let freshToken = try await CloudBudgetContext.perform(stage: "auth") { try await authService.getAccessToken(forceRefresh: true) }
                 resolvedAccessToken = freshToken
                 urlRequest.setValue("Bearer \(freshToken)", forHTTPHeaderField: "Authorization")
                 let retryResult = try await sendWithPOSIXRetry(
@@ -742,6 +748,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                try CloudBudgetContext.check("auth")
                 throw VertexAIError.authenticationFailed(
                     "Access Token 已失效，重新驗證仍失敗：\(error.localizedDescription)"
                 )
@@ -804,7 +811,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         logger: ((_ level: String, _ message: String) -> Void)?
     ) async throws -> (Data, HTTPURLResponse) {
         do {
-            let (data, response) = try await session.upload(for: request, fromFile: fileURL)
+            let (data, response) = try await GeminiTransportHelper.budgetedUpload(session: session, request: request, fileURL: fileURL)
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw VertexAIError.invalidJSONResponse
             }
@@ -820,7 +827,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                 retryRequest.assumesHTTP3Capable = false
 
                 do {
-                    let (data, response) = try await retrySession.upload(for: retryRequest, fromFile: fileURL)
+                    let (data, response) = try await GeminiTransportHelper.budgetedUpload(session: retrySession, request: retryRequest, fileURL: fileURL)
                     guard let httpResponse = response as? HTTPURLResponse else {
                         throw VertexAIError.invalidJSONResponse
                     }
@@ -894,6 +901,16 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         authService: GCloudAuthService,
         logger: ((_ level: String, _ message: String) -> Void)?
     ) async {
+        if CloudBudgetContext.current != nil {
+            // Cleanup has its own bounded allowance and cannot delay failure UI.
+            Task.detached(priority: .utility) {
+                let cleanupBudget = CloudSegmentBudget(limit: .seconds(5))
+                _ = try? await cleanupBudget.withDeadline(stage: "cleanup") {
+                    await self.deleteGCSObject(bucket: bucket, objectName: objectName, accessToken: accessToken)
+                }
+            }
+            return
+        }
         let cleanupFailure = await Task.detached(priority: .utility) { [self] in
             // A generateContent 401 may have refreshed the cached token before
             // a later retry failed. Resolve inside the detached cleanup task so
@@ -924,7 +941,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         var request = URLRequest(url: deleteURL)
         request.httpMethod = "DELETE"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-        request.timeoutInterval = 30
+        request.timeoutInterval = 5
 
         do {
             let (_, response) = try await urlSession.data(for: request)

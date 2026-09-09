@@ -1,0 +1,780 @@
+Version contract OK: 0.2.0 (1)
+Repository hygiene OK: 2601201 tracked bytes
+......................
+----------------------------------------------------------------------
+Ran 22 tests in 0.002s
+
+OK
+...
+----------------------------------------------------------------------
+Ran 3 tests in 0.008s
+
+OK
+warning: 'record-to-text': found 1 file(s) which are unhandled; explicitly declare them as resources or exclude from the target
+    /Users/mike/Projects/AI工作區域/record-to-text/Sources/RecordToTextApp/Resources/__pycache__/qwen_asr_chunking.cpython-314.pyc
+[0/1] Planning build
+Building for debugging...
+[0/2] Write sources
+[1/2] Write swift-version--58304C5D6DBC2206.txt
+[3/5] Compiling RecordToTextCore GeminiTransportHelper.swift
+[4/5] Emitting module RecordToTextCore
+[5/5] Compiling RecordToTextCore CloudSegmentBudget.swift
+[6/10] Compiling RecordToTextCore ProcessRunner.swift
+[7/10] Compiling RecordToTextCore GoogleAIStudioBackend.swift
+[8/10] Compiling RecordToTextCore JobSilenceAnalysisCache.swift
+[9/10] Compiling RecordToTextCore VertexAIGeminiBackend.swift
+[10/10] Compiling RecordToTextCore TranscriptionEngine.swift
+Build of target: 'RecordToTextCore' complete! (2.98s)
+Building for debugging...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+[2/5] Compiling RecordToTextApp AppViewModel.swift
+[3/5] Emitting module RecordToTextApp
+[3/6] Write Objects.LinkFileList
+[4/6] Linking record-to-text
+[5/6] Applying record-to-text
+Build of product 'record-to-text' complete! (2.44s)
+Building for debugging...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+[2/5] Emitting module RecordToTextSelfTest
+[2/5] Write Objects.LinkFileList
+[3/5] Linking record-to-text-self-test
+[4/5] Applying record-to-text-self-test
+Build of product 'record-to-text-self-test' complete! (0.95s)
+Building for debugging...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+[1/4] Write Objects.LinkFileList
+[2/4] Linking record-to-text-mock-helper
+[3/4] Applying record-to-text-mock-helper
+Build of product 'record-to-text-mock-helper' complete! (0.55s)
+Building for debugging...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+[1/4] Write Objects.LinkFileList
+[2/4] Linking record-to-text-pipeline-self-test
+[3/4] Applying record-to-text-pipeline-self-test
+Build of product 'record-to-text-pipeline-self-test' complete! (0.56s)
+Building for debugging...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'record-to-text-self-test' complete! (0.13s)
+PASS TermParser separators, trim, order and exact dedupe
+PASS TermParser preserves case-sensitive distinct terms
+PASS PromptBuilder merge order
+PASS PromptBuilder empty glossary still preserves fidelity instruction
+PASS OutputNameBuilder keeps inner extension
+PASS OutputNameBuilder increments without overwrite
+PASS JSONLStreamParser handles split Unicode-safe final line
+PASS Qwen BF16 hard timeout scales beyond the old fixed three minutes
+PASS Local Qwen checkpoint discovery requires valid completed chunks and private directory permissions
+PASS AtomicFileWriter normalizes LF and strips BOM
+PASS JSONRepository round trip
+PASS JobStateMachine rejects invalid shortcut
+PASS AppSettings architecture model defaults
+PASS Apple Silicon catalog includes Qwen3-ASR 1.7B BF16 with pinned revision
+PASS RecoveryScanner accepts only UUID job directory names
+PASS StartupInventory keeps active recovery directories out of cleanup UX
+PASS RecoveryScanner classifies recoverable and orphaned leftovers without deleting
+PASS RecoveryScanner deletes only validated managed directories
+PASS ProcessRunner cancelCurrent is safe when idle
+PASS ProcessRunner terminates a process that exceeds its timeout
+PASS ModelCache detects App-managed hub snapshots
+PASS TextFileValidator rejects blank transcript output
+PASS OutputContractValidator rejects prompt echo while keeping clean transcript
+PASS OutputContractValidator rejects leading glossary echo
+PASS OutputContractValidator rejects space-separated CJK glossary echo
+PASS OutputContractValidator rejects punctuated glossary echo
+PASS Google AI Studio requires verification for managed ffmpeg fallback
+PASS Local Qwen managed runtime fails closed until a verifier approves it
+PASS AppSettings persists localQwen backend selection across JSON round-trip
+PASS AtomicFileWriter exclusive mode never replaces an existing output
+PASS TranscriptMerger sorts split TXT files and never overwrites output
+PASS AudioSegmentPlanner splits 31 minutes into 2 segments at 20-minute cap
+PASS AudioSegmentPlanner splits 65 minutes into 4 segments at 20-minute cap
+PASS AudioSegmentPlanner covers the tail of a 120 minute recording at 20-minute cap
+PASS AudioSegmentManifest gates merge on one completion per ordered segment
+PASS Cloud adaptive segmentation prefers midpoint silence and obeys max depth
+PASS Adaptive cloud split renumbers a contiguous manifest
+PASS JobRetentionPolicy keeps unfinished work when recentJobLimit is zero
+PASS JobRetentionPolicy never truncates a queue longer than history limit
+PASS RecentJobSummary marks a missing completed output
+PASS TranscriptionSourceSlice splits a recording into ordered halves
+PASS TranscriptionSourceSlice persists through JSON and keeps its label
+PASS GCloudAuthService returns nil for nonexistent custom path
+PASS AppSettings persists Vertex AI configuration
+PASS AppSettings persists Google AI Studio configuration without API key
+PASS GoogleAIStudioBackend rejects audio payload exceeding maximum inline size
+PASS GeminiModelDescriptor contains 3.8 Flash, 3.7 Flash, 3.6 Flash and 3.1 Pro presets
+PASS Main-window quick model choices switch backend and matching model together
+PASS Gemini cloud prompt requests speaker turns and absolute time ranges without duplicating glossary terms
+PASS Speaker roster keeps canonical labels across cloud segments
+PASS Gemini thinking level is included in Gemini 3 generation config
+PASS CloudUsageMetadata accurately estimates Gemini 3.8 Flash cost and formats token summary
+PASS RecentJobSummary formats completion time as HH:mm for today and M/d for earlier days
+PASS GeminiTransportHelper recursively unwraps and detects POSIX 40 / EMSGSIZE errors
+PASS GeminiTransportHelper writes request file with tight permissions
+PASS Transport errors provide explicit channel diagnostic text without vague message too long
+PASS JobSnapshot persists transcription configuration but keeps runtime authorization live
+PASS GoogleAIStudioBackend handles POSIX 40 with ephemeral retry and succeeds
+PASS GoogleAIStudioBackend uploads via Files API and decouples audio from generateContent body
+PASS VertexAIGeminiBackend uploads to GCS and references gs:// URI without inline audio
+PASS Lenient ledger load skips an incompatible record and quarantines the damaged file
+PASS Unparsable ledger is quarantined instead of being overwritten by a future save
+PASS promptFeedback OTHER is fail-closed with diagnostics, not a fake HTTP 400
+PASS Vertex promptFeedback PROHIBITED_CONTENT stays a policy block without fake HTTP 400
+PASS only explicit Google safety policy errors qualify for segment isolation
+PASS cloud manifest allows an explicit safety gap but not a fully-complete claim
+PASS integer promptFeedback.blockReason 2 maps to OTHER
+PASS empty Gemini response inventory captures responseId and token counts
+PASS MAX_TOKENS is fail-closed; only STOP is a complete transcript
+PASS ProcessRunner timeout kills spawned grandchildren, not just the direct child
+PASS VertexAIGeminiBackend retries transient HTTP 503 and succeeds without failing the job
+PASS GoogleAIStudioBackend fallback failure surfaces its real error instead of masking it
+
+72 passed, 0 failed
+PASS ffprobe → ffmpeg → mock ASR → OpenCC → atomic TXT
+PASS mock ASR failure → transcribing-stage recovery → temp cleanup
+PASS slow mock ASR → cancellation → temp cleanup
+PASS coordinator split → ordered ASR merge → tail phrase
+PASS source time slice → first half transcript with ordered output name
+PASS final segment failure → recovery draft, no partial final TXT
+PASS middle segment failure → recovery draft, no partial final TXT
+PASS blank final segment → recovery draft, no partial final TXT
+PASS irreducible 30-second token limit → explicit gap, continued output
+PASS final segment without completed → recovery draft, no partial final TXT
+warning: 'record-to-text': found 1 file(s) which are unhandled; explicitly declare them as resources or exclude from the target
+    /Users/mike/Projects/AI工作區域/record-to-text/Sources/RecordToTextApp/Resources/__pycache__/qwen_asr_chunking.cpython-314.pyc
+[0/1] Planning build
+Building for debugging...
+[0/11] Write sources
+[1/11] Write swift-version--58304C5D6DBC2206.txt
+[3/9] Emitting module RecordToTextCoreTests
+[4/9] Compiling RecordToTextCoreTests CloudAdaptiveSegmentationTests.swift
+[5/9] Compiling RecordToTextCoreTests VertexAIGeminiBackendTests.swift
+[6/9] Compiling RecordToTextCoreTests CloudSegmentBudgetTests.swift
+[7/9] Compiling RecordToTextCoreTests JobPersistenceCoordinatorTests.swift
+[7/9] Write Objects.LinkFileList
+[8/9] Linking record-to-textPackageTests
+Build complete! (1.93s)
+Test Suite 'All tests' started at 2026-09-09 10:25:10.186.
+Test Suite 'record-to-textPackageTests.xctest' started at 2026-09-09 10:25:10.187.
+Test Suite 'AppCancellationRecoveryTests' started at 2026-09-09 10:25:10.187.
+Test Case '-[RecordToTextCoreTests.AppCancellationRecoveryTests testEmptyOrMismatchedCancellationCheckpointStaysHidden]' started.
+Test Case '-[RecordToTextCoreTests.AppCancellationRecoveryTests testEmptyOrMismatchedCancellationCheckpointStaysHidden]' passed (0.006 seconds).
+Test Case '-[RecordToTextCoreTests.AppCancellationRecoveryTests testLocalChunkCheckpointIsVisibleOnCancelledJob]' started.
+Test Case '-[RecordToTextCoreTests.AppCancellationRecoveryTests testLocalChunkCheckpointIsVisibleOnCancelledJob]' passed (0.002 seconds).
+Test Case '-[RecordToTextCoreTests.AppCancellationRecoveryTests testRecoveryReportHidesOnlyActiveTempRecoveryDirectory]' started.
+Test Case '-[RecordToTextCoreTests.AppCancellationRecoveryTests testRecoveryReportHidesOnlyActiveTempRecoveryDirectory]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.AppCancellationRecoveryTests testValidManagedCancellationCheckpointIsVisibleOnCancelledJob]' started.
+Test Case '-[RecordToTextCoreTests.AppCancellationRecoveryTests testValidManagedCancellationCheckpointIsVisibleOnCancelledJob]' passed (0.002 seconds).
+Test Suite 'AppCancellationRecoveryTests' passed at 2026-09-09 10:25:10.199.
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.011 (0.011) seconds
+Test Suite 'AppCredentialMigrationTests' started at 2026-09-09 10:25:10.199.
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testActualMainActorPersistenceSubmissionBenchmark]' started.
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testActualMainActorPersistenceSubmissionBenchmark]' passed (2.404 seconds).
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testAIStudioJobStaysQueuedDuringCredentialLoading]' started.
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testAIStudioJobStaysQueuedDuringCredentialLoading]' passed (0.426 seconds).
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testAPICredentialDraftReflectsClearResult]' started.
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testAPICredentialDraftReflectsClearResult]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testAppStartupRecoversPublicationAndDeletionStaysDeleted]' started.
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testAppStartupRecoversPublicationAndDeletionStaysDeleted]' passed (0.030 seconds).
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testClearAfterMigrationRecoverySanitizesLedgerAndCannotResurrectKey]' started.
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testClearAfterMigrationRecoverySanitizesLedgerAndCannotResurrectKey]' passed (0.016 seconds).
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testClearKeepsKeychainValueWhenLegacySettingsRedactionFails]' started.
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testClearKeepsKeychainValueWhenLegacySettingsRedactionFails]' passed (0.007 seconds).
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testDeleteThatMutatesThenThrowsRestoresPreviousKey]' started.
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testDeleteThatMutatesThenThrowsRestoresPreviousKey]' passed (0.005 seconds).
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testExistingKeychainValueWinsAndLegacyFilesAreRedacted]' started.
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testExistingKeychainValueWinsAndLegacyFilesAreRedacted]' passed (0.007 seconds).
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testFailedMigrationLeavesLegacyFilesUntouchedAcrossPersistenceAttempts]' started.
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testFailedMigrationLeavesLegacyFilesUntouchedAcrossPersistenceAttempts]' passed (0.004 seconds).
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testLoadingKeepsUIEditableAndRejectsConflictingCredentialWrites]' started.
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testLoadingKeepsUIEditableAndRejectsConflictingCredentialWrites]' passed (0.317 seconds).
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testResetKeepsKeychainValueWhenLegacyLedgerRedactionFails]' started.
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testResetKeepsKeychainValueWhenLegacyLedgerRedactionFails]' passed (5.125 seconds).
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testSaveAndDeleteFailuresRemainVisibleAndRetryable]' started.
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testSaveAndDeleteFailuresRemainVisibleAndRetryable]' passed (0.012 seconds).
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testSlowCredentialReadDoesNotBlockInitializer]' started.
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testSlowCredentialReadDoesNotBlockInitializer]' passed (0.417 seconds).
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testStoredKeyWithFailedLegacyRedactionRemainsRetryable]' started.
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testStoredKeyWithFailedLegacyRedactionRemainsRetryable]' passed (0.018 seconds).
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testSuccessfulMigrationStoresKeyBeforeRedactingLegacyFiles]' started.
+Test Case '-[RecordToTextCoreTests.AppCredentialMigrationTests testSuccessfulMigrationStoresKeyBeforeRedactingLegacyFiles]' passed (0.015 seconds).
+Test Suite 'AppCredentialMigrationTests' passed at 2026-09-09 10:25:19.005.
+	 Executed 15 tests, with 0 failures (0 unexpected) in 8.804 (8.806) seconds
+Test Suite 'AudioSegmentationTests' started at 2026-09-09 10:25:19.005.
+Test Case '-[RecordToTextCoreTests.AudioSegmentationTests testExactlyTwentyMinutesDoesNotRequireSplitting]' started.
+Test Case '-[RecordToTextCoreTests.AudioSegmentationTests testExactlyTwentyMinutesDoesNotRequireSplitting]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.AudioSegmentationTests testManifestAllowsOnlyExplicitSafetyGapForPartialCloudOutput]' started.
+Test Case '-[RecordToTextCoreTests.AudioSegmentationTests testManifestAllowsOnlyExplicitSafetyGapForPartialCloudOutput]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.AudioSegmentationTests testManifestRejectsDuplicateOrOutOfOrderIndices]' started.
+Test Case '-[RecordToTextCoreTests.AudioSegmentationTests testManifestRejectsDuplicateOrOutOfOrderIndices]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.AudioSegmentationTests testManifestRejectsFailedSegment]' started.
+Test Case '-[RecordToTextCoreTests.AudioSegmentationTests testManifestRejectsFailedSegment]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.AudioSegmentationTests testManifestRejectsMissingSegment]' started.
+Test Case '-[RecordToTextCoreTests.AudioSegmentationTests testManifestRejectsMissingSegment]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.AudioSegmentationTests testManifestRejectsRepeatedCompletionEvent]' started.
+Test Case '-[RecordToTextCoreTests.AudioSegmentationTests testManifestRejectsRepeatedCompletionEvent]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.AudioSegmentationTests testManifestRequiresEverySegmentCompletedExactlyOnce]' started.
+Test Case '-[RecordToTextCoreTests.AudioSegmentationTests testManifestRequiresEverySegmentCompletedExactlyOnce]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.AudioSegmentationTests testOneHundredTwentyMinutesProducesSixFullSegments]' started.
+Test Case '-[RecordToTextCoreTests.AudioSegmentationTests testOneHundredTwentyMinutesProducesSixFullSegments]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.AudioSegmentationTests testPlannerRejectsInvalidDurations]' started.
+Test Case '-[RecordToTextCoreTests.AudioSegmentationTests testPlannerRejectsInvalidDurations]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.AudioSegmentationTests testSixtyFiveMinutesProducesFourSegments]' started.
+Test Case '-[RecordToTextCoreTests.AudioSegmentationTests testSixtyFiveMinutesProducesFourSegments]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.AudioSegmentationTests testThirtyOneMinutesProducesTwoSegmentsWithTwentyMinuteCap]' started.
+Test Case '-[RecordToTextCoreTests.AudioSegmentationTests testThirtyOneMinutesProducesTwoSegmentsWithTwentyMinuteCap]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.AudioSegmentationTests testTwentyOneMinutesProducesTwoSegments]' started.
+Test Case '-[RecordToTextCoreTests.AudioSegmentationTests testTwentyOneMinutesProducesTwoSegments]' passed (0.000 seconds).
+Test Suite 'AudioSegmentationTests' passed at 2026-09-09 10:25:19.009.
+	 Executed 12 tests, with 0 failures (0 unexpected) in 0.003 (0.004) seconds
+Test Suite 'CloudAdaptiveSegmentationTests' started at 2026-09-09 10:25:19.009.
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testAdaptiveSegmentationChildFailureFailsClosedWithoutFinalTranscript]' started.
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testAdaptiveSegmentationChildFailureFailsClosedWithoutFinalTranscript]' passed (0.336 seconds).
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testAdaptiveSegmentationExceedingMaxSplitDepthFailsClosed]' started.
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testAdaptiveSegmentationExceedingMaxSplitDepthFailsClosed]' passed (0.447 seconds).
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testAdaptiveSegmentationRecoversFromEmptyMaxTokens]' started.
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testAdaptiveSegmentationRecoversFromEmptyMaxTokens]' passed (0.337 seconds).
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testAdaptiveSegmentationSucceedsAfterMaxTokensTruncation]' started.
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testAdaptiveSegmentationSucceedsAfterMaxTokensTruncation]' passed (0.337 seconds).
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testBudgetStopsNetworkAndServerRetriesBeforeFallback]' started.
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testBudgetStopsNetworkAndServerRetriesBeforeFallback]' passed (0.071 seconds).
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testCompletionReceiptPrecedesWorkspaceCleanup]' started.
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testCompletionReceiptPrecedesWorkspaceCleanup]' passed (0.337 seconds).
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testDisabledSilenceAwareDoesNotCallDetectorForInitialOrAdaptiveSplit]' started.
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testDisabledSilenceAwareDoesNotCallDetectorForInitialOrAdaptiveSplit]' passed (0.406 seconds).
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testFilesPollingUsesRootDeadline]' started.
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testFilesPollingUsesRootDeadline]' passed (0.140 seconds).
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testInitialSilenceScanIsReusedByAdaptiveChildren]' started.
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testInitialSilenceScanIsReusedByAdaptiveChildren]' passed (0.419 seconds).
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testManifestSplitRenumbersContiguousChildren]' started.
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testManifestSplitRenumbersContiguousChildren]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testNetworkRetryReusesUploadedFile]' started.
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testNetworkRetryReusesUploadedFile]' passed (1.147 seconds).
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testPreviouslyBlockedFiveAndSevenMinuteSegmentsCanSplit]' started.
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testPreviouslyBlockedFiveAndSevenMinuteSegmentsCanSplit]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testRightChildDeadlinePreservesLeftAndRejectsLateResponse]' started.
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testRightChildDeadlinePreservesLeftAndRejectsLateResponse]' passed (2.769 seconds).
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testSplitBoundaryPrefersNearestEligibleSilence]' started.
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testSplitBoundaryPrefersNearestEligibleSilence]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testSplitBoundaryStopsAtMaximumDepthAndMinimumDuration]' started.
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSegmentationTests testSplitBoundaryStopsAtMaximumDepthAndMinimumDuration]' passed (0.000 seconds).
+Test Suite 'CloudAdaptiveSegmentationTests' passed at 2026-09-09 10:25:25.760.
+	 Executed 15 tests, with 0 failures (0 unexpected) in 6.749 (6.751) seconds
+Test Suite 'CloudAdaptiveSilenceCoordinatorTests' started at 2026-09-09 10:25:25.760.
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSilenceCoordinatorTests testCachedParentAnalysisIsReusedByChild]' started.
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSilenceCoordinatorTests testCachedParentAnalysisIsReusedByChild]' passed (0.003 seconds).
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSilenceCoordinatorTests testCancellationIsNotConvertedToMidpointFallback]' started.
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSilenceCoordinatorTests testCancellationIsNotConvertedToMidpointFallback]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSilenceCoordinatorTests testFailedAnalysisIsNotCachedAndCanBeRetried]' started.
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSilenceCoordinatorTests testFailedAnalysisIsNotCachedAndCanBeRetried]' passed (0.002 seconds).
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSilenceCoordinatorTests testIneligibleSegmentsSkipSilenceDetection]' started.
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSilenceCoordinatorTests testIneligibleSegmentsSkipSilenceDetection]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSilenceCoordinatorTests testMaximumDepthAndDisabledSilenceAwareDoNotCallDetector]' started.
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSilenceCoordinatorTests testMaximumDepthAndDisabledSilenceAwareDoNotCallDetector]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSilenceCoordinatorTests testRelativeSilenceTimesUseRecordOffsetOnlyOnce]' started.
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSilenceCoordinatorTests testRelativeSilenceTimesUseRecordOffsetOnlyOnce]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSilenceCoordinatorTests testRightChildReusesParentAbsoluteCoverage]' started.
+Test Case '-[RecordToTextCoreTests.CloudAdaptiveSilenceCoordinatorTests testRightChildReusesParentAbsoluteCoverage]' passed (0.001 seconds).
+Test Suite 'CloudAdaptiveSilenceCoordinatorTests' passed at 2026-09-09 10:25:25.772.
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.011 (0.012) seconds
+Test Suite 'CloudCheckpointRecoveryTests' started at 2026-09-09 10:25:25.772.
+Test Case '-[RecordToTextCoreTests.CloudCheckpointRecoveryTests testCancellationCheckpointRequiresActualRecoverableText]' started.
+Test Case '-[RecordToTextCoreTests.CloudCheckpointRecoveryTests testCancellationCheckpointRequiresActualRecoverableText]' passed (0.003 seconds).
+Test Case '-[RecordToTextCoreTests.CloudCheckpointRecoveryTests testRecoveredManifestUsesRecoveryPathsAndDoesNotRetainAudio]' started.
+Test Case '-[RecordToTextCoreTests.CloudCheckpointRecoveryTests testRecoveredManifestUsesRecoveryPathsAndDoesNotRetainAudio]' passed (0.008 seconds).
+Test Suite 'CloudCheckpointRecoveryTests' passed at 2026-09-09 10:25:25.783.
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.010 (0.011) seconds
+Test Suite 'CloudPipelinePresentationTests' started at 2026-09-09 10:25:25.783.
+Test Case '-[RecordToTextCoreTests.CloudPipelinePresentationTests testCloudSnapshotCapturesQualityControls]' started.
+Test Case '-[RecordToTextCoreTests.CloudPipelinePresentationTests testCloudSnapshotCapturesQualityControls]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.CloudPipelinePresentationTests testJobCloudSummaryDistinguishesRequestedAndEffectiveModels]' started.
+Test Case '-[RecordToTextCoreTests.CloudPipelinePresentationTests testJobCloudSummaryDistinguishesRequestedAndEffectiveModels]' passed (0.000 seconds).
+Test Suite 'CloudPipelinePresentationTests' passed at 2026-09-09 10:25:25.783.
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+Test Suite 'CloudResumeCheckpointTests' started at 2026-09-09 10:25:25.784.
+Test Case '-[RecordToTextCoreTests.CloudResumeCheckpointTests testBlankCompletedSegmentIsNotReusable]' started.
+Test Case '-[RecordToTextCoreTests.CloudResumeCheckpointTests testBlankCompletedSegmentIsNotReusable]' passed (0.004 seconds).
+Test Case '-[RecordToTextCoreTests.CloudResumeCheckpointTests testLoadsOnlyCompletedNonEmptyManagedSegments]' started.
+Test Case '-[RecordToTextCoreTests.CloudResumeCheckpointTests testLoadsOnlyCompletedNonEmptyManagedSegments]' passed (0.003 seconds).
+Test Case '-[RecordToTextCoreTests.CloudResumeCheckpointTests testRejectsDifferentSourceBackendAndOutsideDirectory]' started.
+Test Case '-[RecordToTextCoreTests.CloudResumeCheckpointTests testRejectsDifferentSourceBackendAndOutsideDirectory]' passed (0.003 seconds).
+Test Suite 'CloudResumeCheckpointTests' passed at 2026-09-09 10:25:25.794.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.011 (0.011) seconds
+Test Suite 'CloudSegmentBudgetTests' started at 2026-09-09 10:25:25.794.
+Test Case '-[RecordToTextCoreTests.CloudSegmentBudgetTests testCancellationIsNotDeadline]' started.
+Test Case '-[RecordToTextCoreTests.CloudSegmentBudgetTests testCancellationIsNotDeadline]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.CloudSegmentBudgetTests testFiveSecondBudgetStopsLocalProcessWithinStopTarget]' started.
+Test Case '-[RecordToTextCoreTests.CloudSegmentBudgetTests testFiveSecondBudgetStopsLocalProcessWithinStopTarget]' passed (5.022 seconds).
+Test Case '-[RecordToTextCoreTests.CloudSegmentBudgetTests testInjectedMonotonicClockRejectsNewWorkAfterAdvance]' started.
+Test Case '-[RecordToTextCoreTests.CloudSegmentBudgetTests testInjectedMonotonicClockRejectsNewWorkAfterAdvance]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.CloudSegmentBudgetTests testLateUncooperativeResultCannotPassDeadline]' started.
+Test Case '-[RecordToTextCoreTests.CloudSegmentBudgetTests testLateUncooperativeResultCannotPassDeadline]' passed (0.037 seconds).
+Test Case '-[RecordToTextCoreTests.CloudSegmentBudgetTests testPerRequestWallLimitDoesNotResetOrExhaustRoot]' started.
+Test Case '-[RecordToTextCoreTests.CloudSegmentBudgetTests testPerRequestWallLimitDoesNotResetOrExhaustRoot]' passed (0.033 seconds).
+Test Case '-[RecordToTextCoreTests.CloudSegmentBudgetTests testRetryAfterDoesNotStartAnEarlyRetry]' started.
+Test Case '-[RecordToTextCoreTests.CloudSegmentBudgetTests testRetryAfterDoesNotStartAnEarlyRetry]' passed (0.001 seconds).
+Test Suite 'CloudSegmentBudgetTests' passed at 2026-09-09 10:25:30.890.
+	 Executed 6 tests, with 0 failures (0 unexpected) in 5.094 (5.096) seconds
+Test Suite 'CloudTranscriptionModelsTests' started at 2026-09-09 10:25:30.890.
+Test Case '-[RecordToTextCoreTests.CloudTranscriptionModelsTests testCloudUsageCostEstimationAndSummaryDisplay]' started.
+Test Case '-[RecordToTextCoreTests.CloudTranscriptionModelsTests testCloudUsageCostEstimationAndSummaryDisplay]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.CloudTranscriptionModelsTests testCompletionTimeFormatting]' started.
+Test Case '-[RecordToTextCoreTests.CloudTranscriptionModelsTests testCompletionTimeFormatting]' passed (0.002 seconds).
+Test Case '-[RecordToTextCoreTests.CloudTranscriptionModelsTests testLegacySettingsAndSnapshotDefaultToSafeCloudPolicies]' started.
+Test Case '-[RecordToTextCoreTests.CloudTranscriptionModelsTests testLegacySettingsAndSnapshotDefaultToSafeCloudPolicies]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.CloudTranscriptionModelsTests testRecentSummaryUsesCloudRequestedAndEffectiveModels]' started.
+Test Case '-[RecordToTextCoreTests.CloudTranscriptionModelsTests testRecentSummaryUsesCloudRequestedAndEffectiveModels]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.CloudTranscriptionModelsTests testUsageAggregationAndEffectiveModelOrder]' started.
+Test Case '-[RecordToTextCoreTests.CloudTranscriptionModelsTests testUsageAggregationAndEffectiveModelOrder]' passed (0.000 seconds).
+Test Suite 'CloudTranscriptionModelsTests' passed at 2026-09-09 10:25:30.896.
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.004 (0.005) seconds
+Test Suite 'GCloudAuthServiceTests' started at 2026-09-09 10:25:30.896.
+Test Case '-[RecordToTextCoreTests.GCloudAuthServiceTests testInvalidateTokenForcesNextFetch]' started.
+Test Case '-[RecordToTextCoreTests.GCloudAuthServiceTests testInvalidateTokenForcesNextFetch]' passed (0.554 seconds).
+Test Case '-[RecordToTextCoreTests.GCloudAuthServiceTests testMissingGCloudExecutableThrows]' started.
+Test Case '-[RecordToTextCoreTests.GCloudAuthServiceTests testMissingGCloudExecutableThrows]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.GCloudAuthServiceTests testNonZeroExitPreservesStatusAndMessage]' started.
+Test Case '-[RecordToTextCoreTests.GCloudAuthServiceTests testNonZeroExitPreservesStatusAndMessage]' passed (0.556 seconds).
+Test Case '-[RecordToTextCoreTests.GCloudAuthServiceTests testProjectIDIsTrimmedAndParsed]' started.
+Test Case '-[RecordToTextCoreTests.GCloudAuthServiceTests testProjectIDIsTrimmedAndParsed]' passed (0.567 seconds).
+Test Case '-[RecordToTextCoreTests.GCloudAuthServiceTests testTokenIsCachedAndForceRefreshRunsGCloudAgain]' started.
+Test Case '-[RecordToTextCoreTests.GCloudAuthServiceTests testTokenIsCachedAndForceRefreshRunsGCloudAgain]' passed (0.573 seconds).
+Test Case '-[RecordToTextCoreTests.GCloudAuthServiceTests testUnsetProjectAndEmptyTokenProduceSpecificErrors]' started.
+Test Case '-[RecordToTextCoreTests.GCloudAuthServiceTests testUnsetProjectAndEmptyTokenProduceSpecificErrors]' passed (1.450 seconds).
+Test Suite 'GCloudAuthServiceTests' passed at 2026-09-09 10:25:34.597.
+	 Executed 6 tests, with 0 failures (0 unexpected) in 3.701 (3.702) seconds
+Test Suite 'GeminiBackendObservabilityTests' started at 2026-09-09 10:25:34.597.
+Test Case '-[RecordToTextCoreTests.GeminiBackendObservabilityTests testFallbackDefaultsOffAndMayBeExplicitlyEnabled]' started.
+Test Case '-[RecordToTextCoreTests.GeminiBackendObservabilityTests testFallbackDefaultsOffAndMayBeExplicitlyEnabled]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.GeminiBackendObservabilityTests testMetadataParserCapturesModelVersionResponseAndUsage]' started.
+Test Case '-[RecordToTextCoreTests.GeminiBackendObservabilityTests testMetadataParserCapturesModelVersionResponseAndUsage]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.GeminiBackendObservabilityTests testNetworkRetryClassificationDoesNotRetryPermanentErrorsOrCancellation]' started.
+Test Case '-[RecordToTextCoreTests.GeminiBackendObservabilityTests testNetworkRetryClassificationDoesNotRetryPermanentErrorsOrCancellation]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.GeminiBackendObservabilityTests testRetryInfoAndDailyQuotaClassification]' started.
+Test Case '-[RecordToTextCoreTests.GeminiBackendObservabilityTests testRetryInfoAndDailyQuotaClassification]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.GeminiBackendObservabilityTests testRetryPolicyUsesExponentialBackoffJitterAndRetryInfo]' started.
+Test Case '-[RecordToTextCoreTests.GeminiBackendObservabilityTests testRetryPolicyUsesExponentialBackoffJitterAndRetryInfo]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.GeminiBackendObservabilityTests testTranscriptionOutputBudgetKeepsUnknownModelsConservative]' started.
+Test Case '-[RecordToTextCoreTests.GeminiBackendObservabilityTests testTranscriptionOutputBudgetKeepsUnknownModelsConservative]' passed (0.000 seconds).
+Test Suite 'GeminiBackendObservabilityTests' passed at 2026-09-09 10:25:34.599.
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+Test Suite 'GeminiCloudResponseValidationTests' started at 2026-09-09 10:25:34.599.
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testAIStudioAcceptsOnlyStopWithNonEmptyText]' started.
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testAIStudioAcceptsOnlyStopWithNonEmptyText]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testAIStudioRetriesTransientNetworkFailure]' started.
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testAIStudioRetriesTransientNetworkFailure]' passed (1.338 seconds).
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testCancelDuringNetworkBackoffDoesNotSendAnotherRequest]' started.
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testCancelDuringNetworkBackoffDoesNotSendAnotherRequest]' passed (0.003 seconds).
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testCloudPromptsRequestStructuredSpeakerTranscriptWithoutDuplicateTerms]' started.
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testCloudPromptsRequestStructuredSpeakerTranscriptWithoutDuplicateTerms]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testFilesAPICleanupCompletesBeforeIncompleteResponseReturns]' started.
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testFilesAPICleanupCompletesBeforeIncompleteResponseReturns]' passed (0.004 seconds).
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testFilesAPICleanupIsShieldedFromParentCancellation]' started.
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testFilesAPICleanupIsShieldedFromParentCancellation]' passed (0.013 seconds).
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testFilesAPICleanupRunsWhenFinalizeResponseHasNameButNoURI]' started.
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testFilesAPICleanupRunsWhenFinalizeResponseHasNameButNoURI]' passed (0.003 seconds).
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testMaxTokensWithoutContentStillRequestsAdaptiveRecovery]' started.
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testMaxTokensWithoutContentStillRequestsAdaptiveRecovery]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testMissingCandidateContentAndWhitespaceAreErrors]' started.
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testMissingCandidateContentAndWhitespaceAreErrors]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testNetworkRetryStopsAfterFourAttemptsWithoutModelFallback]' started.
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testNetworkRetryStopsAfterFourAttemptsWithoutModelFallback]' passed (10.114 seconds).
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testOnlyRetryableServerFailuresMayTriggerEmergencyFallback]' started.
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testOnlyRetryableServerFailuresMayTriggerEmergencyFallback]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testPipelineContinuesOnlyForExplicitGoogleSafetyBlocks]' started.
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testPipelineContinuesOnlyForExplicitGoogleSafetyBlocks]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testPromptFeedbackOtherIsNotFakeHTTP400AndCapturesDiagnostics]' started.
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testPromptFeedbackOtherIsNotFakeHTTP400AndCapturesDiagnostics]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testPromptFeedbackSafetyStillUsesPolicyLanguageWithoutHTTP400]' started.
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testPromptFeedbackSafetyStillUsesPolicyLanguageWithoutHTTP400]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testSafetyGapMarkerIncludesSegmentAndTimeRange]' started.
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testSafetyGapMarkerIncludesSegmentAndTimeRange]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testVertexAcceptsOnlyStopWithNonEmptyText]' started.
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testVertexAcceptsOnlyStopWithNonEmptyText]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testVertexLocationAndLongManualSliceKeepUserSelectedOffsets]' started.
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testVertexLocationAndLongManualSliceKeepUserSelectedOffsets]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testVertexMultipleSegmentsRequestExactlyOneWholeTranscriptSummary]' started.
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testVertexMultipleSegmentsRequestExactlyOneWholeTranscriptSummary]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testVertexSummaryDisabledMakesNoSummaryCall]' started.
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testVertexSummaryDisabledMakesNoSummaryCall]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testVertexSummaryFailureKeepsTranscriptAndEmitsWarning]' started.
+Test Case '-[RecordToTextCoreTests.GeminiCloudResponseValidationTests testVertexSummaryFailureKeepsTranscriptAndEmitsWarning]' passed (0.001 seconds).
+Test Suite 'GeminiCloudResponseValidationTests' passed at 2026-09-09 10:25:46.087.
+	 Executed 20 tests, with 0 failures (0 unexpected) in 11.484 (11.488) seconds
+Test Suite 'JSONLStreamParserTests' started at 2026-09-09 10:25:46.087.
+Test Case '-[RecordToTextCoreTests.JSONLStreamParserTests testAppendAcceptsCRLFAndSkipsBlankLines]' started.
+Test Case '-[RecordToTextCoreTests.JSONLStreamParserTests testAppendAcceptsCRLFAndSkipsBlankLines]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.JSONLStreamParserTests testAppendHandlesArbitraryByteBoundariesIncludingUnicode]' started.
+Test Case '-[RecordToTextCoreTests.JSONLStreamParserTests testAppendHandlesArbitraryByteBoundariesIncludingUnicode]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.JSONLStreamParserTests testFinishDecodesFinalLineWithoutNewline]' started.
+Test Case '-[RecordToTextCoreTests.JSONLStreamParserTests testFinishDecodesFinalLineWithoutNewline]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.JSONLStreamParserTests testFixtureParsesExpectedEventsAndFields]' started.
+Test Case '-[RecordToTextCoreTests.JSONLStreamParserTests testFixtureParsesExpectedEventsAndFields]' passed (0.003 seconds).
+Test Case '-[RecordToTextCoreTests.JSONLStreamParserTests testInvalidJSONReportsOriginalLine]' started.
+Test Case '-[RecordToTextCoreTests.JSONLStreamParserTests testInvalidJSONReportsOriginalLine]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.JSONLStreamParserTests testInvalidUTF8IsRejected]' started.
+Test Case '-[RecordToTextCoreTests.JSONLStreamParserTests testInvalidUTF8IsRejected]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.JSONLStreamParserTests testLivenessMonitorWarnsOnceUntilActivityResumes]' started.
+Test Case '-[RecordToTextCoreTests.JSONLStreamParserTests testLivenessMonitorWarnsOnceUntilActivityResumes]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.JSONLStreamParserTests testQwenHardTimeoutScalesWithModelAndChunkDuration]' started.
+Test Case '-[RecordToTextCoreTests.JSONLStreamParserTests testQwenHardTimeoutScalesWithModelAndChunkDuration]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.JSONLStreamParserTests testUnknownEventTypeRemainsForwardCompatible]' started.
+Test Case '-[RecordToTextCoreTests.JSONLStreamParserTests testUnknownEventTypeRemainsForwardCompatible]' passed (0.000 seconds).
+Test Suite 'JSONLStreamParserTests' passed at 2026-09-09 10:25:46.095.
+	 Executed 9 tests, with 0 failures (0 unexpected) in 0.006 (0.008) seconds
+Test Suite 'JobPersistenceCoordinatorTests' started at 2026-09-09 10:25:46.095.
+Test Case '-[RecordToTextCoreTests.JobPersistenceCoordinatorTests testCoalescingAndStaleSubmissions]' started.
+Test Case '-[RecordToTextCoreTests.JobPersistenceCoordinatorTests testCoalescingAndStaleSubmissions]' passed (0.096 seconds).
+Test Case '-[RecordToTextCoreTests.JobPersistenceCoordinatorTests testCrashMatrixNeverResurrectsDeletedJob]' started.
+Test Case '-[RecordToTextCoreTests.JobPersistenceCoordinatorTests testCrashMatrixNeverResurrectsDeletedJob]' passed (0.467 seconds).
+Test Case '-[RecordToTextCoreTests.JobPersistenceCoordinatorTests testFailedWriterRetainsLatestAndCanRetryWithoutTranscription]' started.
+Test Case '-[RecordToTextCoreTests.JobPersistenceCoordinatorTests testFailedWriterRetainsLatestAndCanRetryWithoutTranscription]' passed (0.036 seconds).
+Test Case '-[RecordToTextCoreTests.JobPersistenceCoordinatorTests testFlushTimeoutDoesNotPreventLaterSave]' started.
+Test Case '-[RecordToTextCoreTests.JobPersistenceCoordinatorTests testFlushTimeoutDoesNotPreventLaterSave]' passed (0.675 seconds).
+Test Case '-[RecordToTextCoreTests.JobPersistenceCoordinatorTests testIndependentRepositoryFormattersUnderConcurrentLoad]' started.
+Test Case '-[RecordToTextCoreTests.JobPersistenceCoordinatorTests testIndependentRepositoryFormattersUnderConcurrentLoad]' passed (0.117 seconds).
+Test Case '-[RecordToTextCoreTests.JobPersistenceCoordinatorTests testJournalRepairsBothOutputsAfterCrash]' started.
+Test Case '-[RecordToTextCoreTests.JobPersistenceCoordinatorTests testJournalRepairsBothOutputsAfterCrash]' passed (0.005 seconds).
+Test Case '-[RecordToTextCoreTests.JobPersistenceCoordinatorTests testPersistenceFixtureBenchmarks]' started.
+Test Case '-[RecordToTextCoreTests.JobPersistenceCoordinatorTests testPersistenceFixtureBenchmarks]' passed (0.682 seconds).
+Test Case '-[RecordToTextCoreTests.JobPersistenceCoordinatorTests testSlowWriterLeavesMainActorResponsiveAndCriticalWaits]' started.
+Test Case '-[RecordToTextCoreTests.JobPersistenceCoordinatorTests testSlowWriterLeavesMainActorResponsiveAndCriticalWaits]' passed (1.132 seconds).
+Test Suite 'JobPersistenceCoordinatorTests' passed at 2026-09-09 10:25:49.308.
+	 Executed 8 tests, with 0 failures (0 unexpected) in 3.211 (3.213) seconds
+Test Suite 'JobRetentionPolicyTests' started at 2026-09-09 10:25:49.308.
+Test Case '-[RecordToTextCoreTests.JobRetentionPolicyTests testInMemoryPruningKeepsDurableJobsAtLimitZero]' started.
+Test Case '-[RecordToTextCoreTests.JobRetentionPolicyTests testInMemoryPruningKeepsDurableJobsAtLimitZero]' passed (0.002 seconds).
+Test Case '-[RecordToTextCoreTests.JobRetentionPolicyTests testLedgerAlwaysExcludesCompletedJobs]' started.
+Test Case '-[RecordToTextCoreTests.JobRetentionPolicyTests testLedgerAlwaysExcludesCompletedJobs]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.JobRetentionPolicyTests testLedgerCapsLogsWithoutMutatingInputJobs]' started.
+Test Case '-[RecordToTextCoreTests.JobRetentionPolicyTests testLedgerCapsLogsWithoutMutatingInputJobs]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.JobRetentionPolicyTests testLedgerRetainsNewestRetryableTerminalHistoryOnly]' started.
+Test Case '-[RecordToTextCoreTests.JobRetentionPolicyTests testLedgerRetainsNewestRetryableTerminalHistoryOnly]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.JobRetentionPolicyTests testLimitZeroStillRetainsQueuedActiveAndInterruptedJobs]' started.
+Test Case '-[RecordToTextCoreTests.JobRetentionPolicyTests testLimitZeroStillRetainsQueuedActiveAndInterruptedJobs]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.JobRetentionPolicyTests testQueuedJobsRoundTripWhenRecentLimitIsZero]' started.
+Test Case '-[RecordToTextCoreTests.JobRetentionPolicyTests testQueuedJobsRoundTripWhenRecentLimitIsZero]' passed (0.010 seconds).
+Test Case '-[RecordToTextCoreTests.JobRetentionPolicyTests testQueueLongerThanHistoryLimitIsNeverTruncated]' started.
+Test Case '-[RecordToTextCoreTests.JobRetentionPolicyTests testQueueLongerThanHistoryLimitIsNeverTruncated]' passed (0.002 seconds).
+Test Case '-[RecordToTextCoreTests.JobRetentionPolicyTests testRecentSummariesRespectZeroAndNewestLimit]' started.
+Test Case '-[RecordToTextCoreTests.JobRetentionPolicyTests testRecentSummariesRespectZeroAndNewestLimit]' passed (0.001 seconds).
+Test Suite 'JobRetentionPolicyTests' passed at 2026-09-09 10:25:49.326.
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.016 (0.018) seconds
+Test Suite 'JobSilenceAnalysisCacheTests' started at 2026-09-09 10:25:49.326.
+Test Case '-[RecordToTextCoreTests.JobSilenceAnalysisCacheTests testCacheConvertsDetectorRelativeTimesToAbsoluteTimes]' started.
+Test Case '-[RecordToTextCoreTests.JobSilenceAnalysisCacheTests testCacheConvertsDetectorRelativeTimesToAbsoluteTimes]' passed (0.002 seconds).
+Test Case '-[RecordToTextCoreTests.JobSilenceAnalysisCacheTests testCacheHitClipsSilencesToRequestedRange]' started.
+Test Case '-[RecordToTextCoreTests.JobSilenceAnalysisCacheTests testCacheHitClipsSilencesToRequestedRange]' passed (0.002 seconds).
+Test Case '-[RecordToTextCoreTests.JobSilenceAnalysisCacheTests testFailedDetectionIsNotCachedAndCanBeRetried]' started.
+Test Case '-[RecordToTextCoreTests.JobSilenceAnalysisCacheTests testFailedDetectionIsNotCachedAndCanBeRetried]' passed (0.002 seconds).
+Test Case '-[RecordToTextCoreTests.JobSilenceAnalysisCacheTests testInvalidIntervalsAndIntervalLimitAreNotCached]' started.
+Test Case '-[RecordToTextCoreTests.JobSilenceAnalysisCacheTests testInvalidIntervalsAndIntervalLimitAreNotCached]' passed (0.027 seconds).
+Test Case '-[RecordToTextCoreTests.JobSilenceAnalysisCacheTests testMetricsTrackScansAndFallbacks]' started.
+Test Case '-[RecordToTextCoreTests.JobSilenceAnalysisCacheTests testMetricsTrackScansAndFallbacks]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.JobSilenceAnalysisCacheTests testOverLimitIntervalsRemainUsableWithoutCaching]' started.
+Test Case '-[RecordToTextCoreTests.JobSilenceAnalysisCacheTests testOverLimitIntervalsRemainUsableWithoutCaching]' passed (0.078 seconds).
+Test Case '-[RecordToTextCoreTests.JobSilenceAnalysisCacheTests testPartialCoverageDoesNotCountAsCacheHit]' started.
+Test Case '-[RecordToTextCoreTests.JobSilenceAnalysisCacheTests testPartialCoverageDoesNotCountAsCacheHit]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.JobSilenceAnalysisCacheTests testSeparateCachesDoNotShareEntries]' started.
+Test Case '-[RecordToTextCoreTests.JobSilenceAnalysisCacheTests testSeparateCachesDoNotShareEntries]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.JobSilenceAnalysisCacheTests testSourceIdentityChangeInvalidatesExistingEntries]' started.
+Test Case '-[RecordToTextCoreTests.JobSilenceAnalysisCacheTests testSourceIdentityChangeInvalidatesExistingEntries]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.JobSilenceAnalysisCacheTests testSourceIdentityChangePermanentlyDropsPriorEntries]' started.
+Test Case '-[RecordToTextCoreTests.JobSilenceAnalysisCacheTests testSourceIdentityChangePermanentlyDropsPriorEntries]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.JobSilenceAnalysisCacheTests testSuccessfulEmptyScanIsCachedAndReturnedInAbsoluteCoordinates]' started.
+Test Case '-[RecordToTextCoreTests.JobSilenceAnalysisCacheTests testSuccessfulEmptyScanIsCachedAndReturnedInAbsoluteCoordinates]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.JobSilenceAnalysisCacheTests testUnknownSourceIdentityNeverUsesCache]' started.
+Test Case '-[RecordToTextCoreTests.JobSilenceAnalysisCacheTests testUnknownSourceIdentityNeverUsesCache]' passed (0.000 seconds).
+Test Suite 'JobSilenceAnalysisCacheTests' passed at 2026-09-09 10:25:49.443.
+	 Executed 12 tests, with 0 failures (0 unexpected) in 0.115 (0.117) seconds
+Test Suite 'LenientCollectionLoaderTests' started at 2026-09-09 10:25:49.443.
+Test Case '-[RecordToTextCoreTests.LenientCollectionLoaderTests testIntactLedgerLoadsWithoutMessages]' started.
+Test Case '-[RecordToTextCoreTests.LenientCollectionLoaderTests testIntactLedgerLoadsWithoutMessages]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.LenientCollectionLoaderTests testOneIncompatibleRecordIsSkippedWithoutLosingTheRest]' started.
+Test Case '-[RecordToTextCoreTests.LenientCollectionLoaderTests testOneIncompatibleRecordIsSkippedWithoutLosingTheRest]' passed (0.002 seconds).
+Test Case '-[RecordToTextCoreTests.LenientCollectionLoaderTests testRecentJobsSkipBrokenSummaryAndQuarantine]' started.
+Test Case '-[RecordToTextCoreTests.LenientCollectionLoaderTests testRecentJobsSkipBrokenSummaryAndQuarantine]' passed (0.002 seconds).
+Test Case '-[RecordToTextCoreTests.LenientCollectionLoaderTests testUnparsableLedgerIsQuarantinedAndReplacedWithEmptyCollection]' started.
+Test Case '-[RecordToTextCoreTests.LenientCollectionLoaderTests testUnparsableLedgerIsQuarantinedAndReplacedWithEmptyCollection]' passed (0.001 seconds).
+Test Suite 'LenientCollectionLoaderTests' passed at 2026-09-09 10:25:49.450.
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.007 (0.007) seconds
+Test Suite 'LocalChunkCheckpointTests' started at 2026-09-09 10:25:49.450.
+Test Case '-[RecordToTextCoreTests.LocalChunkCheckpointTests testRejectsEmptyMalformedAndNonContiguousCheckpoints]' started.
+Test Case '-[RecordToTextCoreTests.LocalChunkCheckpointTests testRejectsEmptyMalformedAndNonContiguousCheckpoints]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.LocalChunkCheckpointTests testSecureDirectoryAndUsableCheckpointDetection]' started.
+Test Case '-[RecordToTextCoreTests.LocalChunkCheckpointTests testSecureDirectoryAndUsableCheckpointDetection]' passed (0.001 seconds).
+Test Suite 'LocalChunkCheckpointTests' passed at 2026-09-09 10:25:49.452.
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.002 (0.002) seconds
+Test Suite 'ModelCacheTests' started at 2026-09-09 10:25:49.452.
+Test Case '-[RecordToTextCoreTests.ModelCacheTests testIsDownloadedDetectsUsableSnapshot]' started.
+Test Case '-[RecordToTextCoreTests.ModelCacheTests testIsDownloadedDetectsUsableSnapshot]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.ModelCacheTests testRepositoryFolderNameEscapesSlash]' started.
+Test Case '-[RecordToTextCoreTests.ModelCacheTests testRepositoryFolderNameEscapesSlash]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.ModelCacheTests testUnusableSnapshotWithoutWeightsIsRejected]' started.
+Test Case '-[RecordToTextCoreTests.ModelCacheTests testUnusableSnapshotWithoutWeightsIsRejected]' passed (0.001 seconds).
+Test Suite 'ModelCacheTests' passed at 2026-09-09 10:25:49.455.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.003 (0.003) seconds
+Test Suite 'ModelsDefaultsTests' started at 2026-09-09 10:25:49.455.
+Test Case '-[RecordToTextCoreTests.ModelsDefaultsTests testAppleSiliconBF16ModelIsSelectableWithPinnedRevision]' started.
+Test Case '-[RecordToTextCoreTests.ModelsDefaultsTests testAppleSiliconBF16ModelIsSelectableWithPinnedRevision]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.ModelsDefaultsTests testAppleSiliconCatalogIncludesDefaultAndBF16]' started.
+Test Case '-[RecordToTextCoreTests.ModelsDefaultsTests testAppleSiliconCatalogIncludesDefaultAndBF16]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.ModelsDefaultsTests testAppleSiliconModelDefaultIsStableMLXModel]' started.
+Test Case '-[RecordToTextCoreTests.ModelsDefaultsTests testAppleSiliconModelDefaultIsStableMLXModel]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.ModelsDefaultsTests testAppSettingsInitializerUsesProductDefaults]' started.
+Test Case '-[RecordToTextCoreTests.ModelsDefaultsTests testAppSettingsInitializerUsesProductDefaults]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.ModelsDefaultsTests testAudioMetadataEstimatedPCMBytesIncludesSafetyMargin]' started.
+Test Case '-[RecordToTextCoreTests.ModelsDefaultsTests testAudioMetadataEstimatedPCMBytesIncludesSafetyMargin]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.ModelsDefaultsTests testCurrentModelDefaultMatchesCompiledArchitecture]' started.
+Test Case '-[RecordToTextCoreTests.ModelsDefaultsTests testCurrentModelDefaultMatchesCompiledArchitecture]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.ModelsDefaultsTests testDefaultValueUsesNeutralProductDirectoryAndRequestedDeveloperMode]' started.
+Test Case '-[RecordToTextCoreTests.ModelsDefaultsTests testDefaultValueUsesNeutralProductDirectoryAndRequestedDeveloperMode]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.ModelsDefaultsTests testIntelModelDefaultIsExperimentalCPUModel]' started.
+Test Case '-[RecordToTextCoreTests.ModelsDefaultsTests testIntelModelDefaultIsExperimentalCPUModel]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.ModelsDefaultsTests testOnlyTerminalStagesAreMarkedTerminal]' started.
+Test Case '-[RecordToTextCoreTests.ModelsDefaultsTests testOnlyTerminalStagesAreMarkedTerminal]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.ModelsDefaultsTests testOutputLocationModesHaveTraditionalChineseDisplayNames]' started.
+Test Case '-[RecordToTextCoreTests.ModelsDefaultsTests testOutputLocationModesHaveTraditionalChineseDisplayNames]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.ModelsDefaultsTests testSelectedModelIDUsesArchitectureSpecificOverride]' started.
+Test Case '-[RecordToTextCoreTests.ModelsDefaultsTests testSelectedModelIDUsesArchitectureSpecificOverride]' passed (0.000 seconds).
+Test Suite 'ModelsDefaultsTests' passed at 2026-09-09 10:25:49.457.
+	 Executed 11 tests, with 0 failures (0 unexpected) in 0.002 (0.002) seconds
+Test Suite 'OutputContractValidatorTests' started at 2026-09-09 10:25:49.457.
+Test Case '-[RecordToTextCoreTests.OutputContractValidatorTests testRejectsLeadingCompleteGlossaryEcho]' started.
+Test Case '-[RecordToTextCoreTests.OutputContractValidatorTests testRejectsLeadingCompleteGlossaryEcho]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.OutputContractValidatorTests testRejectsLeadingEchoFromSpaceSeparatedCJKTermSnapshot]' started.
+Test Case '-[RecordToTextCoreTests.OutputContractValidatorTests testRejectsLeadingEchoFromSpaceSeparatedCJKTermSnapshot]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.OutputContractValidatorTests testRejectsLeadingGlossaryEchoWithSentencePunctuationBetweenTerms]' started.
+Test Case '-[RecordToTextCoreTests.OutputContractValidatorTests testRejectsLeadingGlossaryEchoWithSentencePunctuationBetweenTerms]' passed (0.000 seconds).
+Test Suite 'OutputContractValidatorTests' passed at 2026-09-09 10:25:49.458.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+Test Suite 'OutputNameBuilderTests' started at 2026-09-09 10:25:49.458.
+Test Case '-[RecordToTextCoreTests.OutputNameBuilderTests testAvailableNameIncrementsWithoutOverwritingExistingNames]' started.
+Test Case '-[RecordToTextCoreTests.OutputNameBuilderTests testAvailableNameIncrementsWithoutOverwritingExistingNames]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.OutputNameBuilderTests testCustomSuffixAndPreview]' started.
+Test Case '-[RecordToTextCoreTests.OutputNameBuilderTests testCustomSuffixAndPreview]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.OutputNameBuilderTests testDefaultNamePreservesChineseSpacesAndAdditionalDots]' started.
+Test Case '-[RecordToTextCoreTests.OutputNameBuilderTests testDefaultNamePreservesChineseSpacesAndAdditionalDots]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.OutputNameBuilderTests testJobSnapshotDecodesMissingFilenameSuffixWithDefaults]' started.
+Test Case '-[RecordToTextCoreTests.OutputNameBuilderTests testJobSnapshotDecodesMissingFilenameSuffixWithDefaults]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.OutputNameBuilderTests testRawTranscriptUsesRawSuffixAndCollisionIncrement]' started.
+Test Case '-[RecordToTextCoreTests.OutputNameBuilderTests testRawTranscriptUsesRawSuffixAndCollisionIncrement]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.OutputNameBuilderTests testSanitizedStemFallsBackWhenNoSafeCharactersRemain]' started.
+Test Case '-[RecordToTextCoreTests.OutputNameBuilderTests testSanitizedStemFallsBackWhenNoSafeCharactersRemain]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.OutputNameBuilderTests testSanitizedStemRemovesControlCharactersAndColonThenTrims]' started.
+Test Case '-[RecordToTextCoreTests.OutputNameBuilderTests testSanitizedStemRemovesControlCharactersAndColonThenTrims]' passed (0.000 seconds).
+Test Suite 'OutputNameBuilderTests' passed at 2026-09-09 10:25:49.459.
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.001 (0.002) seconds
+Test Suite 'OutputPublicationTests' started at 2026-09-09 10:25:49.459.
+Test Case '-[RecordToTextCoreTests.OutputPublicationTests testDeletedJobIsNotReintroducedByOldReceipt]' started.
+Test Case '-[RecordToTextCoreTests.OutputPublicationTests testDeletedJobIsNotReintroducedByOldReceipt]' passed (0.003 seconds).
+Test Case '-[RecordToTextCoreTests.OutputPublicationTests testOnlyPublishedMatchingOutputCanRecoverKnownJob]' started.
+Test Case '-[RecordToTextCoreTests.OutputPublicationTests testOnlyPublishedMatchingOutputCanRecoverKnownJob]' passed (0.005 seconds).
+Test Case '-[RecordToTextCoreTests.OutputPublicationTests testProcessCrashAcrossPublicationJournalAndCleanup]' started.
+Test Case '-[RecordToTextCoreTests.OutputPublicationTests testProcessCrashAcrossPublicationJournalAndCleanup]' passed (0.440 seconds).
+Test Suite 'OutputPublicationTests' passed at 2026-09-09 10:25:49.907.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.447 (0.448) seconds
+Test Suite 'PersistenceTests' started at 2026-09-09 10:25:49.907.
+Test Case '-[RecordToTextCoreTests.PersistenceTests testApplicationPathsCreateExpectedDirectoryLayout]' started.
+Test Case '-[RecordToTextCoreTests.PersistenceTests testApplicationPathsCreateExpectedDirectoryLayout]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.PersistenceTests testAtomicWriteCreatesParentDirectoriesAndReplacesExistingFile]' started.
+Test Case '-[RecordToTextCoreTests.PersistenceTests testAtomicWriteCreatesParentDirectoriesAndReplacesExistingFile]' passed (0.002 seconds).
+Test Case '-[RecordToTextCoreTests.PersistenceTests testAtomicWriteNewNeverReplacesExistingDestination]' started.
+Test Case '-[RecordToTextCoreTests.PersistenceTests testAtomicWriteNewNeverReplacesExistingDestination]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.PersistenceTests testAtomicWriteSupportsEmptyData]' started.
+Test Case '-[RecordToTextCoreTests.PersistenceTests testAtomicWriteSupportsEmptyData]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.PersistenceTests testAtomicWriteTextNormalizesLineEndingsAndRemovesLeadingBOM]' started.
+Test Case '-[RecordToTextCoreTests.PersistenceTests testAtomicWriteTextNormalizesLineEndingsAndRemovesLeadingBOM]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.PersistenceTests testJSONRepositoryRejectsCorruptJSON]' started.
+Test Case '-[RecordToTextCoreTests.PersistenceTests testJSONRepositoryRejectsCorruptJSON]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.PersistenceTests testJSONRepositoryReturnsDefaultWithoutCreatingAFile]' started.
+Test Case '-[RecordToTextCoreTests.PersistenceTests testJSONRepositoryReturnsDefaultWithoutCreatingAFile]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.PersistenceTests testJSONRepositoryRoundTripsAndAtomicallyOverwritesCodableValue]' started.
+Test Case '-[RecordToTextCoreTests.PersistenceTests testJSONRepositoryRoundTripsAndAtomicallyOverwritesCodableValue]' passed (0.002 seconds).
+Test Suite 'PersistenceTests' passed at 2026-09-09 10:25:49.917.
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.010 (0.010) seconds
+Test Suite 'PromptBuilderTests' started at 2026-09-09 10:25:49.917.
+Test Case '-[RecordToTextCoreTests.PromptBuilderTests testBuildMergesSourcesInPriorityOrderAndIncludesTermsOnce]' started.
+Test Case '-[RecordToTextCoreTests.PromptBuilderTests testBuildMergesSourcesInPriorityOrderAndIncludesTermsOnce]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.PromptBuilderTests testBuildWithoutTermsReturnsOnlyFidelityInstruction]' started.
+Test Case '-[RecordToTextCoreTests.PromptBuilderTests testBuildWithoutTermsReturnsOnlyFidelityInstruction]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.PromptBuilderTests testMaximumTermCountIsAccepted]' started.
+Test Case '-[RecordToTextCoreTests.PromptBuilderTests testMaximumTermCountIsAccepted]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.PromptBuilderTests testMaximumUnicodeScalarCountIsAccepted]' started.
+Test Case '-[RecordToTextCoreTests.PromptBuilderTests testMaximumUnicodeScalarCountIsAccepted]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.PromptBuilderTests testTooManyTermsReportsActualAndMaximumCounts]' started.
+Test Case '-[RecordToTextCoreTests.PromptBuilderTests testTooManyTermsReportsActualAndMaximumCounts]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.PromptBuilderTests testTooManyUnicodeScalarsReportsActualAndMaximumCounts]' started.
+Test Case '-[RecordToTextCoreTests.PromptBuilderTests testTooManyUnicodeScalarsReportsActualAndMaximumCounts]' passed (0.000 seconds).
+Test Suite 'PromptBuilderTests' passed at 2026-09-09 10:25:49.920.
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.002 (0.003) seconds
+Test Suite 'RecoveryScannerTests' started at 2026-09-09 10:25:49.920.
+Test Case '-[RecordToTextCoreTests.RecoveryScannerTests testCloudCheckpointWithoutCompletedTextDoesNotClaimPartialTranscript]' started.
+Test Case '-[RecordToTextCoreTests.RecoveryScannerTests testCloudCheckpointWithoutCompletedTextDoesNotClaimPartialTranscript]' passed (0.002 seconds).
+Test Case '-[RecordToTextCoreTests.RecoveryScannerTests testCloudCheckpointWithoutNormalizedWAVIsRecoverable]' started.
+Test Case '-[RecordToTextCoreTests.RecoveryScannerTests testCloudCheckpointWithoutNormalizedWAVIsRecoverable]' passed (0.002 seconds).
+Test Case '-[RecordToTextCoreTests.RecoveryScannerTests testDeleteItemRejectsPathOutsideManagedRoots]' started.
+Test Case '-[RecordToTextCoreTests.RecoveryScannerTests testDeleteItemRejectsPathOutsideManagedRoots]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.RecoveryScannerTests testDeleteItemRemovesOnlyValidatedManagedDirectory]' started.
+Test Case '-[RecordToTextCoreTests.RecoveryScannerTests testDeleteItemRemovesOnlyValidatedManagedDirectory]' passed (0.002 seconds).
+Test Case '-[RecordToTextCoreTests.RecoveryScannerTests testDeleteItemsSkipsRecoverableWhenNotIncluded]' started.
+Test Case '-[RecordToTextCoreTests.RecoveryScannerTests testDeleteItemsSkipsRecoverableWhenNotIncluded]' passed (0.002 seconds).
+Test Case '-[RecordToTextCoreTests.RecoveryScannerTests testDoesNotScanOutsideManagedRoots]' started.
+Test Case '-[RecordToTextCoreTests.RecoveryScannerTests testDoesNotScanOutsideManagedRoots]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.RecoveryScannerTests testEmptyInterruptedCloudPartialIsOrphanedRatherThanRetrievable]' started.
+Test Case '-[RecordToTextCoreTests.RecoveryScannerTests testEmptyInterruptedCloudPartialIsOrphanedRatherThanRetrievable]' passed (0.002 seconds).
+Test Case '-[RecordToTextCoreTests.RecoveryScannerTests testIgnoresNonUUIDDirectories]' started.
+Test Case '-[RecordToTextCoreTests.RecoveryScannerTests testIgnoresNonUUIDDirectories]' passed (0.002 seconds).
+Test Case '-[RecordToTextCoreTests.RecoveryScannerTests testInterruptedCloudWorkingCheckpointIsNotClassifiedAsDisposable]' started.
+Test Case '-[RecordToTextCoreTests.RecoveryScannerTests testInterruptedCloudWorkingCheckpointIsNotClassifiedAsDisposable]' passed (0.002 seconds).
+Test Case '-[RecordToTextCoreTests.RecoveryScannerTests testInvalidRecoveryJSONIsDamaged]' started.
+Test Case '-[RecordToTextCoreTests.RecoveryScannerTests testInvalidRecoveryJSONIsDamaged]' passed (0.002 seconds).
+Test Case '-[RecordToTextCoreTests.RecoveryScannerTests testMismatchedJobIDInRecoveryJSONIsDamaged]' started.
+Test Case '-[RecordToTextCoreTests.RecoveryScannerTests testMismatchedJobIDInRecoveryJSONIsDamaged]' passed (0.002 seconds).
+Test Case '-[RecordToTextCoreTests.RecoveryScannerTests testParseJobDirectoryName]' started.
+Test Case '-[RecordToTextCoreTests.RecoveryScannerTests testParseJobDirectoryName]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.RecoveryScannerTests testTempRecoveryWithValidMetadataIsRecoverable]' started.
+Test Case '-[RecordToTextCoreTests.RecoveryScannerTests testTempRecoveryWithValidMetadataIsRecoverable]' passed (0.002 seconds).
+Test Suite 'RecoveryScannerTests' passed at 2026-09-09 10:25:49.944.
+	 Executed 13 tests, with 0 failures (0 unexpected) in 0.023 (0.024) seconds
+Test Suite 'RuntimeEnvironmentTests' started at 2026-09-09 10:25:49.944.
+Test Case '-[RecordToTextCoreTests.RuntimeEnvironmentTests testCloudBackendManagedAudioFallbackFailsClosedWithoutVerifier]' started.
+Test Case '-[RecordToTextCoreTests.RuntimeEnvironmentTests testCloudBackendManagedAudioFallbackFailsClosedWithoutVerifier]' passed (0.003 seconds).
+Test Case '-[RecordToTextCoreTests.RuntimeEnvironmentTests testCloudBackendManagedAudioFallbackRequiresAndUsesVerifier]' started.
+Test Case '-[RecordToTextCoreTests.RuntimeEnvironmentTests testCloudBackendManagedAudioFallbackRequiresAndUsesVerifier]' passed (0.002 seconds).
+Test Case '-[RecordToTextCoreTests.RuntimeEnvironmentTests testDeveloperRuntimeDiscoveryFindsDedicatedPythonAndOpenCCOnPATH]' started.
+Test Case '-[RecordToTextCoreTests.RuntimeEnvironmentTests testDeveloperRuntimeDiscoveryFindsDedicatedPythonAndOpenCCOnPATH]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.RuntimeEnvironmentTests testDeveloperRuntimeDoesNotTrustManagedHelperFallback]' started.
+Test Case '-[RecordToTextCoreTests.RuntimeEnvironmentTests testDeveloperRuntimeDoesNotTrustManagedHelperFallback]' passed (0.003 seconds).
+Test Case '-[RecordToTextCoreTests.RuntimeEnvironmentTests testDeveloperRuntimeUsesExplicitPathsWithoutReleaseVerifier]' started.
+Test Case '-[RecordToTextCoreTests.RuntimeEnvironmentTests testDeveloperRuntimeUsesExplicitPathsWithoutReleaseVerifier]' passed (0.002 seconds).
+Test Case '-[RecordToTextCoreTests.RuntimeEnvironmentTests testGoogleAIStudioFailsWhenFFmpegMissing]' started.
+Test Case '-[RecordToTextCoreTests.RuntimeEnvironmentTests testGoogleAIStudioFailsWhenFFmpegMissing]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.RuntimeEnvironmentTests testGoogleAIStudioInspectionIsReadyWhenAudioToolsExist]' started.
+Test Case '-[RecordToTextCoreTests.RuntimeEnvironmentTests testGoogleAIStudioInspectionIsReadyWhenAudioToolsExist]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.RuntimeEnvironmentTests testGoogleAIStudioPrefersBundledFFmpegOverReleaseBin]' started.
+Test Case '-[RecordToTextCoreTests.RuntimeEnvironmentTests testGoogleAIStudioPrefersBundledFFmpegOverReleaseBin]' passed (0.002 seconds).
+Test Case '-[RecordToTextCoreTests.RuntimeEnvironmentTests testGoogleAIStudioResolvesBundledFFmpegWithoutDeveloperMode]' started.
+Test Case '-[RecordToTextCoreTests.RuntimeEnvironmentTests testGoogleAIStudioResolvesBundledFFmpegWithoutDeveloperMode]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.RuntimeEnvironmentTests testManagedLocalInspectionDoesNotClaimReadyBeforeVerification]' started.
+Test Case '-[RecordToTextCoreTests.RuntimeEnvironmentTests testManagedLocalInspectionDoesNotClaimReadyBeforeVerification]' passed (0.002 seconds).
+Test Case '-[RecordToTextCoreTests.RuntimeEnvironmentTests testManagedLocalRuntimeFailsClosedWithoutVerifier]' started.
+Test Case '-[RecordToTextCoreTests.RuntimeEnvironmentTests testManagedLocalRuntimeFailsClosedWithoutVerifier]' passed (0.002 seconds).
+Test Case '-[RecordToTextCoreTests.RuntimeEnvironmentTests testManagedLocalRuntimeVerifierFailureHasClearError]' started.
+Test Case '-[RecordToTextCoreTests.RuntimeEnvironmentTests testManagedLocalRuntimeVerifierFailureHasClearError]' passed (0.002 seconds).
+Test Case '-[RecordToTextCoreTests.RuntimeEnvironmentTests testManagedLocalRuntimeVerifierUnlocksRuntime]' started.
+Test Case '-[RecordToTextCoreTests.RuntimeEnvironmentTests testManagedLocalRuntimeVerifierUnlocksRuntime]' passed (0.002 seconds).
+Test Case '-[RecordToTextCoreTests.RuntimeEnvironmentTests testTextFileValidatorRejectsBlankAndInvalidUTF8]' started.
+Test Case '-[RecordToTextCoreTests.RuntimeEnvironmentTests testTextFileValidatorRejectsBlankAndInvalidUTF8]' passed (0.001 seconds).
+Test Suite 'RuntimeEnvironmentTests' passed at 2026-09-09 10:25:49.970.
+	 Executed 14 tests, with 0 failures (0 unexpected) in 0.025 (0.026) seconds
+Test Suite 'SensitiveCodingTests' started at 2026-09-09 10:25:49.970.
+Test Case '-[RecordToTextCoreTests.SensitiveCodingTests testAppSettingsDecodesLegacyAPIKeyButNeverEncodesIt]' started.
+Test Case '-[RecordToTextCoreTests.SensitiveCodingTests testAppSettingsDecodesLegacyAPIKeyButNeverEncodesIt]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.SensitiveCodingTests testCredentialRedactionPreservesOriginalTranscriptionConfiguration]' started.
+Test Case '-[RecordToTextCoreTests.SensitiveCodingTests testCredentialRedactionPreservesOriginalTranscriptionConfiguration]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.SensitiveCodingTests testJobSnapshotDecodesLegacyAPIKeyButLedgerNeverEncodesIt]' started.
+Test Case '-[RecordToTextCoreTests.SensitiveCodingTests testJobSnapshotDecodesLegacyAPIKeyButLedgerNeverEncodesIt]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.SensitiveCodingTests testRuntimeAuthorizationRemainsLiveForAlreadyQueuedJobs]' started.
+Test Case '-[RecordToTextCoreTests.SensitiveCodingTests testRuntimeAuthorizationRemainsLiveForAlreadyQueuedJobs]' passed (0.000 seconds).
+Test Suite 'SensitiveCodingTests' passed at 2026-09-09 10:25:49.971.
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+Test Suite 'SilenceAwareSegmentationTests' started at 2026-09-09 10:25:49.971.
+Test Case '-[RecordToTextCoreTests.SilenceAwareSegmentationTests testDetectionServiceReportsTimesRelativeToTrimmedStart]' started.
+Test Case '-[RecordToTextCoreTests.SilenceAwareSegmentationTests testDetectionServiceReportsTimesRelativeToTrimmedStart]' passed (0.070 seconds).
+Test Case '-[RecordToTextCoreTests.SilenceAwareSegmentationTests testParserPairsSilenceStartAndEnd]' started.
+Test Case '-[RecordToTextCoreTests.SilenceAwareSegmentationTests testParserPairsSilenceStartAndEnd]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.SilenceAwareSegmentationTests testPlannerChoosesClosestEligibleSilenceBeforeLimit]' started.
+Test Case '-[RecordToTextCoreTests.SilenceAwareSegmentationTests testPlannerChoosesClosestEligibleSilenceBeforeLimit]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.SilenceAwareSegmentationTests testPlannerFallsBackWhenNoEligibleSilenceExists]' started.
+Test Case '-[RecordToTextCoreTests.SilenceAwareSegmentationTests testPlannerFallsBackWhenNoEligibleSilenceExists]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.SilenceAwareSegmentationTests testPlannerKeepsEverySegmentWithinMaximumAcrossMultipleBoundaries]' started.
+Test Case '-[RecordToTextCoreTests.SilenceAwareSegmentationTests testPlannerKeepsEverySegmentWithinMaximumAcrossMultipleBoundaries]' passed (0.000 seconds).
+Test Suite 'SilenceAwareSegmentationTests' passed at 2026-09-09 10:25:50.042.
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.070 (0.071) seconds
+Test Suite 'SpeakerRosterTests' started at 2026-09-09 10:25:50.042.
+Test Case '-[RecordToTextCoreTests.SpeakerRosterTests testGenericLabelUsesSelfIntroductionAndNewSpeakerIsPreserved]' started.
+Test Case '-[RecordToTextCoreTests.SpeakerRosterTests testGenericLabelUsesSelfIntroductionAndNewSpeakerIsPreserved]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.SpeakerRosterTests testKnownTermCanCorrectSpeakerSelfIntroduction]' started.
+Test Case '-[RecordToTextCoreTests.SpeakerRosterTests testKnownTermCanCorrectSpeakerSelfIntroduction]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.SpeakerRosterTests testPromptInstructionUsesCanonicalLabels]' started.
+Test Case '-[RecordToTextCoreTests.SpeakerRosterTests testPromptInstructionUsesCanonicalLabels]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.SpeakerRosterTests testRosterLocksFullNamesAcrossNicknameAndHomophoneLabels]' started.
+Test Case '-[RecordToTextCoreTests.SpeakerRosterTests testRosterLocksFullNamesAcrossNicknameAndHomophoneLabels]' passed (0.000 seconds).
+Test Suite 'SpeakerRosterTests' passed at 2026-09-09 10:25:50.043.
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+Test Suite 'StartupInventoryTests' started at 2026-09-09 10:25:50.043.
+Test Case '-[RecordToTextCoreTests.StartupInventoryTests testRecoveryInventoryExcludesActiveRecoveryDirectoryOnly]' started.
+Test Case '-[RecordToTextCoreTests.StartupInventoryTests testRecoveryInventoryExcludesActiveRecoveryDirectoryOnly]' passed (0.002 seconds).
+Test Suite 'StartupInventoryTests' passed at 2026-09-09 10:25:50.046.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.002 (0.003) seconds
+Test Suite 'TermParserTests' started at 2026-09-09 10:25:50.046.
+Test Case '-[RecordToTextCoreTests.TermParserTests testEmptyInputProducesNoTerms]' started.
+Test Case '-[RecordToTextCoreTests.TermParserTests testEmptyInputProducesNoTerms]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.TermParserTests testMergePreservesSourcePriorityAndDropsLaterDuplicates]' started.
+Test Case '-[RecordToTextCoreTests.TermParserTests testMergePreservesSourcePriorityAndDropsLaterDuplicates]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.TermParserTests testParseAcceptsEverySpecifiedSeparatorAndTrimsItems]' started.
+Test Case '-[RecordToTextCoreTests.TermParserTests testParseAcceptsEverySpecifiedSeparatorAndTrimsItems]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.TermParserTests testParseAcceptsSpaceSeparatedCJKTermsWithoutBreakingMixedTerms]' started.
+Test Case '-[RecordToTextCoreTests.TermParserTests testParseAcceptsSpaceSeparatedCJKTermsWithoutBreakingMixedTerms]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.TermParserTests testParseRemovesEmptyItemsButPreservesInternalWhitespace]' started.
+Test Case '-[RecordToTextCoreTests.TermParserTests testParseRemovesEmptyItemsButPreservesInternalWhitespace]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.TermParserTests testParseUsesExactCaseSensitiveDeduplicationAndFirstOccurrenceOrder]' started.
+Test Case '-[RecordToTextCoreTests.TermParserTests testParseUsesExactCaseSensitiveDeduplicationAndFirstOccurrenceOrder]' passed (0.000 seconds).
+Test Suite 'TermParserTests' passed at 2026-09-09 10:25:50.047.
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+Test Suite 'VertexAIGeminiBackendTests' started at 2026-09-09 10:25:50.047.
+Test Case '-[RecordToTextCoreTests.VertexAIGeminiBackendTests testExpiredBudgetStopsAuthenticationBeforeRequests]' started.
+Test Case '-[RecordToTextCoreTests.VertexAIGeminiBackendTests testExpiredBudgetStopsAuthenticationBeforeRequests]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.VertexAIGeminiBackendTests testPOSIX40DoubleFailureThrowsTransportMessageTooLarge]' started.
+Test Case '-[RecordToTextCoreTests.VertexAIGeminiBackendTests testPOSIX40DoubleFailureThrowsTransportMessageTooLarge]' passed (0.451 seconds).
+Test Case '-[RecordToTextCoreTests.VertexAIGeminiBackendTests testPOSIX40RetryAndSuccess]' started.
+Test Case '-[RecordToTextCoreTests.VertexAIGeminiBackendTests testPOSIX40RetryAndSuccess]' passed (0.179 seconds).
+Test Case '-[RecordToTextCoreTests.VertexAIGeminiBackendTests testRootBudgetStopsGCSUploadBeforeGeneration]' started.
+Test Case '-[RecordToTextCoreTests.VertexAIGeminiBackendTests testRootBudgetStopsGCSUploadBeforeGeneration]' passed (0.887 seconds).
+Test Case '-[RecordToTextCoreTests.VertexAIGeminiBackendTests testRootBudgetStopsRetryAndFallback]' started.
+Test Case '-[RecordToTextCoreTests.VertexAIGeminiBackendTests testRootBudgetStopsRetryAndFallback]' passed (0.249 seconds).
+Test Case '-[RecordToTextCoreTests.VertexAIGeminiBackendTests testSuccessfulTranscription]' started.
+Test Case '-[RecordToTextCoreTests.VertexAIGeminiBackendTests testSuccessfulTranscription]' passed (0.194 seconds).
+Test Case '-[RecordToTextCoreTests.VertexAIGeminiBackendTests testTransientNetworkTimeoutRetriesCurrentModel]' started.
+Test Case '-[RecordToTextCoreTests.VertexAIGeminiBackendTests testTransientNetworkTimeoutRetriesCurrentModel]' passed (1.356 seconds).
+Test Suite 'VertexAIGeminiBackendTests' passed at 2026-09-09 10:25:53.365.
+	 Executed 7 tests, with 0 failures (0 unexpected) in 3.317 (3.318) seconds
+Test Suite 'record-to-textPackageTests.xctest' passed at 2026-09-09 10:25:53.365.
+	 Executed 241 tests, with 0 failures (0 unexpected) in 43.146 (43.177) seconds
+Test Suite 'All tests' passed at 2026-09-09 10:25:53.365.
+	 Executed 241 tests, with 0 failures (0 unexpected) in 43.146 (43.178) seconds
+app_submit jobs=10 logs=400 run=1 p95_ms=0.042249999999999996 process_peak_rss_bytes=67059712
+app_submit jobs=10 logs=400 run=2 p95_ms=0.033290999999999994 process_peak_rss_bytes=67092480
+app_submit jobs=10 logs=400 run=3 p95_ms=0.037375 process_peak_rss_bytes=67158016
+app_submit jobs=100 logs=400 run=1 p95_ms=0.30874999999999997 process_peak_rss_bytes=88195072
+app_submit jobs=100 logs=400 run=2 p95_ms=0.295416 process_peak_rss_bytes=89735168
+app_submit jobs=100 logs=400 run=3 p95_ms=0.3215 process_peak_rss_bytes=89735168
+app_submit jobs=1000 logs=400 run=1 p95_ms=2.891916 process_peak_rss_bytes=309755904
+app_submit jobs=1000 logs=400 run=2 p95_ms=2.916666 process_peak_rss_bytes=309968896
+app_submit jobs=1000 logs=400 run=3 p95_ms=2.9292920000000002 process_peak_rss_bytes=310788096
+persistence_fixture jobs=10 logs=400 run=1 submit_ms=0.009041 durable_ms=3.340875
+persistence_fixture jobs=10 logs=400 run=2 submit_ms=0.005291 durable_ms=3.536416
+persistence_fixture jobs=10 logs=400 run=3 submit_ms=0.006792 durable_ms=4.191917
+persistence_fixture jobs=100 logs=400 run=1 submit_ms=0.011875 durable_ms=17.939625
+persistence_fixture jobs=100 logs=400 run=2 submit_ms=0.009084 durable_ms=17.060417
+persistence_fixture jobs=100 logs=400 run=3 submit_ms=0.007459 durable_ms=17.279709
+persistence_fixture jobs=1000 logs=400 run=1 submit_ms=0.011334 durable_ms=150.07558400000002
+persistence_fixture jobs=1000 logs=400 run=2 submit_ms=0.010499999999999999 durable_ms=146.566416
+persistence_fixture jobs=1000 logs=400 run=3 submit_ms=0.010834 durable_ms=151.642584
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.
+Version contract OK: 0.2.0 (1)
+warning: 'record-to-text': found 1 file(s) which are unhandled; explicitly declare them as resources or exclude from the target
+    /Users/mike/Projects/AI工作區域/record-to-text/Sources/RecordToTextApp/Resources/__pycache__/qwen_asr_chunking.cpython-314.pyc
+[0/1] Planning build
+Building for debugging...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'record-to-text' complete! (0.22s)
+Bundled ffmpeg already present at /Users/mike/Projects/AI工作區域/record-to-text/runtime/macos-arm64/bin
+/Users/mike/Projects/AI工作區域/record-to-text/dist/record-to-text.app/Contents/Helpers/ffmpeg: replacing existing signature
+/Users/mike/Projects/AI工作區域/record-to-text/dist/record-to-text.app/Contents/Helpers/ffprobe: replacing existing signature
+/Users/mike/Projects/AI工作區域/record-to-text/dist/record-to-text.app: replacing existing signature
+Built /Users/mike/Projects/AI工作區域/record-to-text/dist/record-to-text.app
+✅ 全部驗證通過！

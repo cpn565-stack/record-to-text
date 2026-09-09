@@ -23,6 +23,7 @@ public struct CloudResumeCheckpoint: Equatable, Sendable {
     public let recoveryDirectory: URL
     public let plan: AudioSegmentationPlan
     public let reusableSegments: [Int: ReusableCloudSegment]
+    public var rootSegmentIDs: [Int: UUID] = [:]
     public let splitDepths: [Int: Int]
     public let speakerRoster: SpeakerRoster?
 
@@ -165,6 +166,7 @@ public enum CloudResumeCheckpointLoader {
         }
         var planSegments: [PlannedAudioSegment] = []
         var reusable: [Int: ReusableCloudSegment] = [:]
+        var rootSegmentIDs: [Int: UUID] = [:]
         var splitDepths: [Int: Int] = [:]
         var expectedAbsoluteStart = sourceTimeOffset
         let recoverySegmentsDirectory = resolvedDirectory
@@ -207,6 +209,7 @@ public enum CloudResumeCheckpointLoader {
                     durationSeconds: duration
                 )
             )
+            rootSegmentIDs[record.segmentIndex] = record.rootSegmentID
             splitDepths[record.segmentIndex] = max(record.splitDepth ?? 0, 0)
             expectedAbsoluteStart = record.endSeconds
 
@@ -249,7 +252,7 @@ public enum CloudResumeCheckpointLoader {
             throw CloudResumeCheckpointError.noReusableSegments
         }
 
-        return CloudResumeCheckpoint(
+        var checkpoint = CloudResumeCheckpoint(
             recoveryDirectory: resolvedDirectory,
             plan: AudioSegmentationPlan(
                 sourceDurationSeconds: sourceDuration,
@@ -260,6 +263,8 @@ public enum CloudResumeCheckpointLoader {
             splitDepths: splitDepths,
             speakerRoster: manifest.speakerRoster
         )
+        checkpoint.rootSegmentIDs = rootSegmentIDs
+        return checkpoint
     }
 
     private static func standardizedPath(_ path: String) -> String {

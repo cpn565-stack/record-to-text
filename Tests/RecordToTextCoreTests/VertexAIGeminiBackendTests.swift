@@ -73,6 +73,57 @@ final class VertexAIGeminiBackendTests: XCTestCase {
         super.tearDown()
     }
 
+    func testRootBudgetStopsRetryAndFallback() async throws {
+        var requests = 0
+        MockURLProtocol.requestHandler = { request in
+            requests += 1
+            return (HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil, headerFields: nil)!, Data("busy".utf8))
+        }
+        let backend = VertexAIGeminiBackend(
+            authService: GCloudAuthService(customGCloudPath: fakeGCloudURL.path), urlSession: mockSession,
+            configuration: .init(projectID: "mock-project", location: "global", modelID: "gemini-3.8-flash", fallbackPolicy: .flashOnly))
+        do {
+            _ = try await CloudBudgetContext.$current.withValue(CloudSegmentBudget(limit: .milliseconds(500))) {
+                try await backend.transcribe(audioData: Data("audio".utf8))
+            }
+            XCTFail("Budget permitted fallback")
+        } catch let error as CloudSegmentDeadlineExceeded { XCTAssertEqual(error.stage, "backoff") }
+        XCTAssertEqual(requests, 1)
+    }
+
+    func testExpiredBudgetStopsAuthenticationBeforeRequests() async throws {
+        MockURLProtocol.requestHandler = { _ in XCTFail("Expired auth sent network request"); throw URLError(.badURL) }
+        let backend = VertexAIGeminiBackend(authService: GCloudAuthService(customGCloudPath: fakeGCloudURL.path), urlSession: mockSession, configuration: .init(projectID: "mock-project"))
+        do {
+            _ = try await CloudBudgetContext.$current.withValue(CloudSegmentBudget(limit: .zero)) {
+                try await backend.transcribe(audioData: Data("audio".utf8))
+            }
+            XCTFail("Expired budget accepted")
+        } catch let error as CloudSegmentDeadlineExceeded { XCTAssertEqual(error.stage, "auth") }
+    }
+
+    func testRootBudgetStopsGCSUploadBeforeGeneration() async throws {
+        var generationRequests = 0
+        MockURLProtocol.requestHandler = { request in
+            if request.url!.absoluteString.contains("generateContent") { generationRequests += 1 }
+            if request.httpMethod == "POST" { Thread.sleep(forTimeInterval: 0.4) }
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data("{}".utf8))
+        }
+        let auth = GCloudAuthService(customGCloudPath: fakeGCloudURL.path)
+        _ = try await auth.getAccessToken()
+        let backend = VertexAIGeminiBackend(
+            authService: auth, urlSession: mockSession,
+            configuration: .init(projectID: "mock-project", location: "global", modelID: "gemini-3.8-flash", gcsBucket: "fixture"))
+        do {
+            _ = try await CloudBudgetContext.$current.withValue(CloudSegmentBudget(limit: .milliseconds(150))) {
+                try await backend.transcribe(audioData: Data("audio".utf8))
+            }
+            XCTFail("Upload exceeded root deadline")
+        } catch let error as CloudSegmentDeadlineExceeded { XCTAssertEqual(error.stage, "upload") }
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertEqual(generationRequests, 0)
+    }
+
     func testTransientNetworkTimeoutRetriesCurrentModel() async throws {
         var requests = 0
         MockURLProtocol.requestHandler = { request in

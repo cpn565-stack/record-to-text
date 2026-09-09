@@ -13,6 +13,17 @@ struct MainView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 titleBlock
+                if let error = viewModel.jobPersistenceError {
+                    HStack {
+                        VStack(alignment: .leading) {
+                            Text("工作紀錄尚未儲存").font(.headline)
+                            Text(error).font(.caption).textSelection(.enabled)
+                        }
+                        Spacer()
+                        Button("重試儲存") { Task { await viewModel.retryJobPersistence() } }
+                    }
+                    .foregroundStyle(.orange)
+                }
                 intakeCard
                 queueCard
             }

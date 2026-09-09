@@ -149,7 +149,15 @@ public enum SilenceAwareSegmentPlanner {
     }
 }
 
-public final class SilenceDetectionService {
+public protocol SilenceDetectionServicing {
+    func detect(
+        sourceURL: URL,
+        startSeconds: Double,
+        durationSeconds: Double
+    ) async throws -> [DetectedSilence]
+}
+
+public final class SilenceDetectionService: SilenceDetectionServicing {
     private let executableURL: URL
     private let runner: ProcessRunner
 

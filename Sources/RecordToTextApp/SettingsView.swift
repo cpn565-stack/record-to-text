@@ -84,9 +84,11 @@ struct SettingsView: View {
         ) {
             if let resetChoice {
                 Button(resetChoice.buttonTitle, role: .destructive) {
-                    viewModel.resetSettings(keepGlossaries: resetChoice == .keepGlossaries)
-                    apiKeyDraft = viewModel.settings.googleAIStudioAPIKey ?? ""
-                    self.resetChoice = nil
+                    Task {
+                        await viewModel.resetSettings(keepGlossaries: resetChoice == .keepGlossaries)
+                        apiKeyDraft = viewModel.settings.googleAIStudioAPIKey ?? ""
+                        self.resetChoice = nil
+                    }
                 }
             }
             Button("取消", role: .cancel) {
@@ -295,16 +297,16 @@ struct SettingsView: View {
                             prompt: Text("請貼上 Gemini API Key (AIza...)")
                         )
                         .textFieldStyle(.roundedBorder)
-                        .disabled(viewModel.isGoogleAIStudioCredentialLoading)
+                        .disabled(viewModel.isGoogleAIStudioCredentialLoading || viewModel.isGoogleAIStudioCredentialSaving)
 
                         HStack {
                             Button("儲存到 Keychain") {
-                                viewModel.setGoogleAIStudioAPIKey(apiKeyDraft)
+                                Task { await viewModel.setGoogleAIStudioAPIKey(apiKeyDraft) }
                                 apiKeyTestResult = nil
                                 apiKeyTestSucceeded = nil
                             }
                             .disabled(
-                                viewModel.isGoogleAIStudioCredentialLoading || GoogleAIStudioAPIKeyDraftPolicy.shouldDisableSave(
+                                viewModel.isGoogleAIStudioCredentialLoading || viewModel.isGoogleAIStudioCredentialSaving || GoogleAIStudioAPIKeyDraftPolicy.shouldDisableSave(
                                     normalizedDraft: normalizedAPIKeyDraft,
                                     normalizedInMemoryAPIKey: normalizedInMemoryAPIKey,
                                     storageState: viewModel
@@ -320,8 +322,9 @@ struct SettingsView: View {
                             .disabled(viewModel.isGoogleAIStudioCredentialLoading || isTestingAPIKey || normalizedAPIKeyDraft == nil)
 
                             Button("清除", role: .destructive) {
+                                Task {
                                 let attemptedDraft = apiKeyDraft
-                                let succeeded = viewModel.setGoogleAIStudioAPIKey(nil)
+                                let succeeded = await viewModel.setGoogleAIStudioAPIKey(nil)
                                 apiKeyDraft = GoogleAIStudioAPIKeyDraftPolicy
                                     .afterClearAttempt(
                                         succeeded: succeeded,
@@ -331,6 +334,7 @@ struct SettingsView: View {
                                     )
                                 apiKeyTestResult = nil
                                 apiKeyTestSucceeded = nil
+                                }
                             }
                             .disabled(
                                 viewModel.isGoogleAIStudioCredentialLoading || (

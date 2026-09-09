@@ -74,6 +74,8 @@ public struct AudioSegmentRecord: Codable, Equatable, Sendable {
     public var failureMessage: String?
     public var cloudMetadata: CloudTranscriptionMetadata?
     public var reusedFromCheckpoint: Bool?
+    public var rootSegmentID: UUID?
+    public var deadlineReason: String?
     public var splitDepth: Int?
 
     public init(
@@ -88,7 +90,9 @@ public struct AudioSegmentRecord: Codable, Equatable, Sendable {
         failureMessage: String? = nil,
         cloudMetadata: CloudTranscriptionMetadata? = nil,
         reusedFromCheckpoint: Bool? = nil,
-        splitDepth: Int? = nil
+        splitDepth: Int? = nil,
+        rootSegmentID: UUID? = nil,
+        deadlineReason: String? = nil
     ) {
         self.segmentIndex = segmentIndex
         self.segmentCount = segmentCount
@@ -102,6 +106,8 @@ public struct AudioSegmentRecord: Codable, Equatable, Sendable {
         self.cloudMetadata = cloudMetadata
         self.reusedFromCheckpoint = reusedFromCheckpoint
         self.splitDepth = splitDepth
+        self.rootSegmentID = rootSegmentID
+        self.deadlineReason = deadlineReason
     }
 
     public var durationSeconds: Double {
@@ -240,6 +246,12 @@ public enum CloudAdaptiveSegmentPlanner {
         let upperBound = duration - minimumChildDuration
         let midpoint = duration / 2
         let candidates = silences
+            .filter {
+                $0.startSeconds.isFinite
+                    && $0.endSeconds.isFinite
+                    && $0.startSeconds >= 0
+                    && $0.endSeconds > $0.startSeconds
+            }
             .map(\.midpointSeconds)
             .filter { $0 >= lowerBound && $0 <= upperBound }
         return candidates.min {

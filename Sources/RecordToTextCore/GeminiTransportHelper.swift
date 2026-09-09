@@ -1,6 +1,24 @@
 import Foundation
 
 public enum GeminiTransportHelper {
+    static func budgetedUpload(session: URLSession, request: URLRequest, fileURL: URL) async throws -> (Data, URLResponse) {
+        let stage = request.url?.absoluteString.contains("generateContent") == true ? "generation" : "upload"
+        var bounded = request
+        bounded.timeoutInterval = try CloudBudgetContext.timeout(min(300, request.timeoutInterval), stage: stage)
+        let finalRequest = bounded
+        return try await CloudBudgetContext.perform(stage: stage, maximumDuration: .seconds(min(300, request.timeoutInterval))) {
+            try await CancellableCloudRequest().run(session: session, request: finalRequest, fileURL: fileURL)
+        }
+    }
+    static func budgetedData(session: URLSession, request: URLRequest, stage: String) async throws -> (Data, URLResponse) {
+        var bounded = request
+        bounded.timeoutInterval = try CloudBudgetContext.timeout(request.timeoutInterval, stage: stage)
+        let finalRequest = bounded
+        return try await CloudBudgetContext.perform(stage: stage, maximumDuration: .seconds(request.timeoutInterval)) {
+            try await CancellableCloudRequest().run(session: session, request: finalRequest, fileURL: nil)
+        }
+    }
+
     /// 檢查錯誤是否為 POSIX 40 (EMSGSIZE: Message too long) 或相關底層 CFStream 錯誤
     /// Retry only temporary URL loading failures. Unknown errors and cancellation
     /// must not become automatic generation retries.

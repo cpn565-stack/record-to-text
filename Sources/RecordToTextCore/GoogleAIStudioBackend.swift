@@ -368,7 +368,10 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                 )
             } catch is CancellationError {
                 throw CancellationError()
+            } catch let error as CloudSegmentDeadlineExceeded {
+                throw error
             } catch {
+                try CloudBudgetContext.check("upload")
                 logger?("warning", "Files API 上傳未成功，降級至串流 Inline Base64 路徑：\(error.localizedDescription)")
             }
         }
@@ -422,7 +425,10 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         var lastError: Error?
 
         for attempt in 1...policy.maximumAttempts {
-            try Task.checkCancellation()
+            try CloudBudgetContext.check("generation")
+            if let budget = CloudBudgetContext.current {
+                logger?("info", "budget root=\(budget.rootSegmentID) model=\(effectiveModelID) attempt=\(attempt) elapsed=\(budget.elapsed().secondsValue) remaining=\(budget.remaining().secondsValue)")
+            }
             do {
                 return try await generateTranscript(
                     requestedModelID: requestedModelID,
@@ -470,14 +476,13 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                     forAttempt: attempt,
                     retryAfterSeconds: retryAfter
                 )
+                try CloudBudgetContext.validateBackoff(seconds: delay)
                 let reason = isNetworkFailure ? "網路暫時中斷" : "暫時忙碌"
                 logger?(
                     "info",
                     "Gemini \(effectiveModelID) \(reason)，\(String(format: "%.1f", delay)) 秒後進行第 \(attempt + 1) 次嘗試。"
                 )
-                try await Task.sleep(
-                    nanoseconds: UInt64(delay * 1_000_000_000)
-                )
+                try await CloudBudgetContext.backoff(seconds: delay)
             }
         }
 
@@ -655,7 +660,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         logger: ((_ level: String, _ message: String) -> Void)?
     ) async throws -> (Data, HTTPURLResponse) {
         do {
-            let (data, response) = try await session.upload(for: request, fromFile: fileURL)
+            let (data, response) = try await GeminiTransportHelper.budgetedUpload(session: session, request: request, fileURL: fileURL)
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw GoogleAIStudioError.invalidJSONResponse
             }
@@ -671,7 +676,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                 retryRequest.assumesHTTP3Capable = false
 
                 do {
-                    let (data, response) = try await retrySession.upload(for: retryRequest, fromFile: fileURL)
+                    let (data, response) = try await GeminiTransportHelper.budgetedUpload(session: retrySession, request: retryRequest, fileURL: fileURL)
                     guard let httpResponse = response as? HTTPURLResponse else {
                         throw GoogleAIStudioError.invalidJSONResponse
                     }
@@ -727,7 +732,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         initRequest.httpBody = try JSONSerialization.data(withJSONObject: initMetadata)
         initRequest.timeoutInterval = 30
 
-        let (initData, initResponse) = try await urlSession.data(for: initRequest)
+        let (initData, initResponse) = try await GeminiTransportHelper.budgetedData(session: urlSession, request: initRequest, stage: "upload")
         guard let initHTTP = initResponse as? HTTPURLResponse else {
             throw GoogleAIStudioError.invalidJSONResponse
         }
@@ -783,10 +788,13 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
 
             // 3. 輪詢檔案狀態直到 ACTIVE。取消必須向外傳遞，才能立即清理遠端檔案。
             //    以單調時鐘計算預算，避免睡眠秒數與累加值漂移。
-            let pollingDeadline = Date().addingTimeInterval(60)
-            while currentState == "PROCESSING" && Date() < pollingDeadline {
+            let pollingDeadline = ContinuousClock.now.advanced(by: .seconds(60))
+            while currentState == "PROCESSING" && ContinuousClock.now < pollingDeadline {
                 try Task.checkCancellation()
-                try await Task.sleep(nanoseconds: 1_500_000_000)
+                try await CloudBudgetContext.perform(stage: "poll") {
+                    try await Task.sleep(for: min(.milliseconds(1500), ContinuousClock.now.duration(to: pollingDeadline)))
+                }
+                guard ContinuousClock.now < pollingDeadline else { break }
 
                 guard let pollURL = URL(string: "https://generativelanguage.googleapis.com/v1beta/\(fileName)") else {
                     throw GoogleAIStudioError.invalidJSONResponse
@@ -794,9 +802,9 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                 var pollRequest = URLRequest(url: pollURL)
                 pollRequest.httpMethod = "GET"
                 pollRequest.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
-                pollRequest.timeoutInterval = 15
+                pollRequest.timeoutInterval = min(15, ContinuousClock.now.duration(to: pollingDeadline).secondsValue)
 
-                let (pollData, pollResponse) = try await urlSession.data(for: pollRequest)
+                let (pollData, pollResponse) = try await GeminiTransportHelper.budgetedData(session: urlSession, request: pollRequest, stage: "poll")
                 guard let pollHTTP = pollResponse as? HTTPURLResponse else {
                     throw GoogleAIStudioError.invalidJSONResponse
                 }
@@ -839,6 +847,16 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         apiKey: String,
         logger: ((_ level: String, _ message: String) -> Void)?
     ) async {
+        if CloudBudgetContext.current != nil {
+            // Cleanup has its own bounded allowance and cannot delay failure UI.
+            Task.detached(priority: .utility) {
+                let cleanupBudget = CloudSegmentBudget(limit: .seconds(5))
+                _ = try? await cleanupBudget.withDeadline(stage: "cleanup") {
+                    await self.deleteRemoteFile(fileName: fileName, apiKey: apiKey)
+                }
+            }
+            return
+        }
         let cleanupFailure = await Task.detached(priority: .utility) { [self] in
             await deleteRemoteFile(
                 fileName: fileName,
@@ -862,7 +880,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         var request = URLRequest(url: deleteURL)
         request.httpMethod = "DELETE"
         request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
-        request.timeoutInterval = 30
+        request.timeoutInterval = 5
 
         do {
             let (_, response) = try await urlSession.data(for: request)

@@ -171,6 +171,27 @@ private final class MockAIStudioTransport: @unchecked Sendable {
     }
 }
 
+private final class CloudSilenceDetectorSpy: SilenceDetectionServicing, @unchecked Sendable {
+    private let lock = NSLock()
+    private(set) var calls: [(start: Double, duration: Double)] = []
+    let result: [DetectedSilence]
+
+    init(result: [DetectedSilence] = []) {
+        self.result = result
+    }
+
+    func detect(
+        sourceURL: URL,
+        startSeconds: Double,
+        durationSeconds: Double
+    ) async throws -> [DetectedSilence] {
+        lock.withLock {
+            calls.append((startSeconds, durationSeconds))
+        }
+        return result
+    }
+}
+
 final class CloudAdaptiveSegmentationTests: XCTestCase {
     func testNetworkRetryReusesUploadedFile() async throws {
         let transport = MockAIStudioTransport(responses: [
@@ -190,6 +211,56 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
         XCTAssertEqual(transport.recordedGenerateRequests.count, 2)
         XCTAssertEqual(transport.createdFiles.count, 1)
         XCTAssertEqual(transport.deletedFiles.count, 1)
+    }
+
+    func testBudgetStopsNetworkAndServerRetriesBeforeFallback() async throws {
+        for failure in [URLError(.networkConnectionLost) as Error, GoogleAIStudioError.requestFailed(statusCode: 503, message: "busy")] {
+            let transport = MockAIStudioTransport(responses: [.failure(failure)])
+            MockAdaptiveCloudURLProtocol.handler = { try transport.handle(request: $0) }
+            let config = URLSessionConfiguration.ephemeral
+            config.protocolClasses = [MockAdaptiveCloudURLProtocol.self]
+            let session = URLSession(configuration: config)
+            let backend = GoogleAIStudioBackend(urlSession: session, configuration: .init(apiKey: "mock", modelID: "gemini-3.8-flash"))
+            let budget = CloudSegmentBudget(limit: .milliseconds(400))
+            do {
+                _ = try await CloudBudgetContext.$current.withValue(budget) {
+                    try await backend.transcribe(audioData: Data("audio".utf8))
+                }
+                XCTFail("Retry exceeded budget")
+            } catch let error as CloudSegmentDeadlineExceeded {
+                XCTAssertEqual(error.stage, "backoff")
+                XCTAssertEqual(transport.recordedGenerateRequests.count, 1)
+                XCTAssertEqual(transport.createdFiles.count, 1)
+            }
+            try await Task.sleep(for: .milliseconds(30))
+            session.invalidateAndCancel()
+        }
+        MockAdaptiveCloudURLProtocol.handler = nil
+    }
+
+    func testFilesPollingUsesRootDeadline() async throws {
+        let transport = MockAIStudioTransport(responses: [])
+        MockAdaptiveCloudURLProtocol.handler = { request in
+            let (response, data) = try transport.handle(request: request)
+            let body = String(decoding: data, as: UTF8.self).replacingOccurrences(of: "ACTIVE", with: "PROCESSING")
+            return (response, Data(body.utf8))
+        }
+        defer { MockAdaptiveCloudURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockAdaptiveCloudURLProtocol.self]
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+        let backend = GoogleAIStudioBackend(urlSession: session, configuration: .init(apiKey: "mock"))
+        do {
+            _ = try await CloudBudgetContext.$current.withValue(CloudSegmentBudget(limit: .milliseconds(100))) {
+                try await backend.transcribe(audioData: Data("audio".utf8))
+            }
+            XCTFail("Polling exceeded root deadline")
+        } catch let error as CloudSegmentDeadlineExceeded {
+            XCTAssertEqual(error.stage, "poll")
+            XCTAssertEqual(transport.recordedGenerateRequests.count, 0)
+        }
+        try await Task.sleep(for: .milliseconds(30))
     }
 
     func testPreviouslyBlockedFiveAndSevenMinuteSegmentsCanSplit() {
@@ -286,7 +357,15 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
         try await assertAdaptiveRecovery(parentTruncatedText: "")
     }
 
-    private func assertAdaptiveRecovery(parentTruncatedText: String) async throws {
+    func testRightChildDeadlinePreservesLeftAndRejectsLateResponse() async throws {
+        try await assertAdaptiveRecovery(parentTruncatedText: "截斷", expireRight: true)
+    }
+
+    func testCompletionReceiptPrecedesWorkspaceCleanup() async throws {
+        try await assertAdaptiveRecovery(parentTruncatedText: "截斷", completionDurable: false)
+    }
+
+    private func assertAdaptiveRecovery(parentTruncatedText: String, expireRight: Bool = false, completionDurable: Bool = true) async throws {
         let root = try TestSupport.makeTemporaryDirectory()
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
 
@@ -322,7 +401,11 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
             .success((finishReason: "STOP", text: rightChildText))
         ])
         MockAdaptiveCloudURLProtocol.handler = { request in
-            try transport.handle(request: request)
+            if expireRight, request.url?.absoluteString.contains(":generateContent") == true,
+               transport.recordedGenerateRequests.count == 2 {
+                Thread.sleep(forTimeInterval: 1.5)
+            }
+            return try transport.handle(request: request)
         }
         addTeardownBlock {
             MockAdaptiveCloudURLProtocol.handler = nil
@@ -338,12 +421,15 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
                 modelID: "gemini-3.7-flash"
             )
         )
+        let silenceDetector = CloudSilenceDetectorSpy()
 
         let engine = TranscriptionEngine(
             runtime: candidate,
             paths: paths,
             googleAIStudioBackend: backend,
-            cloudAdaptiveMinimumChildDuration: 1.0
+            cloudAdaptiveMinimumChildDuration: 1.0,
+            silenceDetectionService: silenceDetector,
+            cloudSegmentBudgetLimit: expireRight ? .seconds(1) : .seconds(900)
         )
 
         let snapshot = JobSnapshot(
@@ -366,7 +452,35 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
         )
 
         var observedUpdates: [PipelineUpdate] = []
-        let result = try await engine.run(job: job) { update in
+        if expireRight {
+            do {
+                _ = try await engine.run(job: job) { _ in }
+                XCTFail("Deadline accepted late right child")
+            } catch let error as PipelineExecutionError {
+                let deadline = try XCTUnwrap(error.underlying as? CloudSegmentDeadlineExceeded)
+                XCTAssertEqual(deadline.stage, "generation")
+                let recovery = try XCTUnwrap(error.recoveryDirectory)
+                let data = try Data(contentsOf: recovery.appendingPathComponent(RecoveryScanner.segmentManifestFileName))
+                let manifest = try JSONDecoder().decode(AudioSegmentManifest.self, from: data)
+                XCTAssertEqual(manifest.segments.count, 2)
+                XCTAssertEqual(manifest.segments[0].status, .completed)
+                XCTAssertEqual(manifest.segments[1].status, .failed)
+                XCTAssertEqual(manifest.segments[1].deadlineReason, "generation")
+                XCTAssertEqual(manifest.segments[0].rootSegmentID, manifest.segments[1].rootSegmentID)
+                XCTAssertEqual(manifest.segments[0].rootSegmentID, deadline.rootSegmentID)
+                XCTAssertTrue(try String(contentsOfFile: manifest.segments[0].outputPath).contains("左子段完整稿"))
+                try await Task.sleep(for: .seconds(1.6))
+                XCTAssertEqual(try Data(contentsOf: recovery.appendingPathComponent(RecoveryScanner.segmentManifestFileName)), data)
+                XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: outputDirectory.path).count, 0)
+            }
+            return
+        }
+        let result = try await engine.run(job: job, persistCompletion: { result in
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("record-to-text").appendingPathComponent(job.id.uuidString)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: directory.path))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: result.outputURL.path))
+            return completionDurable
+        }) { update in
             observedUpdates.append(update)
         }
 
@@ -406,12 +520,18 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
         }
         XCTAssertFalse(finalContent.contains("未完成"), "No incomplete draft markers in final transcript")
         XCTAssertFalse(finalContent.contains("跳過"), "No skipped audio markers in final transcript")
+        XCTAssertEqual(
+            silenceDetector.calls.count,
+            1,
+            "A successful parent scan should be reused by both adaptive children"
+        )
 
         // 5. Assert working directory was cleaned up and temp recovery is clean
         let workingDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("record-to-text")
             .appendingPathComponent(job.id.uuidString)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: workingDirectory.path))
+        XCTAssertEqual(FileManager.default.fileExists(atPath: workingDirectory.path), !completionDurable)
+        if !completionDurable { try FileManager.default.removeItem(at: workingDirectory) }
 
         let recoveryJobDirectory = paths.tempRecovery.appendingPathComponent(job.id.uuidString)
         XCTAssertFalse(FileManager.default.fileExists(atPath: recoveryJobDirectory.path))
@@ -654,6 +774,168 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
             XCTAssertTrue(manifest.segments[0].failureMessage?.contains("已停止自動重試") == true)
             XCTAssertFalse(manifest.segments[0].failureMessage?.contains("將切小") == true)
         }
+    }
+
+    func testDisabledSilenceAwareDoesNotCallDetectorForInitialOrAdaptiveSplit() async throws {
+        let root = try TestSupport.makeTemporaryDirectory()
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let paths = ApplicationPaths(root: root.appendingPathComponent("Support"))
+        let outputDirectory = root.appendingPathComponent("Output", isDirectory: true)
+        try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+
+        let candidate = RuntimeEnvironment.candidate(
+            paths: paths,
+            settings: AppSettings.defaultValue(developerMode: true),
+            bundledHelperURL: nil
+        )
+        guard FileManager.default.isExecutableFile(atPath: candidate.ffmpeg.path),
+              FileManager.default.isExecutableFile(atPath: candidate.ffprobe.path),
+              FileManager.default.isExecutableFile(atPath: candidate.opencc.path)
+        else {
+            return XCTFail("Required audio tools (ffmpeg/ffprobe/opencc) are not available")
+        }
+
+        let sourceURL = root.appendingPathComponent("disabled-silence.wav")
+        try await makeSineAudioFixture(
+            durationSeconds: 4.0,
+            destinationURL: sourceURL,
+            ffmpegURL: candidate.ffmpeg
+        )
+
+        let transport = MockAIStudioTransport(responses: [
+            .success((finishReason: "MAX_TOKENS", text: "截斷")),
+            .success((finishReason: "STOP", text: "[00:00 - 00:01]\n講者 1：左。")),
+            .success((finishReason: "STOP", text: "[00:01 - 00:02]\n講者 1：右。")),
+            .success((finishReason: "STOP", text: "[00:02 - 00:04]\n講者 1：第二段。"))
+        ])
+        MockAdaptiveCloudURLProtocol.handler = { request in
+            try transport.handle(request: request)
+        }
+        addTeardownBlock { MockAdaptiveCloudURLProtocol.handler = nil }
+
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.protocolClasses = [MockAdaptiveCloudURLProtocol.self]
+        let session = URLSession(configuration: sessionConfig)
+        let backend = GoogleAIStudioBackend(
+            urlSession: session,
+            configuration: .init(apiKey: "mock-key", modelID: "gemini-3.7-flash")
+        )
+        let silenceDetector = CloudSilenceDetectorSpy(
+            result: [DetectedSilence(startSeconds: 1, endSeconds: 1.4)]
+        )
+        let engine = TranscriptionEngine(
+            runtime: candidate,
+            paths: paths,
+            googleAIStudioBackend: backend,
+            maximumASRSegmentDuration: 2.0,
+            cloudAdaptiveMinimumChildDuration: 1.0,
+            silenceDetectionService: silenceDetector
+        )
+        let snapshot = JobSnapshot(
+            modelID: "gemini-3.7-flash",
+            glossaryID: nil,
+            glossaryName: nil,
+            terms: [],
+            prompt: "忠實轉錄",
+            outputLocationMode: .fixedDirectory,
+            outputDirectory: outputDirectory.path,
+            keepRawTranscript: false,
+            backendType: .googleAIStudio,
+            googleAIStudioAPIKey: "mock-key",
+            googleAIStudioModelID: "gemini-3.7-flash",
+            silenceAwareCloudSegmentation: false
+        )
+        let job = TranscriptionJob(
+            id: UUID(),
+            sourcePath: sourceURL.path,
+            snapshot: snapshot
+        )
+
+        _ = try await engine.run(job: job) { _ in }
+
+        XCTAssertEqual(silenceDetector.calls.count, 0)
+        XCTAssertEqual(transport.recordedGenerateRequests.count, 4)
+    }
+
+    func testInitialSilenceScanIsReusedByAdaptiveChildren() async throws {
+        let root = try TestSupport.makeTemporaryDirectory()
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let paths = ApplicationPaths(root: root.appendingPathComponent("Support"))
+        let outputDirectory = root.appendingPathComponent("Output", isDirectory: true)
+        try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+
+        let candidate = RuntimeEnvironment.candidate(
+            paths: paths,
+            settings: AppSettings.defaultValue(developerMode: true),
+            bundledHelperURL: nil
+        )
+        guard FileManager.default.isExecutableFile(atPath: candidate.ffmpeg.path),
+              FileManager.default.isExecutableFile(atPath: candidate.ffprobe.path),
+              FileManager.default.isExecutableFile(atPath: candidate.opencc.path)
+        else {
+            return XCTFail("Required audio tools (ffmpeg/ffprobe/opencc) are not available")
+        }
+
+        let sourceURL = root.appendingPathComponent("reuse-silence.wav")
+        try await makeSineAudioFixture(
+            durationSeconds: 4.0,
+            destinationURL: sourceURL,
+            ffmpegURL: candidate.ffmpeg
+        )
+
+        let transport = MockAIStudioTransport(responses: [
+            .success((finishReason: "MAX_TOKENS", text: "截斷")),
+            .success((finishReason: "STOP", text: "[00:00 - 00:01]\n講者 1：左。")),
+            .success((finishReason: "STOP", text: "[00:01 - 00:02]\n講者 1：右。")),
+            .success((finishReason: "STOP", text: "[00:02 - 00:04]\n講者 1：第二段。"))
+        ])
+        MockAdaptiveCloudURLProtocol.handler = { request in
+            try transport.handle(request: request)
+        }
+        addTeardownBlock { MockAdaptiveCloudURLProtocol.handler = nil }
+
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.protocolClasses = [MockAdaptiveCloudURLProtocol.self]
+        let session = URLSession(configuration: sessionConfig)
+        let backend = GoogleAIStudioBackend(
+            urlSession: session,
+            configuration: .init(apiKey: "mock-key", modelID: "gemini-3.7-flash")
+        )
+        let silenceDetector = CloudSilenceDetectorSpy()
+        let engine = TranscriptionEngine(
+            runtime: candidate,
+            paths: paths,
+            googleAIStudioBackend: backend,
+            maximumASRSegmentDuration: 2.0,
+            cloudAdaptiveMinimumChildDuration: 1.0,
+            silenceDetectionService: silenceDetector
+        )
+        let snapshot = JobSnapshot(
+            modelID: "gemini-3.7-flash",
+            glossaryID: nil,
+            glossaryName: nil,
+            terms: [],
+            prompt: "忠實轉錄",
+            outputLocationMode: .fixedDirectory,
+            outputDirectory: outputDirectory.path,
+            keepRawTranscript: false,
+            backendType: .googleAIStudio,
+            googleAIStudioAPIKey: "mock-key",
+            googleAIStudioModelID: "gemini-3.7-flash"
+        )
+        let job = TranscriptionJob(
+            id: UUID(),
+            sourcePath: sourceURL.path,
+            snapshot: snapshot
+        )
+
+        _ = try await engine.run(job: job) { _ in }
+
+        XCTAssertEqual(silenceDetector.calls.count, 1)
+        let initialScan = try XCTUnwrap(silenceDetector.calls.first)
+        XCTAssertEqual(initialScan.start, 0, accuracy: 0.001)
+        XCTAssertEqual(initialScan.duration, 4, accuracy: 0.001)
+        XCTAssertEqual(transport.recordedGenerateRequests.count, 4)
     }
 
     private func makeSineAudioFixture(

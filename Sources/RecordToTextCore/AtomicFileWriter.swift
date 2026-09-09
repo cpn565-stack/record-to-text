@@ -16,8 +16,8 @@ public enum AtomicFileWriterError: LocalizedError {
 }
 
 public enum AtomicFileWriter {
-    public static func write(_ data: Data, to destination: URL) throws {
-        try write(data, to: destination, replaceExisting: true)
+    public static func write(_ data: Data, to destination: URL, checkpoint: ((String) throws -> Void)? = nil) throws {
+        try write(data, to: destination, replaceExisting: true, checkpoint: checkpoint)
     }
 
     public static func writeNew(_ data: Data, to destination: URL) throws {
@@ -27,7 +27,8 @@ public enum AtomicFileWriter {
     private static func write(
         _ data: Data,
         to destination: URL,
-        replaceExisting: Bool
+        replaceExisting: Bool,
+        checkpoint: ((String) throws -> Void)? = nil
     ) throws {
         let fileManager = FileManager.default
         let directory = destination.deletingLastPathComponent()
@@ -55,6 +56,7 @@ public enum AtomicFileWriter {
             }
         }
 
+        try checkpoint?("temporaryCreated")
         let handle = try FileHandle(forWritingTo: temporary)
         do {
             try handle.write(contentsOf: data)
@@ -65,6 +67,7 @@ public enum AtomicFileWriter {
             throw error
         }
 
+        try checkpoint?("beforeRename")
         let renameResult: Int32 = temporary.withUnsafeFileSystemRepresentation { sourcePath in
             destination.withUnsafeFileSystemRepresentation { destinationPath in
                 if replaceExisting {

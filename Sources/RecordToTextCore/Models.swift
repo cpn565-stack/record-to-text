@@ -1131,6 +1131,14 @@ public enum RecentJobFileStatus: String, Codable, Equatable, Sendable {
 }
 
 public struct RecentJobCollection: Codable, Equatable, Sendable {
+    private enum CodingKeys: String, CodingKey { case revision, schemaVersion, jobs }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        revision = try values.decodeIfPresent(UInt64.self, forKey: .revision) ?? 0
+        schemaVersion = try values.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        jobs = try values.decode([RecentJobSummary].self, forKey: .jobs)
+    }
+    public var revision: UInt64 = 0
     public var schemaVersion: Int
     public var jobs: [RecentJobSummary]
 
@@ -1141,6 +1149,14 @@ public struct RecentJobCollection: Codable, Equatable, Sendable {
 }
 
 public struct JobLedgerCollection: Codable, Equatable, Sendable {
+    private enum CodingKeys: String, CodingKey { case revision, schemaVersion, jobs }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        revision = try values.decodeIfPresent(UInt64.self, forKey: .revision) ?? 0
+        schemaVersion = try values.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        jobs = try values.decode([TranscriptionJob].self, forKey: .jobs)
+    }
+    public var revision: UInt64 = 0
     public var schemaVersion: Int
     public var jobs: [TranscriptionJob]
 
@@ -1224,7 +1240,7 @@ public struct AudioMetadata: Codable, Equatable, Sendable {
     }
 }
 
-public struct PipelineResult: Equatable, Sendable {
+public struct PipelineResult: Codable, Equatable, Sendable {
     public let outputURL: URL
     public let rawOutputURL: URL?
     public let duration: TimeInterval

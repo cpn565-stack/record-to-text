@@ -1,16 +1,16 @@
 import Foundation
 
-private let repositoryISO8601Fractional: ISO8601DateFormatter = {
+private var repositoryISO8601Fractional: ISO8601DateFormatter {
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     return formatter
-}()
+}
 
-private let repositoryISO8601Standard: ISO8601DateFormatter = {
+private var repositoryISO8601Standard: ISO8601DateFormatter {
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime]
     return formatter
-}()
+}
 
 public final class JSONRepository<Value: Codable> {
     public let url: URL
@@ -19,12 +19,14 @@ public final class JSONRepository<Value: Codable> {
 
     public init(url: URL) {
         self.url = url
+        let fractional = repositoryISO8601Fractional
+        let standard = repositoryISO8601Standard
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         encoder.dateEncodingStrategy = .custom { date, encoder in
             var container = encoder.singleValueContainer()
-            try container.encode(repositoryISO8601Fractional.string(from: date))
+            try container.encode(fractional.string(from: date))
         }
         self.encoder = encoder
 
@@ -33,11 +35,11 @@ public final class JSONRepository<Value: Codable> {
             let container = try decoder.singleValueContainer()
             let value = try container.decode(String.self)
 
-            if let date = repositoryISO8601Fractional.date(from: value) {
+            if let date = fractional.date(from: value) {
                 return date
             }
 
-            if let date = repositoryISO8601Standard.date(from: value) {
+            if let date = standard.date(from: value) {
                 return date
             }
 
@@ -57,9 +59,9 @@ public final class JSONRepository<Value: Codable> {
         return try decoder.decode(Value.self, from: data)
     }
 
-    public func save(_ value: Value) throws {
+    public func save(_ value: Value, checkpoint: ((String) throws -> Void)? = nil) throws {
         let data = try encoder.encode(value)
-        try AtomicFileWriter.write(data, to: url)
+        try AtomicFileWriter.write(data, to: url, checkpoint: checkpoint)
     }
 }
 

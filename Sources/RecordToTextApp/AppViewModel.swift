@@ -52,6 +52,7 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var isModelCacheStatusRefreshing = false
     @Published private(set) var isGoogleAIStudioCredentialLoading = true
     private var credentialLoadingTask: Task<Void, Never>?
+    @Published private(set) var isGoogleAIStudioCredentialSaving = false
     @Published private(set) var googleAIStudioCredentialStorageState:
         GoogleAIStudioCredentialStorageState = .absent
 
@@ -67,6 +68,23 @@ final class AppViewModel: ObservableObject {
     @Published var recoveryItemPendingDeletion: RecoveryScanItem?
     @Published var isBulkCleanupConfirmationPresented = false
 
+    @Published private(set) var jobPersistenceError: String?
+    private var persistenceRevision: UInt64 = 0
+    private var jobPersistenceLoadBlocked = false
+    private var jobPersistenceDeferred = false
+    private var persistenceSubmission: Task<Void, Never>?
+    private var pendingPersistenceSubmission: (PersistenceSnapshot, JobPersistenceCoordinator.Urgency)?
+    private lazy var jobPersistence = JobPersistenceCoordinator(
+        initialRevision: persistenceRevision,
+        writer: { [paths, jobLedgerSaveOverride] snapshot in
+            try jobLedgerSaveOverride?(JobLedgerCollection(jobs: snapshot.canonical().jobs))
+            try JobPersistenceStore(ledgerURL: paths.jobLedger, recentURL: paths.recentJobs).write(snapshot)
+            OutputPublicationStore(paths: paths).prune(after: snapshot)
+        },
+        observer: { [weak self] status in
+            Task { @MainActor in self?.jobPersistenceError = status.error }
+        }
+    )
     private let paths: ApplicationPaths
     private let settingsRepository: JSONRepository<AppSettings>
     private let glossaryRepository: JSONRepository<GlossaryCollection>
@@ -74,7 +92,7 @@ final class AppViewModel: ObservableObject {
     private let jobLedgerRepository: JSONRepository<JobLedgerCollection>
     private let credentialStore: any GoogleAIStudioCredentialStoring
     private let saveSettingsValue: (AppSettings) throws -> Void
-    private let saveJobLedgerValue: (JobLedgerCollection) throws -> Void
+    private let jobLedgerSaveOverride: ((JobLedgerCollection) throws -> Void)?
     private let fileManager: FileManager
     private let modelDownloadRunner = ProcessRunner()
 
@@ -119,9 +137,7 @@ final class AppViewModel: ObservableObject {
         self.saveSettingsValue = settingsSaveOverride ?? { value in
             try settingsRepository.save(value)
         }
-        self.saveJobLedgerValue = jobLedgerSaveOverride ?? { value in
-            try jobLedgerRepository.save(value)
-        }
+        self.jobLedgerSaveOverride = jobLedgerSaveOverride
 
         var startupMessages: [String] = []
         do {
@@ -148,11 +164,22 @@ final class AppViewModel: ObservableObject {
             startupMessages.append("詞庫無法讀取：\(error.localizedDescription)")
         }
 
+        let recoveredJournal: PersistenceSnapshot?
+        do {
+            recoveredJournal = try JobPersistenceStore(ledgerURL: paths.jobLedger, recentURL: paths.recentJobs).recover(repairOutputs: false)
+            persistenceRevision = recoveredJournal?.revision ?? 0
+        } catch {
+            recoveredJournal = nil
+            jobPersistenceLoadBlocked = true
+            let message = "工作 journal 無法復原；已保留原始紀錄，停止覆寫：\(error.localizedDescription)"
+            jobPersistenceError = message
+            startupMessages.append(message)
+        }
         let recentJobsOutcome = LenientCollectionLoader.loadRecentJobs(
             at: paths.recentJobs,
             fileManager: fileManager
         )
-        let loadedRecentJobs = recentJobsOutcome.value
+        let loadedRecentJobs = recoveredJournal.map { RecentJobCollection(jobs: $0.recentJobs) } ?? recentJobsOutcome.value
         if let message = recentJobsOutcome.diagnosticMessage {
             startupMessages.append(message)
         }
@@ -161,7 +188,7 @@ final class AppViewModel: ObservableObject {
             at: paths.jobLedger,
             fileManager: fileManager
         )
-        var loadedLedger = ledgerOutcome.value
+        var loadedLedger = recoveredJournal.map { JobLedgerCollection(jobs: $0.jobs) } ?? ledgerOutcome.value
         if let message = ledgerOutcome.diagnosticMessage {
             startupMessages.append(message)
         }
@@ -176,6 +203,11 @@ final class AppViewModel: ObservableObject {
         let hasLegacyLedgerCredential = legacyLedgerAPIKey != nil
         loadedSettings.googleAIStudioAPIKey = legacySettingsAPIKey ?? legacyLedgerAPIKey
 
+        do {
+            loadedLedger.jobs = try OutputPublicationStore(paths: paths).recoverKnownJobs(loadedLedger.jobs)
+        } catch {
+            startupMessages.append("輸出發布紀錄核對失敗，已保留原檔：\(error.localizedDescription)")
+        }
         var summaries = loadedRecentJobs.jobs
         var didInterruptJobs = false
         for index in loadedLedger.jobs.indices where !loadedLedger.jobs[index].stage.isTerminal {
@@ -273,6 +305,7 @@ final class AppViewModel: ObservableObject {
                 self.persistSettings()
                 self.persistJobs()
             case let .failure(error):
+                self.persistJobs()
                 self.googleAIStudioCredentialStorageState =
                     self.settings.googleAIStudioAPIKey == nil ? .unavailable : .memoryOnly
                 let message = "Google AI Studio API Key 無法從 Keychain 載入：\(error.localizedDescription)。可在設定中重試；其他功能仍可使用。"
@@ -287,6 +320,7 @@ final class AppViewModel: ObservableObject {
 
     func waitForCredentialLoading() async {
         await credentialLoadingTask?.value
+        try? await flushJobPersistence()
     }
 
     deinit {
@@ -457,7 +491,7 @@ final class AppViewModel: ObservableObject {
         var updated = settings
         updated[keyPath: keyPath] = value
         if (keyPath as AnyKeyPath) == (\AppSettings.googleAIStudioAPIKey as AnyKeyPath) {
-            setGoogleAIStudioAPIKey(updated.googleAIStudioAPIKey)
+            Task { await setGoogleAIStudioAPIKey(updated.googleAIStudioAPIKey) }
             return
         }
         settings = updated
@@ -515,11 +549,13 @@ final class AppViewModel: ObservableObject {
     /// Stores the credential in macOS Keychain and only keeps an in-memory
     /// copy for UI display and transient request execution.
     @discardableResult
-    func setGoogleAIStudioAPIKey(_ apiKey: String?) -> Bool {
-        guard !isGoogleAIStudioCredentialLoading else { return false }
+    func setGoogleAIStudioAPIKey(_ apiKey: String?) async -> Bool {
+        guard !isGoogleAIStudioCredentialLoading, !isGoogleAIStudioCredentialSaving else { return false }
+        isGoogleAIStudioCredentialSaving = true
+        defer { isGoogleAIStudioCredentialSaving = false }
         let normalized = Self.normalizedAPIKey(apiKey)
         if normalized == nil {
-            return clearGoogleAIStudioAPIKey()
+            return await clearGoogleAIStudioAPIKey()
         }
 
         do {
@@ -537,8 +573,7 @@ final class AppViewModel: ObservableObject {
             // JSON copies. Report any persistence failure to the caller even
             // though the credential itself is already safely stored.
             let settingsSaved = persistSettings()
-            let ledgerSaved = !legacyLedgerCredentialMigrationPending
-                || persistJobs()
+            let ledgerSaved = await finishLegacyLedgerMigration()
             return settingsSaved && ledgerSaved
         } catch {
             credentialStoreSynchronizedForLegacyMigration = false
@@ -557,7 +592,7 @@ final class AppViewModel: ObservableObject {
     /// Clears a credential as a small transaction. Any legacy JSON copies are
     /// first backed by a confirmed Keychain value and then redacted. The
     /// Keychain item is deleted only after every pending redaction succeeds.
-    private func clearGoogleAIStudioAPIKey() -> Bool {
+    private func clearGoogleAIStudioAPIKey() async -> Bool {
         let previousSettings = settings
         let previousAPIKey = Self.normalizedAPIKey(
             previousSettings.googleAIStudioAPIKey
@@ -585,8 +620,7 @@ final class AppViewModel: ObservableObject {
         // remains untouched unless both pending legacy copies were redacted.
         let settingsSanitized = !legacySettingsCredentialMigrationPending
             || persistSettings()
-        let ledgerSanitized = !legacyLedgerCredentialMigrationPending
-            || persistJobs()
+        let ledgerSanitized = await finishLegacyLedgerMigration()
         guard settingsSanitized, ledgerSanitized else {
             settings = previousSettings
             googleAIStudioCredentialStorageState = previousAPIKey == nil
@@ -757,16 +791,15 @@ final class AppViewModel: ObservableObject {
     }
 
     @discardableResult
-    func resetSettings(keepGlossaries: Bool) -> Bool {
-        guard !isGoogleAIStudioCredentialLoading else { return false }
+    func resetSettings(keepGlossaries: Bool) async -> Bool {
+        guard !isGoogleAIStudioCredentialLoading, !isGoogleAIStudioCredentialSaving else { return false }
         let shouldClearCredential = Self.normalizedAPIKey(
             settings.googleAIStudioAPIKey
         ) != nil
             || googleAIStudioCredentialStorageState != .absent
             || legacySettingsCredentialMigrationPending
             || legacyLedgerCredentialMigrationPending
-        let credentialCleared = !shouldClearCredential
-            || setGoogleAIStudioAPIKey(nil)
+        let credentialCleared = shouldClearCredential ? await setGoogleAIStudioAPIKey(nil) : true
 
         var resetSettings = AppSettings.defaultValue(fileManager: fileManager)
         if !credentialCleared {
@@ -1726,6 +1759,9 @@ final class AppViewModel: ObservableObject {
         persistJobs()
 
         do {
+            // A publication intent only recovers jobs already known to the journal.
+            // Do not start paid work until its identity has been saved.
+            try await flushJobPersistence()
             guard var currentJob = jobs.first(where: { $0.id == id }) else {
                 return
             }
@@ -1760,7 +1796,11 @@ final class AppViewModel: ObservableObject {
                 try await engine.run(
                     job: currentJob,
                     offline: false,
-                    allowMissingPrompt: permitsMissingPrompt
+                    allowMissingPrompt: permitsMissingPrompt,
+                    persistCompletion: { [weak self] result in
+                        guard let self else { return false }
+                        return await self.acceptCompletedResult(result, id: id)
+                    }
                 ) { [weak self] update in
                     Task { @MainActor in
                         self?.apply(update, to: id)
@@ -1772,6 +1812,46 @@ final class AppViewModel: ObservableObject {
 
             let cancellationArrivedTooLate =
                 cancellationRequested.remove(id) != nil || executionTask.isCancelled
+            if cancellationArrivedTooLate, let index = jobs.firstIndex(where: { $0.id == id }) {
+                jobs[index].logLines.append("取消要求送達時輸出已完成，因此保留完成結果。")
+            }
+            _ = result
+        } catch {
+            if cancellationRequested.remove(id) != nil || Task.isCancelled {
+                markCancelled(id, error: error)
+            } else {
+                markFailed(id, error: error)
+                if error is RuntimeEnvironmentError {
+                    queuePausedForEnvironment = true
+                    if let failedJob = jobs.first(where: { $0.id == id }) {
+                        refreshEnvironment(for: failedJob.snapshot)
+                    } else {
+                        refreshEnvironment()
+                    }
+                    alert = UserFacingAlert(
+                        title: "轉錄環境尚未就緒",
+                        message: "\(error.localizedDescription)\n\n其餘工作會留在佇列，完成環境設定後再繼續。"
+                    )
+                }
+                if isGlossaryUnsupported(error) {
+                    queuePausedForPromptConsent = true
+                    resumeQueueAfterPromptConsent = manualDrainRequested
+                    promptConsentJobID = id
+                    isPromptConsentPresented = true
+                }
+            }
+        }
+
+        allowMissingPrompt.remove(id)
+        activeExecutionTask = nil
+        activeEngine = nil
+        activeJobID = nil
+        pruneHistoryIfNeeded()
+        persistJobs()
+    }
+
+    private func acceptCompletedResult(_ result: PipelineResult, id: UUID) async -> Bool {
+        let cancellationArrivedTooLate = cancellationRequested.contains(id)
             if let index = jobs.firstIndex(where: { $0.id == id }) {
                 jobs[index].stage = .completed
                 jobs[index].progressCurrent = nil
@@ -1832,38 +1912,9 @@ final class AppViewModel: ObservableObject {
                 let completedJob = jobs[index]
                 performCompletionActions(for: completedJob)
             }
-        } catch {
-            if cancellationRequested.remove(id) != nil || Task.isCancelled {
-                markCancelled(id, error: error)
-            } else {
-                markFailed(id, error: error)
-                if error is RuntimeEnvironmentError {
-                    queuePausedForEnvironment = true
-                    if let failedJob = jobs.first(where: { $0.id == id }) {
-                        refreshEnvironment(for: failedJob.snapshot)
-                    } else {
-                        refreshEnvironment()
-                    }
-                    alert = UserFacingAlert(
-                        title: "轉錄環境尚未就緒",
-                        message: "\(error.localizedDescription)\n\n其餘工作會留在佇列，完成環境設定後再繼續。"
-                    )
-                }
-                if isGlossaryUnsupported(error) {
-                    queuePausedForPromptConsent = true
-                    resumeQueueAfterPromptConsent = manualDrainRequested
-                    promptConsentJobID = id
-                    isPromptConsentPresented = true
-                }
-            }
-        }
-
-        allowMissingPrompt.remove(id)
-        activeExecutionTask = nil
-        activeEngine = nil
-        activeJobID = nil
-        pruneHistoryIfNeeded()
         persistJobs()
+        do { try await flushJobPersistence(); return true }
+        catch { jobPersistenceError = error.localizedDescription; return false }
     }
 
     private func apply(_ update: PipelineUpdate, to jobID: UUID) {
@@ -1879,7 +1930,7 @@ final class AppViewModel: ObservableObject {
             jobs[index].stage = stage
             // Keep progress bar values across stage transitions so the bar
             // does not reset to indeterminate while a long segment runs.
-            persistJobs()
+            if !stage.isTerminal { persistJobs(urgency: .coalescible) }
         case let .progress(current, total, unit):
             jobs[index].progressCurrent = current
             jobs[index].progressTotal = total
@@ -2485,42 +2536,77 @@ final class AppViewModel: ObservableObject {
     }
 
     @discardableResult
-    private func persistJobs() -> Bool {
-        for job in jobs where job.stage.isTerminal {
-            let summary = RecentJobSummary(job: job)
-            recentJobs.removeAll(where: { $0.id == summary.id })
-            recentJobs.append(summary)
+    func persistJobs(urgency: JobPersistenceCoordinator.Urgency = .critical) -> Bool {
+        guard !isGoogleAIStudioCredentialLoading, !jobPersistenceLoadBlocked else {
+            jobPersistenceDeferred = true
+            return false
         }
-
-        let limit = max(settings.recentJobLimit, 0)
-        recentJobs = JobRetentionPolicy.recentSummaries(
-            recentJobs,
-            limit: limit
-        )
-        let ledgerJobs = JobRetentionPolicy.ledgerJobs(
-            jobs,
-            terminalHistoryLimit: limit
-        )
-
         if legacyLedgerCredentialMigrationPending,
-           !ensureLegacyCredentialStoreIsSynchronized()
-        {
+           !ensureLegacyCredentialStoreIsSynchronized() {
+            jobPersistenceDeferred = true
             return false
         }
+        jobPersistenceDeferred = false
+        // Force lazy initialization before advancing the first revision.
+        let coordinator = jobPersistence
+        persistenceRevision += 1
+        let terminal = jobs.filter { $0.stage.isTerminal }.map(RecentJobSummary.init(job:))
+        let terminalIDs = Set(terminal.map(\.id))
+        recentJobs = recentJobs.filter { !terminalIDs.contains($0.id) } + terminal
+        let snapshot = PersistenceSnapshot(revision: persistenceRevision, jobs: jobs,
+            recentJobs: recentJobs, recentHistoryLimit: max(settings.recentJobLimit, 0))
+        let migrating = legacyLedgerCredentialMigrationPending
+        let effectiveUrgency: JobPersistenceCoordinator.Urgency = pendingPersistenceSubmission?.1 == .critical ? .critical : urgency
+        pendingPersistenceSubmission = (snapshot, effectiveUrgency)
+        if persistenceSubmission == nil {
+            persistenceSubmission = Task { [weak self] in
+                guard let self else { return }
+                while let (next, nextUrgency) = self.pendingPersistenceSubmission {
+                    self.pendingPersistenceSubmission = nil
+                    await coordinator.submit(next, urgency: nextUrgency)
+                    if self.legacyLedgerCredentialMigrationPending {
+                        do {
+                            try await coordinator.flush(throughRevision: next.revision)
+                            self.legacyLedgerCredentialMigrationPending = false
+                            self.clearLegacyCredentialSynchronizationIfFinished()
+                        } catch { self.jobPersistenceError = error.localizedDescription }
+                    }
+                }
+                self.persistenceSubmission = nil
+            }
+        }
+        return !migrating
+    }
 
-        do {
-            try recentJobsRepository.save(RecentJobCollection(jobs: recentJobs))
-            try saveJobLedgerValue(JobLedgerCollection(jobs: ledgerJobs))
-            legacyLedgerCredentialMigrationPending = false
-            clearLegacyCredentialSynchronizationIfFinished()
-            return true
-        } catch {
-            alert = UserFacingAlert(
-                title: "無法儲存工作記錄",
-                message: error.localizedDescription
-            )
-            return false
+    private func finishLegacyLedgerMigration() async -> Bool {
+        guard legacyLedgerCredentialMigrationPending else { return true }
+        guard ensureLegacyCredentialStoreIsSynchronized() else { return false }
+        persistJobs()
+        do { try await flushJobPersistence() } catch { return false }
+        return !legacyLedgerCredentialMigrationPending
+    }
+
+    func flushJobPersistence() async throws {
+        guard !jobPersistenceLoadBlocked else { throw CocoaError(.fileReadCorruptFile) }
+        guard !jobPersistenceDeferred else { throw CocoaError(.fileWriteUnknown) }
+        let submission = persistenceSubmission
+        let target = persistenceRevision
+        let coordinator = jobPersistence
+        try await CloudSegmentBudget(limit: .seconds(5)).withDeadline(stage: "persistence") {
+            await submission?.value
+            try await coordinator.flush(throughRevision: target)
         }
+    }
+
+    func saveLatestJobsForTermination() async throws {
+        persistJobs()
+        try await flushJobPersistence()
+    }
+
+    func retryJobPersistence() async {
+        persistJobs()
+        do { try await flushJobPersistence(); jobPersistenceError = nil }
+        catch { jobPersistenceError = error.localizedDescription }
     }
 
     /// Before redacting the only legacy JSON copy, require a confirmed

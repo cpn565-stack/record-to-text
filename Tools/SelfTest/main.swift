@@ -2,6 +2,44 @@ import Darwin
 import Foundation
 import RecordToTextCore
 
+// Isolated crash harness: XCTest supplies a fresh fixture directory. _exit
+// deliberately skips all Swift defer/cleanup, matching process termination.
+if CommandLine.arguments.count == 4, CommandLine.arguments[1] == "--persistence-crash-fixture" {
+    let directory = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
+    let crashPoint = CommandLine.arguments[3]
+    let store = JobPersistenceStore(
+        ledgerURL: directory.appendingPathComponent("job-ledger.json"),
+        recentURL: directory.appendingPathComponent("recent-jobs.json"),
+        checkpoint: { if $0 == crashPoint { Darwin._exit(73) } })
+    do {
+        try store.write(.init(revision: 2, jobs: [], recentJobs: [], recentHistoryLimit: 10))
+        Darwin.exit(0)
+    } catch { Darwin.exit(74) }
+}
+
+if CommandLine.arguments.count == 4, CommandLine.arguments[1] == "--publication-crash-fixture" {
+    let paths = ApplicationPaths(root: URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true))
+    let stage = CommandLine.arguments[3]
+    func stop(_ point: String) { if stage == point { Darwin._exit(73) } }
+    do {
+        let store = JobPersistenceStore(ledgerURL: paths.jobLedger, recentURL: paths.recentJobs, checkpoint: stop)
+        let job = try JSONRepository<JobLedgerCollection>(url: paths.jobLedger).load(default: .init()).jobs[0]
+        let output = paths.root.appendingPathComponent("final.txt")
+        let publication = OutputPublicationStore(paths: paths)
+        try publication.prepare(job: job, result: .init(outputURL: output, rawOutputURL: nil, duration: 1), text: "完整正式稿")
+        stop("beforePublish")
+        try AtomicFileWriter.writeTextNew("完整正式稿", to: output)
+        stop("afterPublish")
+        let completed = try publication.recover(job: job)!
+        let snapshot = PersistenceSnapshot(revision: 2, jobs: [completed], recentJobs: [], recentHistoryLimit: 10)
+        try store.write(snapshot)
+        stop("beforeCleanup")
+        publication.prune(after: snapshot)
+        stop("afterCleanup")
+        Darwin.exit(0)
+    } catch { Darwin.exit(74) }
+}
+
 private struct SelfTestFailure: Error, CustomStringConvertible {
     let description: String
 }

@@ -4,16 +4,14 @@ import SwiftUI
 @MainActor
 final class RecordToTextAppDelegate: NSObject, NSApplicationDelegate {
     weak var viewModel: AppViewModel?
+    private var terminationPending = false
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if terminationPending { return .terminateLater }
         guard let viewModel else {
             return .terminateNow
         }
-        guard viewModel.hasActiveJob else {
-            viewModel.flushPendingSettingsPersistence()
-            return .terminateNow
-        }
-
+        if viewModel.hasActiveJob {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "轉錄仍在進行"
@@ -25,9 +23,32 @@ final class RecordToTextAppDelegate: NSObject, NSApplicationDelegate {
             return .terminateCancel
         }
 
+        }
+        terminationPending = true
         Task { @MainActor in
             await viewModel.stopAllForTermination()
-            sender.reply(toApplicationShouldTerminate: true)
+            while true {
+                do {
+                    try await viewModel.saveLatestJobsForTermination()
+                    sender.reply(toApplicationShouldTerminate: true)
+                    return
+                } catch {
+                    let alert = NSAlert()
+                    alert.messageText = "工作紀錄尚未儲存"
+                    alert.informativeText = "儲存失敗或超過 5 秒。仍然退出可能遺失最新工作狀態。"
+                    alert.addButton(withTitle: "重試儲存")
+                    alert.addButton(withTitle: "取消退出")
+                    alert.addButton(withTitle: "仍然退出")
+                    switch alert.runModal() {
+                    case .alertFirstButtonReturn: continue
+                    case .alertSecondButtonReturn:
+                        self.terminationPending = false
+                        sender.reply(toApplicationShouldTerminate: false)
+                    default: sender.reply(toApplicationShouldTerminate: true)
+                    }
+                    return
+                }
+            }
         }
         return .terminateLater
     }

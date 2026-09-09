@@ -3,6 +3,48 @@ import XCTest
 @testable import RecordToTextCore
 
 final class SilenceAwareSegmentationTests: XCTestCase {
+    func testDetectionServiceReportsTimesRelativeToTrimmedStart() async throws {
+        let root = try TestSupport.makeTemporaryDirectory()
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let paths = ApplicationPaths(root: root.appendingPathComponent("Support"))
+        let runtime = RuntimeEnvironment.candidate(
+            paths: paths,
+            settings: AppSettings.defaultValue(developerMode: true),
+            bundledHelperURL: nil
+        )
+        guard FileManager.default.isExecutableFile(atPath: runtime.ffmpeg.path) else {
+            throw XCTSkip("ffmpeg is not available")
+        }
+
+        let sourceURL = root.appendingPathComponent("silence-offset.wav")
+        let runner = ProcessRunner()
+        _ = try await runner.run(
+            executableURL: runtime.ffmpeg,
+            arguments: [
+                "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi",
+                "-i",
+                "anullsrc=r=16000:cl=mono:d=2[s0];sine=frequency=440:sample_rate=16000:d=2[s1];anullsrc=r=16000:cl=mono:d=2[s2];[s0][s1][s2]concat=n=3:v=0:a=1",
+                "-c:a", "pcm_s16le",
+                sourceURL.path
+            ]
+        )
+
+        let service = SilenceDetectionService(
+            executableURL: runtime.ffmpeg,
+            runner: runner
+        )
+        let silences = try await service.detect(
+            sourceURL: sourceURL,
+            startSeconds: 2,
+            durationSeconds: 4
+        )
+
+        XCTAssertEqual(silences.count, 1)
+        XCTAssertEqual(silences[0].startSeconds, 2, accuracy: 0.1)
+        XCTAssertEqual(silences[0].endSeconds, 4, accuracy: 0.1)
+    }
+
     func testParserPairsSilenceStartAndEnd() {
         let stderr = """
         [silencedetect @ 0x1] silence_start: 11.250

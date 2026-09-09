@@ -1,0 +1,96 @@
+warning: 'record-to-text': found 1 file(s) which are unhandled; explicitly declare them as resources or exclude from the target
+    /Users/mike/Projects/AI工作區域/record-to-text/Sources/RecordToTextApp/Resources/__pycache__/qwen_asr_chunking.cpython-314.pyc
+[0/1] Planning build
+Building for debugging...
+[0/14] Write sources
+[4/14] Write swift-version--58304C5D6DBC2206.txt
+[6/18] Compiling RecordToTextCore JobPersistenceCoordinator.swift
+[7/18] Compiling RecordToTextCore AtomicFileWriter.swift
+[8/18] Compiling RecordToTextCore JSONRepositories.swift
+[9/21] Emitting module RecordToTextCore
+[10/21] Compiling RecordToTextCore ASRBackend.swift
+[11/21] Compiling RecordToTextCore TranscriptMerger.swift
+[12/21] Compiling RecordToTextCore TranscriptionEngine.swift
+[12/28] Write Objects.LinkFileList
+[14/37] Compiling RecordToTextMockHelper main.swift
+[15/37] Emitting module RecordToTextMockHelper
+[15/37] Write Objects.LinkFileList
+[16/37] Linking record-to-text-pipeline-self-test
+[17/37] Applying record-to-text-pipeline-self-test
+[19/37] Compiling RecordToTextApp RecordToTextApp.swift
+[20/37] Emitting module RecordToTextApp
+[21/37] Compiling RecordToTextApp RecoveryScanView.swift
+[21/37] Linking record-to-text-mock-helper
+[22/37] Applying record-to-text-mock-helper
+[24/37] Compiling RecordToTextApp GlossaryManagerView.swift
+[25/37] Compiling RecordToTextApp OnboardingView.swift
+[26/37] Compiling RecordToTextApp SettingsView.swift
+[27/37] Emitting module RecordToTextSelfTest
+[28/37] Compiling RecordToTextSelfTest main.swift
+[28/37] Write Objects.LinkFileList
+[29/37] Linking record-to-text-self-test
+[30/37] Applying record-to-text-self-test
+[32/37] Compiling RecordToTextApp MainView.swift
+[33/37] Compiling RecordToTextApp AppViewModel.swift
+[34/37] Compiling RecordToTextApp EnvironmentCheckView.swift
+[34/39] Write Objects.LinkFileList
+[35/39] Linking record-to-text
+[36/39] Applying record-to-text
+[38/47] Compiling RecordToTextCoreTests LenientCollectionLoaderTests.swift
+[39/47] Compiling RecordToTextCoreTests JobRetentionPolicyTests.swift
+[40/47] Compiling RecordToTextCoreTests PersistenceTests.swift
+[41/47] Compiling RecordToTextCoreTests CloudSegmentBudgetTests.swift
+[42/47] Compiling RecordToTextCoreTests AppCancellationRecoveryTests.swift
+[43/47] Emitting module RecordToTextCoreTests
+[44/47] Compiling RecordToTextCoreTests JobPersistenceCoordinatorTests.swift
+[45/47] Compiling RecordToTextCoreTests AppCredentialMigrationTests.swift
+[45/47] Write Objects.LinkFileList
+[46/47] Linking record-to-textPackageTests
+Build complete! (7.07s)
+Test Suite 'Selected tests' started at 2026-09-08 23:31:17.129.
+Test Suite 'record-to-textPackageTests.xctest' started at 2026-09-08 23:31:17.130.
+Test Suite 'CloudSegmentBudgetTests' started at 2026-09-08 23:31:17.130.
+Test Case '-[RecordToTextCoreTests.CloudSegmentBudgetTests testCancellationIsNotDeadline]' started.
+Test Case '-[RecordToTextCoreTests.CloudSegmentBudgetTests testCancellationIsNotDeadline]' passed (0.001 seconds).
+Test Case '-[RecordToTextCoreTests.CloudSegmentBudgetTests testFiveSecondBudgetStopsLocalProcessWithinStopTarget]' started.
+Test Case '-[RecordToTextCoreTests.CloudSegmentBudgetTests testFiveSecondBudgetStopsLocalProcessWithinStopTarget]' passed (5.105 seconds).
+Test Case '-[RecordToTextCoreTests.CloudSegmentBudgetTests testInjectedMonotonicClockRejectsNewWorkAfterAdvance]' started.
+Test Case '-[RecordToTextCoreTests.CloudSegmentBudgetTests testInjectedMonotonicClockRejectsNewWorkAfterAdvance]' passed (0.000 seconds).
+Test Case '-[RecordToTextCoreTests.CloudSegmentBudgetTests testLateUncooperativeResultCannotPassDeadline]' started.
+Test Case '-[RecordToTextCoreTests.CloudSegmentBudgetTests testLateUncooperativeResultCannotPassDeadline]' passed (0.035 seconds).
+Test Case '-[RecordToTextCoreTests.CloudSegmentBudgetTests testRetryAfterDoesNotStartAnEarlyRetry]' started.
+Test Case '-[RecordToTextCoreTests.CloudSegmentBudgetTests testRetryAfterDoesNotStartAnEarlyRetry]' passed (0.001 seconds).
+Test Suite 'CloudSegmentBudgetTests' passed at 2026-09-08 23:31:22.273.
+	 Executed 5 tests, with 0 failures (0 unexpected) in 5.142 (5.143) seconds
+Test Suite 'JobPersistenceCoordinatorTests' started at 2026-09-08 23:31:22.273.
+Test Case '-[RecordToTextCoreTests.JobPersistenceCoordinatorTests testCoalescingAndStaleSubmissions]' started.
+Test Case '-[RecordToTextCoreTests.JobPersistenceCoordinatorTests testCoalescingAndStaleSubmissions]' passed (0.041 seconds).
+Test Case '-[RecordToTextCoreTests.JobPersistenceCoordinatorTests testCrashMatrixNeverResurrectsDeletedJob]' started.
+Test Case '-[RecordToTextCoreTests.JobPersistenceCoordinatorTests testCrashMatrixNeverResurrectsDeletedJob]' passed (0.906 seconds).
+Test Case '-[RecordToTextCoreTests.JobPersistenceCoordinatorTests testFailedWriterRetainsLatestAndCanRetryWithoutTranscription]' started.
+Test Case '-[RecordToTextCoreTests.JobPersistenceCoordinatorTests testFailedWriterRetainsLatestAndCanRetryWithoutTranscription]' passed (0.034 seconds).
+Test Case '-[RecordToTextCoreTests.JobPersistenceCoordinatorTests testJournalRepairsBothOutputsAfterCrash]' started.
+Test Case '-[RecordToTextCoreTests.JobPersistenceCoordinatorTests testJournalRepairsBothOutputsAfterCrash]' passed (0.006 seconds).
+Test Case '-[RecordToTextCoreTests.JobPersistenceCoordinatorTests testPersistenceFixtureBenchmarks]' started.
+Test Case '-[RecordToTextCoreTests.JobPersistenceCoordinatorTests testPersistenceFixtureBenchmarks]' passed (0.704 seconds).
+Test Case '-[RecordToTextCoreTests.JobPersistenceCoordinatorTests testSlowWriterLeavesMainActorResponsiveAndCriticalWaits]' started.
+Test Case '-[RecordToTextCoreTests.JobPersistenceCoordinatorTests testSlowWriterLeavesMainActorResponsiveAndCriticalWaits]' passed (1.123 seconds).
+Test Suite 'JobPersistenceCoordinatorTests' passed at 2026-09-08 23:31:25.088.
+	 Executed 6 tests, with 0 failures (0 unexpected) in 2.814 (2.815) seconds
+Test Suite 'record-to-textPackageTests.xctest' passed at 2026-09-08 23:31:25.088.
+	 Executed 11 tests, with 0 failures (0 unexpected) in 7.956 (7.958) seconds
+Test Suite 'Selected tests' passed at 2026-09-08 23:31:25.088.
+	 Executed 11 tests, with 0 failures (0 unexpected) in 7.956 (7.959) seconds
+persistence_fixture jobs=10 logs=400 run=1 submit_ms=0.015083 durable_ms=4.3630830000000005
+persistence_fixture jobs=10 logs=400 run=2 submit_ms=0.008042 durable_ms=4.480874999999999
+persistence_fixture jobs=10 logs=400 run=3 submit_ms=0.007875 durable_ms=4.482333
+persistence_fixture jobs=100 logs=400 run=1 submit_ms=0.012374999999999999 durable_ms=18.568417
+persistence_fixture jobs=100 logs=400 run=2 submit_ms=0.0077919999999999994 durable_ms=19.728084
+persistence_fixture jobs=100 logs=400 run=3 submit_ms=0.009208000000000001 durable_ms=20.870208
+persistence_fixture jobs=1000 logs=400 run=1 submit_ms=0.011708 durable_ms=151.50225
+persistence_fixture jobs=1000 logs=400 run=2 submit_ms=0.009833 durable_ms=152.715166
+persistence_fixture jobs=1000 logs=400 run=3 submit_ms=0.013042 durable_ms=154.70575
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.

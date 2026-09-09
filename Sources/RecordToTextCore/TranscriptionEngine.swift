@@ -91,11 +91,12 @@ public final class TranscriptionEngine {
     private let runner: ProcessRunner
     private let probeService: AudioProbeService
     private let ffmpegService: FFmpegService
-    private let silenceDetectionService: SilenceDetectionService
+    private let silenceDetectionService: any SilenceDetectionServicing
     private let openCCService: OpenCCService
     private let backend: HelperASRBackend
     private let googleAIStudioBackend: GoogleAIStudioBackend
     private let vertexAIBackend: VertexAIGeminiBackend
+    private let cloudSegmentBudgetLimit: Duration
     private let sleepPrevention: SleepPreventionService
     private let maximumASRSegmentDuration: TimeInterval
     private let cloudAdaptiveMinimumChildDuration: TimeInterval
@@ -218,17 +219,18 @@ public final class TranscriptionEngine {
         maximumASRSegmentDuration: TimeInterval =
             AudioSegmentPlanner.productionMaximumDuration,
         cloudAdaptiveMinimumChildDuration: TimeInterval =
-            CloudAdaptiveSegmentPlanner.productionMinimumChildDuration
+            CloudAdaptiveSegmentPlanner.productionMinimumChildDuration,
+        silenceDetectionService: (any SilenceDetectionServicing)? = nil,
+        cloudSegmentBudgetLimit: Duration = .seconds(900)
     ) {
+        self.cloudSegmentBudgetLimit = cloudSegmentBudgetLimit
         self.runtime = runtime
         self.paths = paths
         self.runner = runner
         self.probeService = AudioProbeService(executableURL: runtime.ffprobe)
         self.ffmpegService = FFmpegService(executableURL: runtime.ffmpeg, runner: runner)
-        self.silenceDetectionService = SilenceDetectionService(
-            executableURL: runtime.ffmpeg,
-            runner: runner
-        )
+        self.silenceDetectionService = silenceDetectionService
+            ?? SilenceDetectionService(executableURL: runtime.ffmpeg, runner: runner)
         self.openCCService = OpenCCService(executableURL: runtime.opencc, runner: runner)
         self.backend = HelperASRBackend(runtime: runtime, paths: paths, runner: runner)
         self.googleAIStudioBackend = googleAIStudioBackend ?? GoogleAIStudioBackend()
@@ -242,6 +244,7 @@ public final class TranscriptionEngine {
         job: TranscriptionJob,
         offline: Bool = false,
         allowMissingPrompt: Bool = false,
+        persistCompletion: ((PipelineResult) async -> Bool)? = nil,
         update: @escaping (PipelineUpdate) -> Void
     ) async throws -> PipelineResult {
         cancellationLock.withLock {
@@ -372,8 +375,18 @@ public final class TranscriptionEngine {
                 withIntermediateDirectories: true
             )
 
+            let silenceAnalysisCache = JobSilenceAnalysisCache(
+                sourceURL: sourceURL,
+                fileManager: fileManager
+            )
+
+            defer {
+                if job.snapshot.backendType != .localQwen {
+                    update(.log(level: "info", message: "靜音分析統計：\(silenceAnalysisCache.metricsSummary)"))
+                }
+            }
             if job.snapshot.backendType == .googleAIStudio {
-                return try await runGoogleAIStudioPipeline(
+                let result = try await runGoogleAIStudioPipeline(
                     job: job,
                     startedAt: startedAt,
                     sourceURL: sourceURL,
@@ -381,10 +394,13 @@ public final class TranscriptionEngine {
                     outputDirectory: outputDirectory,
                     metadata: metadata,
                     currentStage: currentStage,
-                    update: update
+                    update: update,
+                    silenceAnalysisCache: silenceAnalysisCache
                 )
+                if let persistCompletion { shouldKeepWorkingDirectory = !(await persistCompletion(result)) }
+                return result
             } else if job.snapshot.backendType == .vertexAI {
-                return try await runVertexAIPipeline(
+                let result = try await runVertexAIPipeline(
                     job: job,
                     startedAt: startedAt,
                     sourceURL: sourceURL,
@@ -392,8 +408,11 @@ public final class TranscriptionEngine {
                     outputDirectory: outputDirectory,
                     metadata: metadata,
                     currentStage: currentStage,
-                    update: update
+                    update: update,
+                    silenceAnalysisCache: silenceAnalysisCache
                 )
+                if let persistCompletion { shouldKeepWorkingDirectory = !(await persistCompletion(result)) }
+                return result
             }
 
             if job.resumeFromRecoveryDirectory != nil,
@@ -798,7 +817,9 @@ public final class TranscriptionEngine {
                 suffix: outputSuffix(
                     job.snapshot.outputFilenameSuffix,
                     sourceSlice: job.sourceSlice
-                )
+                ),
+                publicationJob: job,
+                publicationResult: { .init(outputURL: $0, rawOutputURL: nil, duration: Date().timeIntervalSince(startedAt), containsSkippedAudio: segmentManifest.segments.contains { $0.status == .completedWithGaps }) }
             )
             update(.progress(current: 100, total: 100, unit: "percent"))
 
@@ -827,8 +848,15 @@ public final class TranscriptionEngine {
                 }
             }
 
+            let completedResult = PipelineResult(
+                outputURL: finalOutputURL, rawOutputURL: preservedRawURL,
+                duration: Date().timeIntervalSince(startedAt),
+                containsSkippedAudio: segmentManifest.segments.contains { $0.status == .completedWithGaps }
+            )
+            if let persistCompletion { shouldKeepWorkingDirectory = !(await persistCompletion(completedResult)) }
+            if !shouldKeepWorkingDirectory {
             do {
-                try fileManager.removeItem(at: workingDirectory)
+                if fileManager.fileExists(atPath: workingDirectory.path) { try fileManager.removeItem(at: workingDirectory) }
             } catch {
                 cleanupWarningWasEmitted = true
                 update(
@@ -850,16 +878,10 @@ public final class TranscriptionEngine {
                     )
                 }
             }
+            }
             update(.stage(.completed))
 
-            return PipelineResult(
-                outputURL: finalOutputURL,
-                rawOutputURL: preservedRawURL,
-                duration: Date().timeIntervalSince(startedAt),
-                containsSkippedAudio: segmentManifest.segments.contains {
-                    $0.status == .completedWithGaps
-                }
-            )
+            return completedResult
         } catch {
             let wasCancelled = error is CancellationError
                 || Task.isCancelled
@@ -1008,7 +1030,8 @@ public final class TranscriptionEngine {
         outputDirectory: URL,
         metadata: AudioMetadata,
         currentStage: PipelineStageTracker,
-        update: @escaping (PipelineUpdate) -> Void
+        update: @escaping (PipelineUpdate) -> Void,
+        silenceAnalysisCache: JobSilenceAnalysisCache
     ) async throws -> PipelineResult {
         googleAIStudioBackend.updateConfiguration(
             GoogleAIStudioBackend.Configuration(
@@ -1029,7 +1052,8 @@ public final class TranscriptionEngine {
             currentStage: currentStage,
             serviceDisplay: "Google AI Studio",
             modelDisplay: modelDisplay,
-            update: update
+            update: update,
+            silenceAnalysisCache: silenceAnalysisCache
         ) { audioData, timeOffset, segmentLabel, speakerRoster in
             try await self.transcribeGoogleAIStudioWithStatus(
                 audioData: audioData,
@@ -1090,7 +1114,8 @@ public final class TranscriptionEngine {
         outputDirectory: URL,
         metadata: AudioMetadata,
         currentStage: PipelineStageTracker,
-        update: @escaping (PipelineUpdate) -> Void
+        update: @escaping (PipelineUpdate) -> Void,
+        silenceAnalysisCache: JobSilenceAnalysisCache
     ) async throws -> PipelineResult {
         let resolvedLocation = Self.resolvedVertexLocation(
             job.snapshot.vertexAILocation
@@ -1123,6 +1148,7 @@ public final class TranscriptionEngine {
             serviceDisplay: "Google Cloud Vertex AI (\(resolvedLocation))",
             modelDisplay: modelDisplay,
             update: update,
+            silenceAnalysisCache: silenceAnalysisCache,
             finalizeTranscript: { segmentTexts in
                 await Self.finalizeVertexTranscript(
                     segmentTexts: segmentTexts,
@@ -1206,7 +1232,7 @@ public final class TranscriptionEngine {
         update: @escaping (PipelineUpdate) -> Void
     ) -> Task<Void, Never> {
         Task {
-            var elapsedSeconds = 0
+            let statusStart = ContinuousClock.now
             while !Task.isCancelled {
                 do {
                     try await Task.sleep(nanoseconds: 30_000_000_000)
@@ -1216,11 +1242,12 @@ public final class TranscriptionEngine {
                 guard !Task.isCancelled else {
                     return
                 }
-                elapsedSeconds += 30
+                let elapsedSeconds = Int(statusStart.duration(to: .now).secondsValue)
+                let activity = CloudBudgetContext.current?.stage == "backoff" ? "等待重試" : "仍在處理中"
                 update(
                     .log(
                         level: "info",
-                        message: "\(modelDisplay) 仍在處理中（已耗時 \(elapsedSeconds) 秒；Google 未提供實際完成百分比）。"
+                        message: "\(modelDisplay) \(activity)（已耗時 \(elapsedSeconds) 秒；Google 未提供實際完成百分比）。"
                     )
                 )
             }
@@ -1231,7 +1258,8 @@ public final class TranscriptionEngine {
         job: TranscriptionJob,
         sourceURL: URL,
         metadata: AudioMetadata,
-        update: (PipelineUpdate) -> Void
+        update: (PipelineUpdate) -> Void,
+        silenceAnalysisCache: JobSilenceAnalysisCache
     ) async throws -> AudioSegmentationPlan {
         let hardPlan = try AudioSegmentPlanner.makePlan(
             sourceDuration: metadata.duration,
@@ -1244,17 +1272,25 @@ public final class TranscriptionEngine {
         }
 
         do {
+            try Task.checkCancellation()
             update(
                 .log(
                     level: "info",
-                    message: "正在分析 20 分鐘上限前的靜音位置，以降低句子被硬切的機率。"
+                    message: "正在準備 20 分鐘上限前的靜音位置；本工作已有涵蓋結果時會直接沿用。"
                 )
             )
-            let silences = try await silenceDetectionService.detect(
-                sourceURL: sourceURL,
-                startSeconds: job.sourceSlice?.startSeconds ?? 0,
-                durationSeconds: metadata.duration
+            let scanStartSeconds = job.sourceSlice?.startSeconds ?? 0
+            let absoluteSilences = try await silenceAnalysisCache.cachedOrDetect(
+                startSeconds: scanStartSeconds,
+                durationSeconds: metadata.duration,
+                detector: silenceDetectionService
             )
+            let silences = absoluteSilences.map {
+                DetectedSilence(
+                    startSeconds: $0.startSeconds - scanStartSeconds,
+                    endSeconds: $0.endSeconds - scanStartSeconds
+                )
+            }
             let adjusted = try SilenceAwareSegmentPlanner.makePlan(
                 sourceDuration: metadata.duration,
                 maximumSegmentDuration: maximumASRSegmentDuration,
@@ -1282,6 +1318,7 @@ public final class TranscriptionEngine {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
+            silenceAnalysisCache.recordFallback()
             update(
                 .warning(
                     code: "silence_detection_failed",
@@ -1294,18 +1331,26 @@ public final class TranscriptionEngine {
 
     private func adaptiveCloudSplitBoundary(
         for record: AudioSegmentRecord,
-        sourceURL: URL
-    ) async -> TimeInterval? {
-        let silences = (try? await silenceDetectionService.detect(
-            sourceURL: sourceURL,
-            startSeconds: record.startSeconds,
-            durationSeconds: record.durationSeconds
-        )) ?? []
-        return CloudAdaptiveSegmentPlanner.splitBoundary(
+        silenceAware: Bool,
+        silenceAnalysisCache: JobSilenceAnalysisCache,
+        update: @escaping (PipelineUpdate) -> Void
+    ) async throws -> TimeInterval? {
+        return try await CloudAdaptiveSilenceCoordinator.splitBoundary(
             duration: record.durationSeconds,
             splitDepth: record.splitDepth ?? 0,
-            silences: silences,
-            minimumChildDuration: cloudAdaptiveMinimumChildDuration
+            startSeconds: record.startSeconds,
+            silenceAware: silenceAware,
+            minimumChildDuration: cloudAdaptiveMinimumChildDuration,
+            cache: silenceAnalysisCache,
+            detector: silenceDetectionService,
+            onFallback: { error in
+                update(
+                    .warning(
+                        code: "silence_detection_failed",
+                        message: "靜音分析失敗，已安全退回中點切分：\(error.localizedDescription)"
+                    )
+                )
+            }
         )
     }
 
@@ -1341,7 +1386,8 @@ public final class TranscriptionEngine {
                 outputPath: segmentsDirectory
                     .appendingPathComponent("\(parentStem)-\(suffix).txt")
                     .path,
-                splitDepth: nextDepth
+                splitDepth: nextDepth,
+                rootSegmentID: record.rootSegmentID
             )
         }
 
@@ -1387,6 +1433,7 @@ public final class TranscriptionEngine {
         serviceDisplay: String,
         modelDisplay: String,
         update: @escaping (PipelineUpdate) -> Void,
+        silenceAnalysisCache: JobSilenceAnalysisCache,
         finalizeTranscript: (([String]) async -> String)? = nil,
         transcribe: (
             _ audioData: Data,
@@ -1431,7 +1478,8 @@ public final class TranscriptionEngine {
                 job: job,
                 sourceURL: sourceURL,
                 metadata: metadata,
-                update: update
+                update: update,
+                silenceAnalysisCache: silenceAnalysisCache
             )
         }
         var speakerRoster = resumeCheckpoint?.speakerRoster ?? SpeakerRoster()
@@ -1480,7 +1528,8 @@ public final class TranscriptionEngine {
                     endSeconds: sourceTimeOffset + segment.endSeconds,
                     audioPath: audioURL.path,
                     outputPath: transcriptURL.path,
-                    splitDepth: resumeCheckpoint?.splitDepths[segment.index]
+                    splitDepth: resumeCheckpoint?.splitDepths[segment.index],
+                    rootSegmentID: resumeCheckpoint?.rootSegmentIDs[segment.index] ?? UUID()
                 )
             },
             speakerRoster: speakerRoster
@@ -1527,6 +1576,7 @@ public final class TranscriptionEngine {
             )
         }
 
+        var budgets: [UUID: CloudSegmentBudget] = [:]
         var zeroBasedIndex = 0
         while zeroBasedIndex < segmentManifest.segments.count {
             try Task.checkCancellation()
@@ -1577,7 +1627,17 @@ public final class TranscriptionEngine {
                 continue
             }
 
+            let rootID = record.rootSegmentID ?? UUID()
+            let budget: CloudSegmentBudget
+            if let existing = budgets[rootID] { budget = existing }
+            else {
+                budget = CloudSegmentBudget(rootSegmentID: rootID, limit: cloudSegmentBudgetLimit, event: { update(.log(level: "info", message: $0)) })
+                budgets[rootID] = budget
+                update(.log(level: "info", message: "budget created root=\(rootID) limit=\(cloudSegmentBudgetLimit.secondsValue) resumed=\(resumeCheckpoint != nil)；續跑重新計時。"))
+            }
+            budget.setSegment(index: segmentIndex, depth: record.splitDepth ?? 0)
             do {
+                try budget.checkRemaining(stage: "extract")
                 currentStage.set(.convertingAudio)
                 update(.stage(.convertingAudio))
                 update(
@@ -1596,6 +1656,7 @@ public final class TranscriptionEngine {
                     )
                 )
 
+                try await budget.withDeadline(stage: "extract") { [self] in
                 if totalSegments == 1, job.sourceSlice == nil {
                     try await ffmpegService.compressForCloud(
                         sourceURL: sourceURL,
@@ -1622,7 +1683,10 @@ public final class TranscriptionEngine {
                     )
                 }
 
-                let preparedMetadata = try await probeService.probe(audioURL)
+                }
+                let preparedMetadata = try await budget.withDeadline(stage: "probe") { [self] in
+                    try await probeService.probe(audioURL)
+                }
                 guard preparedMetadata.duration
                     <= maximumASRSegmentDuration + 1.0
                 else {
@@ -1660,12 +1724,13 @@ public final class TranscriptionEngine {
                 )
                 try writeSegmentManifest(segmentManifest, to: segmentManifestURL)
 
-                let result = try await transcribe(
-                    try Data(contentsOf: audioURL),
-                    absoluteStart,
-                    segmentLabel,
-                    speakerRoster
-                )
+                let result = try await CloudBudgetContext.$current.withValue(budget) {
+                    try budget.checkRemaining(stage: "transcribe")
+                    return try await transcribe(
+                        try Data(contentsOf: audioURL), absoluteStart, segmentLabel, speakerRoster
+                    )
+                }
+                try budget.checkRemaining(stage: "validate")
                 let validatedText = try OutputContractValidator.validate(
                     text: result.text,
                     path: transcriptURL.path,
@@ -1679,6 +1744,7 @@ public final class TranscriptionEngine {
                 let normalizedText = speakerRoster.normalizingSpeakerLabels(
                     in: validatedText
                 )
+                try budget.commit {
                 try normalizeCompletedCloudSegmentFiles(
                     in: segmentManifest,
                     roster: speakerRoster
@@ -1693,6 +1759,7 @@ public final class TranscriptionEngine {
                     completedEventCount: 1
                 )
                 try writeSegmentManifest(segmentManifest, to: segmentManifestURL)
+                }
                 emitCloudMetadataLog(
                     result.metadata,
                     segmentIndex: segmentIndex,
@@ -1722,6 +1789,8 @@ public final class TranscriptionEngine {
                 )
                 zeroBasedIndex += 1
             } catch let truncation as CloudOutputTruncatedError {
+                do {
+                try budget.checkRemaining(stage: "split")
                 let partialURL = URL(
                     fileURLWithPath: record.outputPath + ".partial.txt"
                 )
@@ -1730,10 +1799,15 @@ public final class TranscriptionEngine {
                     to: partialURL
                 )
 
-                let boundaryOffset = await adaptiveCloudSplitBoundary(
+                let boundaryOffset = try await budget.withDeadline(stage: "split") { [self] in
+                    try await adaptiveCloudSplitBoundary(
                     for: record,
-                    sourceURL: sourceURL
+                    silenceAware: job.snapshot.silenceAwareCloudSegmentation,
+                    silenceAnalysisCache: silenceAnalysisCache,
+                    update: update
                 )
+                }
+                try budget.checkRemaining(stage: "split")
                 if let boundaryOffset,
                    let children = Self.adaptiveCloudChildRecords(
                        for: record,
@@ -1801,6 +1875,19 @@ public final class TranscriptionEngine {
                     count: totalSegments,
                     reason: terminalError.localizedDescription
                 )
+                } catch let error as CloudSegmentDeadlineExceeded {
+                    segmentManifest.segments[segmentIndex - 1].deadlineReason = error.stage
+                    try? segmentManifest.mark(segmentIndex: segmentIndex, status: .failed, failureMessage: error.localizedDescription)
+                    try? writeSegmentManifest(segmentManifest, to: segmentManifestURL)
+                    update(.log(level: "warning", message: "deadline exhausted root=\(rootID) stage=\(error.stage)；停止切段。"))
+                    throw error
+                }
+            } catch let error as CloudSegmentDeadlineExceeded {
+                segmentManifest.segments[segmentIndex - 1].deadlineReason = error.stage
+                try? segmentManifest.mark(segmentIndex: segmentIndex, status: .failed, failureMessage: error.localizedDescription)
+                try? writeSegmentManifest(segmentManifest, to: segmentManifestURL)
+                update(.log(level: "warning", message: "deadline exhausted root=\(rootID) stage=\(error.stage) elapsed=\(error.elapsedSeconds) cancel requested; local completion gate closed"))
+                throw error
             } catch is CancellationError {
                 try? segmentManifest.mark(
                     segmentIndex: segmentIndex,
@@ -1891,6 +1978,8 @@ public final class TranscriptionEngine {
         try Task.checkCancellation()
         currentStage.set(.convertingTraditionalChinese)
         update(.stage(.convertingTraditionalChinese))
+
+
         update(
             .progress(
                 current: 100,
@@ -1921,15 +2010,6 @@ public final class TranscriptionEngine {
                 current: 100,
                 total: 100,
                 unit: "postprocessing|\(mergeableSegments.count)|\(mergeableSegments.count)"
-            )
-        )
-        let finalOutputURL = try writeUniqueText(
-            finalTranscribedText,
-            sourceURL: sourceURL,
-            directory: outputDirectory,
-            suffix: outputSuffix(
-                job.snapshot.outputFilenameSuffix,
-                sourceSlice: job.sourceSlice
             )
         )
 
@@ -1972,6 +2052,18 @@ public final class TranscriptionEngine {
                 unit: "postprocessing|\(mergeableSegments.count)|\(mergeableSegments.count)"
             )
         )
+        let finalOutputURL = try writeUniqueText(
+            finalTranscribedText,
+            sourceURL: sourceURL,
+            directory: outputDirectory,
+            suffix: outputSuffix(
+                job.snapshot.outputFilenameSuffix,
+                sourceSlice: job.sourceSlice
+            ),
+            publicationJob: job,
+            publicationResult: { .init(outputURL: $0, rawOutputURL: nil, duration: Date().timeIntervalSince(startedAt), containsSkippedAudio: !blockedSegments.isEmpty, cloudSegmentMetadata: segmentMetadata, incompleteCloudSegmentIndices: blockedSegments.map(\.segmentIndex), recoveryDirectory: gapRecoveryDirectory) }
+        )
+
         update(
             .log(
                 level: "info",
@@ -2037,7 +2129,9 @@ public final class TranscriptionEngine {
         _ text: String,
         sourceURL: URL,
         directory: URL,
-        suffix: String
+        suffix: String,
+        publicationJob: TranscriptionJob? = nil,
+        publicationResult: ((URL) -> PipelineResult)? = nil
     ) throws -> URL {
         while true {
             let candidate = OutputNameBuilder.availableOutputURL(
@@ -2046,6 +2140,9 @@ public final class TranscriptionEngine {
                 suffix: suffix
             )
             do {
+                if let publicationJob, let publicationResult {
+                    try OutputPublicationStore(paths: paths).prepare(job: publicationJob, result: publicationResult(candidate), text: text)
+                }
                 try AtomicFileWriter.writeTextNew(text, to: candidate)
                 return candidate
             } catch AtomicFileWriterError.destinationExists {
@@ -2345,7 +2442,9 @@ extension TranscriptionEngine {
                     failureMessage: sourceRecord.failureMessage,
                     cloudMetadata: sourceRecord.cloudMetadata,
                     reusedFromCheckpoint: sourceRecord.reusedFromCheckpoint,
-                    splitDepth: sourceRecord.splitDepth
+                    splitDepth: sourceRecord.splitDepth,
+                    rootSegmentID: sourceRecord.rootSegmentID,
+                    deadlineReason: sourceRecord.deadlineReason
                 )
             )
         }

@@ -1,10 +1,68 @@
 import Foundation
+import Darwin
 import XCTest
 @testable import RecordToTextApp
 @testable import RecordToTextCore
 
 @MainActor
 final class AppCredentialMigrationTests: XCTestCase {
+    func testActualMainActorPersistenceSubmissionBenchmark() async throws {
+        for count in [10, 100, 1000] {
+            let root = try TestSupport.makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let paths = ApplicationPaths(root: root)
+            let snapshot = JobSnapshot(modelID: "fixture", glossaryID: nil, glossaryName: nil, terms: [], prompt: "fixture", outputLocationMode: .fixedDirectory, outputDirectory: root.path, keepRawTranscript: false)
+            let jobs = (0..<count).map { index in
+                var job = TranscriptionJob(sourcePath: "/fixture-\(index).wav", snapshot: snapshot)
+                job.stage = .interrupted
+                job.logLines = (0..<400).map { "工作 \(index) 紀錄 \($0)：效能測試，非使用者資料。" }
+                return job
+            }
+            try JSONRepository<JobLedgerCollection>(url: paths.jobLedger).save(.init(jobs: jobs))
+            let model = AppViewModel(paths: paths, credentialStore: FakeCredentialStore())
+            await model.waitForCredentialLoading()
+            for iteration in 1...3 {
+                var samples: [Double] = []
+                for _ in 0..<100 {
+                    let start = ContinuousClock.now
+                    XCTAssertTrue(model.persistJobs(urgency: .coalescible))
+                    samples.append(start.duration(to: .now).secondsValue * 1000)
+                }
+                try await model.flushJobPersistence()
+                let p95 = samples.sorted()[94]
+                var usage = rusage()
+                getrusage(RUSAGE_SELF, &usage)
+                print("app_submit jobs=\(count) logs=400 run=\(iteration) p95_ms=\(p95) process_peak_rss_bytes=\(usage.ru_maxrss)")
+                XCTAssertLessThan(p95, 16)
+            }
+        }
+    }
+
+    func testAppStartupRecoversPublicationAndDeletionStaysDeleted() async throws {
+        let root = try TestSupport.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = ApplicationPaths(root: root)
+        let snapshot = JobSnapshot(modelID: "fixture", glossaryID: nil, glossaryName: nil, terms: [], prompt: "fixture", outputLocationMode: .fixedDirectory, outputDirectory: root.path, keepRawTranscript: false)
+        let job = TranscriptionJob(sourcePath: "/fixture.wav", snapshot: snapshot)
+        let store = JobPersistenceStore(ledgerURL: paths.jobLedger, recentURL: paths.recentJobs)
+        try store.write(.init(revision: 1, jobs: [job], recentJobs: [], recentHistoryLimit: 10))
+        let output = root.appendingPathComponent("final.txt")
+        let publication = OutputPublicationStore(paths: paths)
+        try publication.prepare(job: job, result: .init(outputURL: output, rawOutputURL: nil, duration: 1), text: "完成")
+        try AtomicFileWriter.writeTextNew("完成", to: output)
+        let model = AppViewModel(paths: paths, credentialStore: FakeCredentialStore())
+        await model.waitForCredentialLoading()
+        XCTAssertEqual(model.jobs.first?.stage, .completed)
+        XCTAssertEqual(model.recentJobs.first?.outputPath, output.path)
+        // Simulate the durable deletion while a stale publication receipt remains.
+        try publication.prepare(job: job, result: .init(outputURL: output, rawOutputURL: nil, duration: 1), text: "完成")
+        try store.write(.init(revision: 100, jobs: [], recentJobs: [], recentHistoryLimit: 10))
+        let next = AppViewModel(paths: paths, credentialStore: FakeCredentialStore())
+        await next.waitForCredentialLoading()
+        XCTAssertTrue(next.jobs.isEmpty)
+        XCTAssertTrue(next.recentJobs.isEmpty)
+    }
+
     func testSlowCredentialReadDoesNotBlockInitializer() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -26,7 +84,7 @@ final class AppCredentialMigrationTests: XCTestCase {
         XCTAssertTrue(model.isGoogleAIStudioCredentialLoading)
         model.setSetting(\.recentJobLimit, to: 17)
         XCTAssertEqual(model.settings.recentJobLimit, 17)
-        XCTAssertFalse(model.setGoogleAIStudioAPIKey("must-not-overwrite"))
+        do { let result = await model.setGoogleAIStudioAPIKey("must-not-overwrite"); XCTAssertFalse(result) }
         XCTAssertTrue(try fileContainsSecret(fixture.paths.settings))
         await model.waitForCredentialLoading()
         XCTAssertFalse(model.isGoogleAIStudioCredentialLoading)
@@ -133,7 +191,7 @@ final class AppCredentialMigrationTests: XCTestCase {
         XCTAssertTrue(try fileContainsSecret(fixture.paths.jobLedger))
 
         store.failure = nil
-        XCTAssertTrue(firstLaunch.setGoogleAIStudioAPIKey(nil))
+        do { let result = await firstLaunch.setGoogleAIStudioAPIKey(nil); XCTAssertTrue(result) }
         XCTAssertEqual(firstLaunch.googleAIStudioCredentialStorageState, .absent)
         XCTAssertFalse(try fileContainsSecret(fixture.paths.settings))
         XCTAssertFalse(try fileContainsSecret(fixture.paths.jobLedger))
@@ -159,22 +217,22 @@ final class AppCredentialMigrationTests: XCTestCase {
         await viewModel.waitForCredentialLoading()
 
         store.failure = .unavailable
-        XCTAssertFalse(viewModel.setGoogleAIStudioAPIKey("retry-key"))
+        do { let result = await viewModel.setGoogleAIStudioAPIKey("retry-key"); XCTAssertFalse(result) }
         XCTAssertEqual(viewModel.settings.googleAIStudioAPIKey, "retry-key")
         XCTAssertEqual(viewModel.googleAIStudioCredentialStorageState, .memoryOnly)
 
         store.failure = nil
-        XCTAssertTrue(viewModel.setGoogleAIStudioAPIKey("retry-key"))
+        do { let result = await viewModel.setGoogleAIStudioAPIKey("retry-key"); XCTAssertTrue(result) }
         XCTAssertEqual(store.storedAPIKey, "retry-key")
         XCTAssertEqual(viewModel.googleAIStudioCredentialStorageState, .stored)
 
         store.failure = .unavailable
-        XCTAssertFalse(viewModel.setGoogleAIStudioAPIKey(nil))
+        do { let result = await viewModel.setGoogleAIStudioAPIKey(nil); XCTAssertFalse(result) }
         XCTAssertEqual(viewModel.settings.googleAIStudioAPIKey, "retry-key")
         XCTAssertEqual(viewModel.googleAIStudioCredentialStorageState, .unavailable)
 
         store.failure = nil
-        XCTAssertTrue(viewModel.setGoogleAIStudioAPIKey(nil))
+        do { let result = await viewModel.setGoogleAIStudioAPIKey(nil); XCTAssertTrue(result) }
         XCTAssertEqual(viewModel.settings.googleAIStudioAPIKey, nil)
         XCTAssertEqual(store.storedAPIKey, nil)
         XCTAssertEqual(viewModel.googleAIStudioCredentialStorageState, .absent)
@@ -194,7 +252,7 @@ final class AppCredentialMigrationTests: XCTestCase {
         await viewModel.waitForCredentialLoading()
 
         store.failure = nil
-        XCTAssertFalse(viewModel.setGoogleAIStudioAPIKey(nil))
+        do { let result = await viewModel.setGoogleAIStudioAPIKey(nil); XCTAssertFalse(result) }
 
         XCTAssertEqual(store.storedAPIKey, "settings-legacy-secret")
         XCTAssertFalse(store.saveRequests.contains(.delete))
@@ -223,7 +281,7 @@ final class AppCredentialMigrationTests: XCTestCase {
         await viewModel.waitForCredentialLoading()
 
         store.failure = nil
-        XCTAssertFalse(viewModel.resetSettings(keepGlossaries: true))
+        do { let result = await viewModel.resetSettings(keepGlossaries: true); XCTAssertFalse(result) }
 
         XCTAssertEqual(store.storedAPIKey, "settings-legacy-secret")
         XCTAssertFalse(store.saveRequests.contains(.delete))
@@ -251,7 +309,7 @@ final class AppCredentialMigrationTests: XCTestCase {
         await viewModel.waitForCredentialLoading()
 
         store.failNextSaveAfterMutation = true
-        XCTAssertFalse(viewModel.setGoogleAIStudioAPIKey(nil))
+        do { let result = await viewModel.setGoogleAIStudioAPIKey(nil); XCTAssertFalse(result) }
 
         XCTAssertEqual(store.storedAPIKey, "existing-key")
         XCTAssertEqual(
@@ -277,9 +335,7 @@ final class AppCredentialMigrationTests: XCTestCase {
         await viewModel.waitForCredentialLoading()
 
         store.failure = nil
-        XCTAssertFalse(
-            viewModel.setGoogleAIStudioAPIKey("replacement-key")
-        )
+        do { let result = await viewModel.setGoogleAIStudioAPIKey("replacement-key"); XCTAssertFalse(result) }
         XCTAssertEqual(store.storedAPIKey, "replacement-key")
         XCTAssertEqual(viewModel.googleAIStudioCredentialStorageState, .stored)
         XCTAssertTrue(viewModel.hasPendingGoogleAIStudioCredentialMigration)

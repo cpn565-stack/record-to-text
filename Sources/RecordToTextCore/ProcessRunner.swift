@@ -192,6 +192,8 @@ public final class ProcessRunner: @unchecked Sendable {
         stdoutLineHandler: ((String) -> Void)? = nil,
         stderrLineHandler: ((String) -> Void)? = nil
     ) async throws -> ProcessResult {
+        try CloudBudgetContext.check("process")
+        let timeout = try CloudBudgetContext.current.map { try $0.timeout(timeout ?? .greatestFiniteMagnitude, stage: "process") } ?? timeout
         let process = Process()
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
