@@ -810,6 +810,8 @@ public final class HelperASRBackend {
             fileURLWithPath: request.modelCacheDirectory,
             isDirectory: true
         ).appendingPathComponent("hub", isDirectory: true).path
+        // Bundled imports must not add .pyc files to the signed App resources.
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
         environment["PYTHONUNBUFFERED"] = "1"
         environment["PYTHONNOUSERSITE"] = "1"
         environment["PYTHONUTF8"] = "1"
