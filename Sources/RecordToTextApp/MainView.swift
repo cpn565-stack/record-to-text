@@ -907,7 +907,6 @@ private struct JobRowView: View {
                 Text(job.snapshot.engineDisplayName)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
                 if job.resumeFromRecoveryDirectory != nil {
                     Text("檢查點續跑：沿用原後端與模型")
                         .font(.caption2).foregroundStyle(.secondary)
@@ -1100,7 +1099,7 @@ private struct JobRowView: View {
                     Text(status)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
+                        .lineLimit(4)
                 }
 
                 Button("複製除錯資訊") {
@@ -1419,18 +1418,24 @@ private struct RecentJobRow: View {
     }
 }
 
-private enum JobDebugClipboard {
+enum JobDebugClipboard {
     static func copy(_ job: TranscriptionJob) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(dump(job), forType: .string)
     }
 
     static func statusSummary(from lines: [String]) -> String? {
-        let human = lines.filter { !isDebugLine($0) }
-        guard !human.isEmpty else {
-            return nil
+        // Scan from the newest entry and stop after two visible messages.
+        // Bound presentation only; dump(_:) retains the original log verbatim.
+        var human: [String] = []
+        for line in lines.reversed() {
+            guard !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !isDebugLine(line) else { continue }
+            let prefix = String(line.prefix(240))
+            human.append(prefix + (line.dropFirst(240).isEmpty ? "" : "…"))
+            if human.count == 2 { break }
         }
-        return human.suffix(2).joined(separator: "\n")
+        return human.isEmpty ? nil : human.reversed().joined(separator: "\n")
     }
 
     static func isDebugLine(_ line: String) -> Bool {

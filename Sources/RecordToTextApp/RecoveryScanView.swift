@@ -223,7 +223,6 @@ private struct RecoveryScanRow: View {
                 Text(item.detail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
             }
 
             if let source = item.sourcePath {
@@ -232,7 +231,6 @@ private struct RecoveryScanRow: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                     .truncationMode(.middle)
-                    .textSelection(.enabled)
             }
 
             if let sourceSlice = item.sourceSlice {
@@ -246,7 +244,6 @@ private struct RecoveryScanRow: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
                 .truncationMode(.middle)
-                .textSelection(.enabled)
 
             HStack {
                 if item.hasNormalizedWAV {
@@ -273,6 +270,14 @@ private struct RecoveryScanRow: View {
             }
         }
         .padding(.vertical, 4)
+        .contextMenu {
+            Button("複製復原資訊") {
+                let text = [item.summary, item.detail, item.sourcePath, item.directoryPath]
+                    .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n")
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+            }
+        }
     }
 
     private var kindTitle: String {
