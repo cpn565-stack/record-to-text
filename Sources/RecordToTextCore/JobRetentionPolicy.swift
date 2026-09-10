@@ -66,7 +66,7 @@ public enum JobRetentionPolicy {
                 .map(\.id)
         )
         let terminalHistory = jobs.filter {
-            $0.stage.isTerminal && $0.stage != .interrupted
+            $0.stage.isTerminal && $0.stage != .interrupted && !$0.hasPendingGapRecovery
         }
         let terminalIDs = newestJobIDs(
             terminalHistory,
@@ -79,7 +79,7 @@ public enum JobRetentionPolicy {
     public static func isDurableAcrossRestarts(
         _ job: TranscriptionJob
     ) -> Bool {
-        !job.stage.isTerminal || job.stage == .interrupted
+        !job.stage.isTerminal || job.stage == .interrupted || job.hasPendingGapRecovery
     }
 
     private static func newestJobIDs(

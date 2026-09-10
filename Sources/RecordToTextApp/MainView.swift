@@ -142,11 +142,12 @@ struct MainView: View {
                 Text(viewModel.appSubtitle)
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                if viewModel.isGoogleAIStudioCredentialLoading,
-                   viewModel.settings.backendType == .googleAIStudio {
-                    Text("正在載入 AI Studio 設定；工作會在載入後開始，其他功能仍可使用。")
+                if viewModel.isWaitingForStartup {
+                    Text("正在載入啟動資料，完成後會開始")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    Button("取消開始", action: viewModel.cancelPendingStart)
+                        .buttonStyle(.link)
                 }
             }
 
@@ -793,6 +794,7 @@ private struct JobRowView: View {
     @State private var isDeleteJobPresented = false
     @State private var trackedSegment: Int?
     @State private var currentSegmentStartedAt = Date()
+    @State private var cloudResumeIsAvailable = false
 
     var body: some View {
         rowContent
@@ -886,6 +888,11 @@ private struct JobRowView: View {
             logSection
         }
         .onAppear(perform: rememberCurrentSegment)
+        .task(id: job.failure) {
+            let available = await viewModel.cloudResumeAvailability(job)
+            guard !Task.isCancelled else { return }
+            cloudResumeIsAvailable = available
+        }
         .onChange(of: job.progressUnit) { _, _ in
             rememberCurrentSegment()
         }
@@ -1050,7 +1057,7 @@ private struct JobRowView: View {
                             }
                         }
 
-                        if viewModel.canResumeCloudJob(job) {
+                        if cloudResumeIsAvailable {
                             Button(
                                 job.stage == .completed
                                     ? "重送未完成片段"
@@ -1194,6 +1201,9 @@ private struct JobRowView: View {
     }
 
     private var statusSymbol: String {
+        if job.stage == .completed && job.resolvedOutputCompleteness == .hasGaps {
+            return "exclamationmark.triangle.fill"
+        }
         switch job.stage {
         case .completed:
             return "checkmark.circle.fill"
@@ -1209,6 +1219,7 @@ private struct JobRowView: View {
     }
 
     private var statusColor: Color {
+        if job.stage == .completed && job.resolvedOutputCompleteness == .hasGaps { return .orange }
         switch job.stage {
         case .completed:
             return .green
@@ -1273,6 +1284,13 @@ private struct RecentJobRow: View {
                     .font(.subheadline.weight(.medium))
                     .lineLimit(1)
                     .truncationMode(.middle)
+
+                if let reason = summary.outputGapReason {
+                    Text(reason)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .lineLimit(3)
+                }
 
                 HStack(spacing: 7) {
                     Text(summary.statusWithCompletionTime())
@@ -1388,7 +1406,7 @@ private struct RecentJobRow: View {
     }
 
     private var statusSymbol: String {
-        if fileStatus != .available {
+        if fileStatus != .available || (summary.stage == .completed && summary.resolvedOutputCompleteness == .hasGaps) {
             return "exclamationmark.triangle.fill"
         }
         switch summary.stage {
@@ -1404,7 +1422,7 @@ private struct RecentJobRow: View {
     }
 
     private var statusColor: Color {
-        if fileStatus != .available {
+        if fileStatus != .available || (summary.stage == .completed && summary.resolvedOutputCompleteness == .hasGaps) {
             return .orange
         }
         switch summary.stage {

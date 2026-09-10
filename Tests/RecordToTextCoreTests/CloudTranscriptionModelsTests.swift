@@ -154,7 +154,7 @@ final class CloudTranscriptionModelsTests: XCTestCase {
         )
         XCTAssertEqual(
             summary.statusWithCompletionTime(now: now, calendar: calendar),
-            "完成 23:56"
+            "完成（完整性未確認） 23:56"
         )
 
         let yesterdaySummary = RecentJobSummary(
@@ -169,7 +169,7 @@ final class CloudTranscriptionModelsTests: XCTestCase {
         )
         XCTAssertEqual(
             yesterdaySummary.statusWithCompletionTime(now: now, calendar: calendar),
-            "完成 9/2"
+            "完成（完整性未確認） 9/2"
         )
     }
 }

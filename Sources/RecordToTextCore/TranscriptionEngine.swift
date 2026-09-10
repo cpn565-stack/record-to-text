@@ -1405,23 +1405,6 @@ public final class TranscriptionEngine {
         ]
     }
 
-    private func normalizeCompletedCloudSegmentFiles(
-        in manifest: AudioSegmentManifest,
-        roster: SpeakerRoster
-    ) throws {
-        for record in manifest.segments where
-            record.status == .completed
-                || record.status == .completedWithGaps
-        {
-            let url = URL(fileURLWithPath: record.outputPath)
-            let original = try TextFileValidator.readNonEmptyUTF8(at: url)
-            let normalized = roster.normalizingSpeakerLabels(in: original)
-            if normalized != original {
-                try AtomicFileWriter.writeText(normalized, to: url)
-            }
-        }
-    }
-
     private func runCloudPipeline(
         job: TranscriptionJob,
         startedAt: Date,
@@ -1482,7 +1465,9 @@ public final class TranscriptionEngine {
                 silenceAnalysisCache: silenceAnalysisCache
             )
         }
-        var speakerRoster = resumeCheckpoint?.speakerRoster ?? SpeakerRoster()
+        // Rebuild label hints from reusable text, never revive heuristic aliases
+        // inferred by older versions of the app.
+        var speakerRoster = SpeakerRoster()
         let initialTotalSegments = segmentPlan.expectedSegmentCount
         let segmentsDirectory = workingDirectory.appendingPathComponent(
             RecoveryScanner.segmentsDirectoryName,
@@ -1741,15 +1726,8 @@ public final class TranscriptionEngine {
                     segmentIndex: segmentIndex,
                     knownTerms: job.snapshot.terms
                 )
-                let normalizedText = speakerRoster.normalizingSpeakerLabels(
-                    in: validatedText
-                )
                 try budget.commit {
-                try normalizeCompletedCloudSegmentFiles(
-                    in: segmentManifest,
-                    roster: speakerRoster
-                )
-                try AtomicFileWriter.writeText(normalizedText, to: transcriptURL)
+                try AtomicFileWriter.writeText(validatedText, to: transcriptURL)
                 segmentManifest.segments[segmentIndex - 1].cloudMetadata =
                     result.metadata
                 segmentManifest.speakerRoster = speakerRoster
@@ -1954,10 +1932,8 @@ public final class TranscriptionEngine {
             if record.status == .blockedBySafety {
                 return Self.cloudSafetyGapMarker(for: record)
             }
-            return speakerRoster.normalizingSpeakerLabels(
-                in: try TextFileValidator.readNonEmptyUTF8(
-                    at: URL(fileURLWithPath: record.outputPath)
-                )
+            return try TextFileValidator.readNonEmptyUTF8(
+                at: URL(fileURLWithPath: record.outputPath)
             )
         }
         let segmentMetadata = mergeableSegments.compactMap(\.cloudMetadata)

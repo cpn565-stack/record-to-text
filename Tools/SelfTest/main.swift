@@ -1213,12 +1213,12 @@ tests.check(
         )
         let later = "建文：繼續下一題。\n豪哥：好，我補充。"
         roster.observe(transcript: later, segmentIndex: 2)
-        return roster.identities.map(\.canonicalLabel) == ["彭建文", "郝旭烈"]
+        return roster.identities.map(\.canonicalLabel) == ["彭建文", "郝哥", "建文", "豪哥"]
             && roster.normalizingSpeakerLabels(in: later)
-                == "彭建文：繼續下一題。\n郝旭烈：好，我補充。"
-            && roster.promptInstruction?.contains("不要改名") == true
+                == later
+            && roster.promptInstruction?.contains("僅供參考") == true
     }(),
-    "Speaker roster keeps canonical labels across cloud segments"
+    "Speaker roster preserves labels without inferring cross-segment identity"
 )
 
 tests.check(
@@ -1293,8 +1293,8 @@ tests.check(
             modelID: "gemini-3.8-flash",
             glossaryName: nil
         )
-        return todaySummary.statusWithCompletionTime(now: now, calendar: calendar) == "完成 23:56"
-            && yesterdaySummary.statusWithCompletionTime(now: now, calendar: calendar) == "完成 9/2"
+        return todaySummary.statusWithCompletionTime(now: now, calendar: calendar) == "完成（完整性未確認） 23:56"
+            && yesterdaySummary.statusWithCompletionTime(now: now, calendar: calendar) == "完成（完整性未確認） 9/2"
     }(),
     "RecentJobSummary formats completion time as HH:mm for today and M/d for earlier days"
 )

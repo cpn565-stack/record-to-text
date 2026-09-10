@@ -69,6 +69,25 @@ public enum CloudResumeCheckpointError: LocalizedError, Equatable {
 }
 
 public enum CloudResumeCheckpointLoader {
+    /// Read-only presentation check. Execution rechecks against probed audio.
+    public static func containsUsableCheckpoint(
+        for job: TranscriptionJob, paths: ApplicationPaths
+    ) -> Bool {
+        guard job.snapshot.backendType != .localQwen, job.stage.isTerminal,
+              let path = job.failure?.recoveryDirectory,
+              FileManager.default.fileExists(atPath: job.sourcePath) else { return false }
+        let directory = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
+        guard directory.deletingLastPathComponent() == paths.tempRecovery.standardizedFileURL.resolvingSymlinksInPath(),
+              let data = try? Data(contentsOf: directory.appendingPathComponent(RecoveryScanner.segmentManifestFileName)),
+              let manifest = try? JSONDecoder().decode(AudioSegmentManifest.self, from: data),
+              let checkpoint = try? load(recoveryDirectory: directory, job: job,
+                  sourceDuration: manifest.sourceDurationSeconds,
+                  sourceTimeOffset: job.sourceSlice?.startSeconds ?? 0,
+                  maximumSegmentDuration: manifest.maximumSegmentDurationSeconds, paths: paths)
+        else { return false }
+        return job.stage != .completed || checkpoint.reusableSegments.count < checkpoint.plan.expectedSegmentCount
+    }
+
     public static func load(
         recoveryDirectory: URL,
         job: TranscriptionJob,

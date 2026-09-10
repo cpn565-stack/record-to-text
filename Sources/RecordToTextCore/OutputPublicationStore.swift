@@ -39,6 +39,7 @@ public struct OutputPublicationStore: Sendable {
               !output.isEmpty, Self.digest(output) == intent.sha256 else { return nil }
         var recovered = job
         recovered.stage = .completed
+        recovered.outputCompleteness = intent.result.containsSkippedAudio ? .hasGaps : .complete
         recovered.outputPath = intent.result.outputURL.path
         recovered.rawOutputPath = intent.result.rawOutputURL?.path
         recovered.completedAt = intent.completedAt

@@ -193,6 +193,64 @@ private final class CloudSilenceDetectorSpy: SilenceDetectionServicing, @uncheck
 }
 
 final class CloudAdaptiveSegmentationTests: XCTestCase {
+    func testSpeakerLabelsSurviveSegmentsMergeAndLegacyCheckpointResume() async throws {
+        let root = try TestSupport.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = ApplicationPaths(root: root.appendingPathComponent("Support"))
+        try paths.createDirectories()
+        let runtime = RuntimeEnvironment.candidate(paths: paths,
+            settings: AppSettings.defaultValue(developerMode: true), bundledHelperURL: nil)
+        let source = root.appendingPathComponent("voices.wav")
+        try await makeSineAudioFixture(durationSeconds: 4, destinationURL: source, ffmpegURL: runtime.ffmpeg)
+        let first = "講者 1：我是負責這個專案的人員。\n王小明：早安。\n陳小明：你好。"
+        let second = "講者 1：我叫陳大文。\n小明：我補充一下。"
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockAdaptiveCloudURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel(); MockAdaptiveCloudURLProtocol.handler = nil }
+        let backend = GoogleAIStudioBackend(urlSession: session,
+            configuration: .init(apiKey: "mock", modelID: "gemini-3.7-flash"))
+        let engine = TranscriptionEngine(runtime: runtime, paths: paths, googleAIStudioBackend: backend,
+            maximumASRSegmentDuration: 2, silenceDetectionService: CloudSilenceDetectorSpy())
+        let snapshot = JobSnapshot(modelID: "fixture", glossaryID: nil, glossaryName: nil,
+            terms: [], prompt: "忠實轉錄", outputLocationMode: .fixedDirectory,
+            outputDirectory: root.path, keepRawTranscript: false, backendType: .googleAIStudio,
+            googleAIStudioAPIKey: "mock", googleAIStudioModelID: "gemini-3.7-flash",
+            silenceAwareCloudSegmentation: false)
+        let initial = MockAIStudioTransport(responses: [.success(("STOP", first)),
+            .failure(GoogleAIStudioError.requestFailed(statusCode: 400, message: "fixture failure"))])
+        MockAdaptiveCloudURLProtocol.handler = { try initial.handle(request: $0) }
+        let job = TranscriptionJob(sourcePath: source.path, snapshot: snapshot)
+        var recovery: URL?
+        do { _ = try await engine.run(job: job) { _ in }; XCTFail("Expected interruption") }
+        catch let error as PipelineExecutionError { recovery = error.recoveryDirectory }
+        let checkpointDirectory = try XCTUnwrap(recovery)
+        let manifestURL = checkpointDirectory.appendingPathComponent(RecoveryScanner.segmentManifestFileName)
+        var manifest = try JSONDecoder().decode(AudioSegmentManifest.self, from: Data(contentsOf: manifestURL))
+        let savedTranscript = URL(fileURLWithPath: manifest.segments[0].outputPath)
+        let originalBytes = try Data(contentsOf: savedTranscript)
+        XCTAssertTrue(String(decoding: originalBytes, as: UTF8.self).contains(first))
+        manifest.speakerRoster = SpeakerRoster(identities: [SpeakerIdentity(canonicalLabel: "錯誤姓名",
+            aliases: ["講者 1", "小明"], firstSeenSegment: 1, confidence: .explicit)])
+        try JSONEncoder().encode(manifest).write(to: manifestURL)
+        let resumedTransport = MockAIStudioTransport(responses: [.success(("STOP", second))])
+        MockAdaptiveCloudURLProtocol.handler = { try resumedTransport.handle(request: $0) }
+        let resumed = TranscriptionJob(sourcePath: source.path, snapshot: snapshot,
+            resumeFromRecoveryDirectory: checkpointDirectory.path)
+        // Keep checkpoint during this verification, as if durable completion is delayed.
+        let result = try await engine.run(job: resumed, persistCompletion: { _ in false }) { _ in }
+        let text = try String(contentsOf: result.outputURL, encoding: .utf8)
+        XCTAssertTrue(text.contains(first), text)
+        XCTAssertTrue(text.contains(second))
+        XCTAssertFalse(text.contains("錯誤姓名"))
+        XCTAssertEqual(resumedTransport.recordedGenerateRequests.count, 1)
+        XCTAssertEqual(try Data(contentsOf: savedTranscript), originalBytes)
+        let request = try XCTUnwrap(resumedTransport.recordedGenerateRequests.first?.httpBody)
+        XCTAssertFalse(String(decoding: request, as: UTF8.self).contains("錯誤姓名"))
+        let work = FileManager.default.temporaryDirectory.appendingPathComponent("record-to-text").appendingPathComponent(resumed.id.uuidString)
+        try? FileManager.default.removeItem(at: work)
+    }
+
     func testNetworkRetryReusesUploadedFile() async throws {
         let transport = MockAIStudioTransport(responses: [
             .failure(URLError(.networkConnectionLost)),

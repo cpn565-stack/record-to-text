@@ -903,6 +903,18 @@ public struct JobFailure: Codable, Equatable, Sendable {
     }
 }
 
+public enum OutputCompleteness: String, Codable, Equatable, Sendable {
+    case complete, hasGaps, unknown
+
+    public var completionLabel: String {
+        switch self {
+        case .complete: return "完成"
+        case .hasGaps: return "完成（含缺口）"
+        case .unknown: return "完成（完整性未確認）"
+        }
+    }
+}
+
 public struct TranscriptionJob: Codable, Equatable, Identifiable, Sendable {
     public let id: UUID
     public let sourcePath: String
@@ -921,6 +933,17 @@ public struct TranscriptionJob: Codable, Equatable, Identifiable, Sendable {
     public var logLines: [String]
     public var cloudSegmentMetadata: [CloudTranscriptionMetadata]?
     public var resumeFromRecoveryDirectory: String?
+    /// Optional for compatibility with ledgers written before completeness existed.
+    public var outputCompleteness: OutputCompleteness?
+
+    public var resolvedOutputCompleteness: OutputCompleteness {
+        outputCompleteness ?? (stage == .completed && failure?.stage == .completed ? .hasGaps : .unknown)
+    }
+
+    public var hasPendingGapRecovery: Bool {
+        stage == .completed && resolvedOutputCompleteness == .hasGaps
+            && failure?.recoverable == true && failure?.recoveryDirectory != nil
+    }
 
     public init(
         id: UUID = UUID(),
@@ -949,6 +972,7 @@ public struct TranscriptionJob: Codable, Equatable, Identifiable, Sendable {
         self.logLines = []
         self.cloudSegmentMetadata = cloudSegmentMetadata
         self.resumeFromRecoveryDirectory = resumeFromRecoveryDirectory
+        self.outputCompleteness = nil
     }
 
     public var sourceURL: URL {
@@ -978,6 +1002,12 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
     public let cloudUsage: CloudUsageMetadata?
     public let cloudRetryCount: Int?
     public let cloudFallbackUsed: Bool?
+    public let outputCompleteness: OutputCompleteness?
+    public let outputGapReason: String?
+
+    public var resolvedOutputCompleteness: OutputCompleteness {
+        outputCompleteness ?? .unknown
+    }
 
     public init(
         id: UUID,
@@ -993,7 +1023,9 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
         effectiveModelIDs: [String]? = nil,
         cloudUsage: CloudUsageMetadata? = nil,
         cloudRetryCount: Int? = nil,
-        cloudFallbackUsed: Bool? = nil
+        cloudFallbackUsed: Bool? = nil,
+        outputCompleteness: OutputCompleteness? = nil,
+        outputGapReason: String? = nil
     ) {
         self.id = id
         self.sourcePath = sourcePath
@@ -1009,6 +1041,8 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
         self.cloudUsage = cloudUsage
         self.cloudRetryCount = cloudRetryCount
         self.cloudFallbackUsed = cloudFallbackUsed
+        self.outputCompleteness = outputCompleteness
+        self.outputGapReason = outputGapReason
     }
 
     public init(job: TranscriptionJob) {
@@ -1036,7 +1070,9 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
                     .totalRetryCount(cloudMetadata),
             cloudFallbackUsed: cloudMetadata.isEmpty
                 ? nil
-                : cloudMetadata.contains(where: \.usedFallback)
+                : cloudMetadata.contains(where: \.usedFallback),
+            outputCompleteness: job.resolvedOutputCompleteness,
+            outputGapReason: job.resolvedOutputCompleteness == .hasGaps ? job.failure?.userMessage : nil
         )
     }
 
@@ -1071,11 +1107,13 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
         now: Date = Date(),
         calendar: Calendar = .current
     ) -> String {
-        guard stage == .completed, let date = completedAt ?? startedAt else {
-            return stage.displayName
+        guard stage == .completed else { return stage.displayName }
+        let label = resolvedOutputCompleteness.completionLabel
+        guard let date = completedAt ?? startedAt else {
+            return label
         }
         let timeString = Self.formatCompletionDate(date, now: now, calendar: calendar)
-        return "完成 \(timeString)"
+        return "\(label) \(timeString)"
     }
 
     public static func formatCompletionDate(
@@ -1102,11 +1140,13 @@ public extension TranscriptionJob {
         now: Date = Date(),
         calendar: Calendar = .current
     ) -> String {
-        guard stage == .completed, let date = completedAt ?? startedAt else {
-            return stage.displayName
+        guard stage == .completed else { return stage.displayName }
+        let label = resolvedOutputCompleteness.completionLabel
+        guard let date = completedAt ?? startedAt else {
+            return label
         }
         let timeString = RecentJobSummary.formatCompletionDate(date, now: now, calendar: calendar)
-        return "完成 \(timeString)"
+        return "\(label) \(timeString)"
     }
 }
 

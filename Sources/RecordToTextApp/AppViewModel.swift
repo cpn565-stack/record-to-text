@@ -106,7 +106,7 @@ final class AppViewModel: ObservableObject {
     private var recoveryScanTask: Task<Void, Never>?
     private var modelCacheRefreshGeneration = 0
     private var recoveryScanGeneration = 0
-    private var manualDrainRequested = false
+    @Published private(set) var manualDrainRequested = false
     private var pendingDuplicateURLs: [URL] = []
     private var promptConsentJobID: UUID?
     private var cancellationRequested = Set<UUID>()
@@ -1125,6 +1125,14 @@ final class AppViewModel: ObservableObject {
         scheduleQueueIfNeeded()
     }
 
+    var isWaitingForStartup: Bool {
+        manualDrainRequested && hasQueuedJobs && isGoogleAIStudioCredentialLoading
+    }
+
+    func cancelPendingStart() {
+        manualDrainRequested = false
+    }
+
     func cancelCurrentJob() {
         guard let activeJobID else {
             return
@@ -1140,6 +1148,7 @@ final class AppViewModel: ObservableObject {
             return
         }
         jobs.removeAll(where: { $0.id == id })
+        if !hasQueuedJobs && activeJobID == nil { manualDrainRequested = false }
         persistJobs()
     }
 
@@ -1182,26 +1191,14 @@ final class AppViewModel: ObservableObject {
     }
 
     func canResumeCloudJob(_ job: TranscriptionJob) -> Bool {
-        guard job.snapshot.backendType != .localQwen,
-              job.stage == .failed
-                || job.stage == .cancelled
-                || job.stage == .interrupted
-                || job.stage == .completed,
-              let recoveryDirectory = job.failure?.recoveryDirectory
-        else {
-            return false
-        }
-        let recoveryURL = URL(
-            fileURLWithPath: recoveryDirectory,
-            isDirectory: true
-        )
-        return fileManager.fileExists(
-            atPath: recoveryURL
-                .appendingPathComponent(
-                    RecoveryScanner.segmentManifestFileName
-                )
-                .path
-        )
+        CloudResumeCheckpointLoader.containsUsableCheckpoint(for: job, paths: paths)
+    }
+
+    func cloudResumeAvailability(_ job: TranscriptionJob) async -> Bool {
+        let paths = paths
+        return await Task.detached(priority: .utility) {
+            CloudResumeCheckpointLoader.containsUsableCheckpoint(for: job, paths: paths)
+        }.value
     }
 
     func canResumeLocalQwenJob(_ job: TranscriptionJob) -> Bool {
@@ -1420,6 +1417,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func stopAllForTermination() async {
+        manualDrainRequested = false
         for index in jobs.indices where jobs[index].stage == .queued {
             jobs[index].stage = .cancelled
             jobs[index].completedAt = Date()
@@ -1742,8 +1740,7 @@ final class AppViewModel: ObservableObject {
             return
         }
 
-        if isGoogleAIStudioCredentialLoading,
-           jobs.first(where: { $0.stage == .queued })?.snapshot.backendType == .googleAIStudio {
+        if isGoogleAIStudioCredentialLoading {
             return
         }
         queueTask = Task { [weak self] in
@@ -1753,11 +1750,11 @@ final class AppViewModel: ObservableObject {
 
     private func drainQueue() async {
         while !Task.isCancelled,
+              manualDrainRequested,
               !queuePausedForEnvironment,
               !queuePausedForPromptConsent,
               let nextJobID = jobs.first(where: { $0.stage == .queued })?.id {
-            if isGoogleAIStudioCredentialLoading,
-               jobs.first(where: { $0.id == nextJobID })?.snapshot.backendType == .googleAIStudio {
+            if isGoogleAIStudioCredentialLoading {
                 queueTask = nil
                 return
             }
@@ -1873,10 +1870,11 @@ final class AppViewModel: ObservableObject {
         persistJobs()
     }
 
-    private func acceptCompletedResult(_ result: PipelineResult, id: UUID) async -> Bool {
+    func acceptCompletedResult(_ result: PipelineResult, id: UUID) async -> Bool {
         let cancellationArrivedTooLate = cancellationRequested.contains(id)
             if let index = jobs.firstIndex(where: { $0.id == id }) {
                 jobs[index].stage = .completed
+                jobs[index].outputCompleteness = result.containsSkippedAudio ? .hasGaps : .complete
                 jobs[index].progressCurrent = nil
                 jobs[index].progressTotal = nil
                 jobs[index].outputPath = result.outputURL.path
@@ -1905,10 +1903,16 @@ final class AppViewModel: ObservableObject {
                         userMessage: "其餘片段已完成；第 \(labels) 段遭 Google 內容安全政策攔截，已在逐字稿標出缺口。",
                         technicalDetails:
                             "Google safety-blocked segments: \(labels)",
-                        recoverable: true,
+                        recoverable: recoveryPath != nil,
                         recoveryDirectory: recoveryPath,
                         partialTranscriptPath: partialPath
                     )
+                } else if result.containsSkippedAudio {
+                    jobs[index].failure = JobFailure(stage: .completed,
+                        userMessage: "稿件含因 token 上限跳過的音訊；請查看逐字稿中的缺口標記。",
+                        technicalDetails: "Local transcription completed with token-limit gaps.",
+                        recoverable: result.recoveryDirectory != nil,
+                        recoveryDirectory: result.recoveryDirectory?.path)
                 } else {
                     jobs[index].failure = nil
                 }
@@ -2490,8 +2494,10 @@ final class AppViewModel: ObservableObject {
     private func performCompletionActions(for job: TranscriptionJob) {
         if settings.showNotificationWhenCompleted {
             let content = UNMutableNotificationContent()
-            content.title = "轉錄完成"
-            content.body = "\(job.displayName) 已產生台灣繁體文字檔。"
+            content.title = "轉錄\(job.resolvedOutputCompleteness.completionLabel)"
+            content.body = job.resolvedOutputCompleteness == .hasGaps
+                ? "\(job.displayName) 已產生文字檔，但含缺口，請查看工作紀錄。"
+                : "\(job.displayName) 已產生台灣繁體文字檔。"
             content.sound = .default
             let request = UNNotificationRequest(
                 identifier: job.id.uuidString,
