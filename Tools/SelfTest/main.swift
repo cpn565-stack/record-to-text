@@ -1293,8 +1293,8 @@ tests.check(
             modelID: "gemini-3.8-flash",
             glossaryName: nil
         )
-        return todaySummary.statusWithCompletionTime(now: now, calendar: calendar) == "完成（完整性未確認） 23:56"
-            && yesterdaySummary.statusWithCompletionTime(now: now, calendar: calendar) == "完成（完整性未確認） 9/2"
+        return todaySummary.statusWithCompletionTime(now: now, calendar: calendar) == "完成 23:56"
+            && yesterdaySummary.statusWithCompletionTime(now: now, calendar: calendar) == "完成 9/2"
     }(),
     "RecentJobSummary formats completion time as HH:mm for today and M/d for earlier days"
 )

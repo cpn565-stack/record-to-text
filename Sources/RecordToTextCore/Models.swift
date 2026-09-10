@@ -910,7 +910,7 @@ public enum OutputCompleteness: String, Codable, Equatable, Sendable {
         switch self {
         case .complete: return "完成"
         case .hasGaps: return "完成（含缺口）"
-        case .unknown: return "完成（完整性未確認）"
+        case .unknown: return "完成"
         }
     }
 }

@@ -97,7 +97,7 @@ final class OutputCompletenessTests: XCTestCase {
             stage: .completed, startedAt: nil, completedAt: nil, modelID: "fixture", glossaryName: nil)
         let restored = try JSONDecoder().decode(RecentJobSummary.self, from: JSONEncoder().encode(summary))
         XCTAssertEqual(restored.resolvedOutputCompleteness, .unknown)
-        XCTAssertEqual(restored.statusWithCompletionTime(), "完成（完整性未確認）")
+        XCTAssertEqual(restored.statusWithCompletionTime(), "完成")
     }
 
     func testPublicationRecoveryPreservesCompleteness() throws {
