@@ -296,6 +296,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             }
 
             let fallbackModel = "gemini-3.6-flash"
+            CloudDiagnosticContext.current?.retry(.modelFallback)
             let reason = error.localizedDescription
             logger?(
                 "warning",
@@ -511,6 +512,12 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                     retryAfterSeconds: retryAfter
                 )
                 try CloudBudgetContext.validateBackoff(seconds: delay)
+                let diagnosticReason: CloudRetryReason
+                if error as? VertexAIError == .emptyCompletedResponse { diagnosticReason = .emptyResponse }
+                else if isNetworkFailure { diagnosticReason = .network }
+                else if case .rateLimited = error as? VertexAIError { diagnosticReason = .rateLimited }
+                else { diagnosticReason = .serverError }
+                CloudDiagnosticContext.current?.retry(diagnosticReason)
                 let reason = error as? VertexAIError == .emptyCompletedResponse
                     ? "回報 STOP 但沒有逐字稿文字，將沿用同一模型與音訊重試"
                     : isNetworkFailure ? "網路暫時中斷" : "暫時忙碌"
@@ -742,6 +749,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
 
         // 若遇 401 Token 過期，自動刷新並重試一次
         if httpResponse.statusCode == 401 {
+            CloudDiagnosticContext.current?.retry(.authenticationRefresh)
             authService.invalidateToken()
             do {
                 let freshToken = try await CloudBudgetContext.perform(stage: "auth") { try await authService.getAccessToken(forceRefresh: true) }
@@ -828,6 +836,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             return (data, httpResponse)
         } catch {
             if GeminiTransportHelper.isPOSIXMessageTooLarge(error) {
+                CloudDiagnosticContext.current?.retry(.transportReset)
                 logger?("info", "本機傳輸通道失敗（POSIX 40），正改用全新連線 (TCP/Ephemeral) 重試，非音檔時長問題。")
                 let retrySession = GeminiTransportHelper.makeEphemeralRetrySession(protocolClasses: session.configuration.protocolClasses)
                 // The retry session owns a connection pool; release it as soon

@@ -45,6 +45,7 @@ public struct OutputPublicationStore: Sendable {
         recovered.completedAt = intent.completedAt
         recovered.progressCurrent = nil; recovered.progressTotal = nil; recovered.progressUnit = nil
         recovered.cloudSegmentMetadata = intent.result.cloudSegmentMetadata
+        recovered.cloudDiagnostics = intent.result.cloudDiagnostics
         recovered.failure = nil
         if intent.result.containsSkippedAudio {
             recovered.failure = JobFailure(stage: .completed,

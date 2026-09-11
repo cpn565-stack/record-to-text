@@ -244,9 +244,17 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
         XCTAssertTrue(text.contains(second))
         XCTAssertFalse(text.contains("錯誤姓名"))
         XCTAssertEqual(resumedTransport.recordedGenerateRequests.count, 1)
+        let diagnostics = try XCTUnwrap(result.cloudDiagnostics)
+        XCTAssertEqual(diagnostics.segments.count, 2)
+        XCTAssertTrue(diagnostics.segments[0].reusedFromCheckpoint)
+        XCTAssertFalse(diagnostics.segments[1].reusedFromCheckpoint)
+        XCTAssertNotNil(diagnostics.timestampNotice)
+        XCTAssertTrue(diagnostics.segments.allSatisfy { $0.timestampReview?.needsReview == true })
         XCTAssertEqual(try Data(contentsOf: savedTranscript), originalBytes)
         let request = try XCTUnwrap(resumedTransport.recordedGenerateRequests.first?.httpBody)
         XCTAssertFalse(String(decoding: request, as: UTF8.self).contains("錯誤姓名"))
+        // Timestamp notices must not turn into apparent speaker identities.
+        XCTAssertFalse(String(decoding: request, as: UTF8.self).contains("- [時間標記提示"))
         let work = FileManager.default.temporaryDirectory.appendingPathComponent("record-to-text").appendingPathComponent(resumed.id.uuidString)
         try? FileManager.default.removeItem(at: work)
     }
@@ -264,11 +272,18 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
         defer { session.invalidateAndCancel() }
         let backend = GoogleAIStudioBackend(urlSession: session,
             configuration: .init(apiKey: "mock", modelID: "gemini-3.8-flash"))
-        let text = try await backend.transcribe(audioData: Data("audio".utf8))
+        let collector = CloudDiagnosticCollector()
+        let text = try await CloudDiagnosticContext.$current.withValue(collector) {
+            try await backend.transcribe(audioData: Data("audio".utf8))
+        }
         XCTAssertEqual(text, "完整逐字稿")
         XCTAssertEqual(transport.recordedGenerateRequests.count, 2)
         XCTAssertEqual(transport.createdFiles.count, 1)
         XCTAssertEqual(transport.deletedFiles.count, 1)
+        let diagnostic = collector.snapshot(start: 0, end: 4, outcome: .completed, preparation: nil, cloud: nil)
+        XCTAssertEqual(diagnostic.retryReasons, [.network])
+        XCTAssertTrue(diagnostic.stageTimings.contains { $0.stage == .backoff && $0.seconds > 0 })
+        XCTAssertTrue(diagnostic.stageTimings.contains { $0.stage == .generation && $0.seconds > 0 })
     }
 
     func testBudgetStopsNetworkAndServerRetriesBeforeFallback() async throws {
@@ -423,7 +438,11 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
         try await assertAdaptiveRecovery(parentTruncatedText: "截斷", completionDurable: false)
     }
 
-    private func assertAdaptiveRecovery(parentTruncatedText: String, expireRight: Bool = false, completionDurable: Bool = true) async throws {
+    func testTimestampRepairUsesActualChildBoundsWithoutExtraCloudRequests() async throws {
+        try await assertAdaptiveRecovery(parentTruncatedText: "截斷", timestampAnomalies: true)
+    }
+
+    private func assertAdaptiveRecovery(parentTruncatedText: String, expireRight: Bool = false, completionDurable: Bool = true, timestampAnomalies: Bool = false) async throws {
         let root = try TestSupport.makeTemporaryDirectory()
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
 
@@ -450,8 +469,8 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
             ffmpegURL: candidate.ffmpeg
         )
 
-        let leftChildText = "[00:00 - 00:02]\n講者 1：左子段完整稿。"
-        let rightChildText = "[00:02 - 00:04]\n講者 1：右子段完整稿。"
+        let leftChildText = timestampAnomalies ? "講者 1：左子段完整稿。" : "[00:00 - 00:02]\n講者 1：左子段完整稿。"
+        let rightChildText = timestampAnomalies ? "[00:02 - 05:02]\n講者 1：右子段完整稿。" : "[00:02 - 00:04]\n講者 1：右子段完整稿。"
 
         let transport = MockAIStudioTransport(responses: [
             .success((finishReason: "MAX_TOKENS", text: parentTruncatedText)),
@@ -568,11 +587,29 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
         // 3. Assert result properties
         XCTAssertFalse(result.containsSkippedAudio)
         XCTAssertTrue(FileManager.default.fileExists(atPath: result.outputURL.path))
+        let diagnostics = try XCTUnwrap(result.cloudDiagnostics)
+        XCTAssertEqual(diagnostics.segments.map(\.outcome), [.split, .completed, .completed])
+        XCTAssertTrue(diagnostics.segments.allSatisfy { ($0.cloudSeconds ?? 0) > 0 })
+        XCTAssertTrue(diagnostics.segments.allSatisfy { ($0.preparationSeconds ?? 0) > 0 })
+        if timestampAnomalies {
+            XCTAssertEqual(diagnostics.segments[1].timestampReview?.disposition, .segmentRangeOnly)
+            XCTAssertEqual(diagnostics.segments[2].timestampReview?.disposition, .boundsCorrected)
+            XCTAssertNotNil(diagnostics.timestampNotice)
+        } else {
+            XCTAssertNil(diagnostics.timestampNotice)
+        }
 
         // 4. Assert final transcript content
         let finalContent = try String(contentsOf: result.outputURL, encoding: .utf8)
         XCTAssertTrue(finalContent.contains("左子段完整稿"))
         XCTAssertTrue(finalContent.contains("右子段完整稿"))
+        if timestampAnomalies {
+            XCTAssertTrue(finalContent.contains(TranscriptTimestampValidator.reviewNotice))
+            XCTAssertTrue(finalContent.contains("[00:02 - 00:04]"))
+            XCTAssertFalse(finalContent.contains("05:02"))
+            let lastBody = try XCTUnwrap(transport.recordedGenerateRequests.last?.httpBody)
+            XCTAssertTrue(String(decoding: lastBody, as: UTF8.self).contains("[00:02 - 00:04]"))
+        }
         if !parentTruncatedText.isEmpty {
             XCTAssertFalse(finalContent.contains(parentTruncatedText), "Parent truncated text must NOT enter final transcript")
         }

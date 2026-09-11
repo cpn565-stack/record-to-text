@@ -1054,12 +1054,13 @@ public final class TranscriptionEngine {
             modelDisplay: modelDisplay,
             update: update,
             silenceAnalysisCache: silenceAnalysisCache
-        ) { audioData, timeOffset, segmentLabel, speakerRoster in
+        ) { audioData, timeOffset, timeEnd, segmentLabel, speakerRoster in
             try await self.transcribeGoogleAIStudioWithStatus(
                 audioData: audioData,
                 job: job,
                 modelDisplay: "\(modelDisplay)\(segmentLabel)",
                 timeOffset: timeOffset,
+                timeEnd: timeEnd,
                 speakerRoster: speakerRoster,
                 workingDirectory: workingDirectory,
                 update: update
@@ -1072,6 +1073,7 @@ public final class TranscriptionEngine {
         job: TranscriptionJob,
         modelDisplay: String,
         timeOffset: Double,
+        timeEnd: Double,
         speakerRoster: SpeakerRoster,
         workingDirectory: URL? = nil,
         update: @escaping (PipelineUpdate) -> Void
@@ -1086,9 +1088,9 @@ public final class TranscriptionEngine {
                 mimeType: "audio/mp3",
                 terms: job.snapshot.terms,
                 customPrompt:
-                    GeminiTranscriptPrompt.promptByAppendingSpeakerContinuity(
-                        job.snapshot.prompt,
-                        roster: speakerRoster
+                    GeminiTranscriptPrompt.promptByAppendingTimeBounds(
+                        GeminiTranscriptPrompt.promptByAppendingSpeakerContinuity(job.snapshot.prompt, roster: speakerRoster),
+                        startSeconds: timeOffset, endSeconds: timeEnd
                     ),
                 timeOffsetSeconds: timeOffset,
                 workingDirectory: workingDirectory,
@@ -1171,12 +1173,13 @@ public final class TranscriptionEngine {
                     update: update
                 )
             },
-            transcribe: { audioData, timeOffset, segmentLabel, speakerRoster in
+            transcribe: { audioData, timeOffset, timeEnd, segmentLabel, speakerRoster in
                 try await self.transcribeVertexWithStatus(
                     audioData: audioData,
                     job: job,
                     modelDisplay: "\(modelDisplay)\(segmentLabel)",
                     timeOffset: timeOffset,
+                    timeEnd: timeEnd,
                     speakerRoster: speakerRoster,
                     workingDirectory: workingDirectory,
                     update: update
@@ -1190,6 +1193,7 @@ public final class TranscriptionEngine {
         job: TranscriptionJob,
         modelDisplay: String,
         timeOffset: Double,
+        timeEnd: Double,
         speakerRoster: SpeakerRoster,
         workingDirectory: URL? = nil,
         update: @escaping (PipelineUpdate) -> Void
@@ -1204,9 +1208,9 @@ public final class TranscriptionEngine {
                 mimeType: "audio/mp3",
                 terms: job.snapshot.terms,
                 customPrompt:
-                    GeminiTranscriptPrompt.promptByAppendingSpeakerContinuity(
-                        job.snapshot.prompt,
-                        roster: speakerRoster
+                    GeminiTranscriptPrompt.promptByAppendingTimeBounds(
+                        GeminiTranscriptPrompt.promptByAppendingSpeakerContinuity(job.snapshot.prompt, roster: speakerRoster),
+                        startSeconds: timeOffset, endSeconds: timeEnd
                     ),
                 timeOffsetSeconds: timeOffset,
                 workingDirectory: workingDirectory,
@@ -1421,6 +1425,7 @@ public final class TranscriptionEngine {
         transcribe: (
             _ audioData: Data,
             _ timeOffset: Double,
+            _ timeEnd: Double,
             _ segmentLabel: String,
             _ speakerRoster: SpeakerRoster
         ) async throws -> CloudTranscriptionResult
@@ -1520,6 +1525,11 @@ public final class TranscriptionEngine {
             speakerRoster: speakerRoster
         )
         if let resumeCheckpoint {
+            segmentManifest.discardedDiagnostics = resumeCheckpoint.discardedDiagnostics.map {
+                var diagnostic = $0
+                diagnostic.reusedFromCheckpoint = true
+                return diagnostic
+            }
             for segmentIndex in resumeCheckpoint.reusableSegments.keys.sorted() {
                 guard let reusable = resumeCheckpoint.reusableSegments[segmentIndex]
                 else {
@@ -1532,10 +1542,17 @@ public final class TranscriptionEngine {
                     fileURLWithPath:
                         segmentManifest.segments[segmentIndex - 1].outputPath
                 )
-                try AtomicFileWriter.writeText(
-                    reusable.transcript,
-                    to: destination
-                )
+                let record = segmentManifest.segments[segmentIndex - 1]
+                let checked = TranscriptTimestampValidator.validate(text: reusable.transcript,
+                    startSeconds: record.startSeconds, endSeconds: record.endSeconds)
+                try AtomicFileWriter.writeText(checked.text, to: destination)
+                var diagnostic = reusable.diagnostic ?? CloudSegmentDiagnostic(
+                    startSeconds: record.startSeconds, endSeconds: record.endSeconds, outcome: .completed)
+                diagnostic.reusedFromCheckpoint = true
+                if checked.review.needsReview || diagnostic.timestampReview == nil {
+                    diagnostic.timestampReview = checked.review
+                }
+                segmentManifest.segments[segmentIndex - 1].diagnostic = diagnostic
                 segmentManifest.segments[segmentIndex - 1].status = reusable.status
                 segmentManifest.segments[segmentIndex - 1].completedEventCount = 1
                 segmentManifest.segments[segmentIndex - 1].failureMessage = nil
@@ -1543,7 +1560,7 @@ public final class TranscriptionEngine {
                     reusable.metadata
                 segmentManifest.segments[segmentIndex - 1].reusedFromCheckpoint = true
                 speakerRoster.observe(
-                    transcript: reusable.transcript,
+                    transcript: checked.text,
                     segmentIndex: segmentIndex,
                     knownTerms: job.snapshot.terms
                 )
@@ -1621,6 +1638,10 @@ public final class TranscriptionEngine {
                 update(.log(level: "info", message: "budget created root=\(rootID) limit=\(cloudSegmentBudgetLimit.secondsValue) resumed=\(resumeCheckpoint != nil)；續跑重新計時。"))
             }
             budget.setSegment(index: segmentIndex, depth: record.splitDepth ?? 0)
+            let diagnosticCollector = CloudDiagnosticCollector()
+            let preparationStart = ContinuousClock.now
+            var preparationSeconds: Double?
+            var cloudSeconds: Double?
             do {
                 try budget.checkRemaining(stage: "extract")
                 currentStage.set(.convertingAudio)
@@ -1709,18 +1730,40 @@ public final class TranscriptionEngine {
                 )
                 try writeSegmentManifest(segmentManifest, to: segmentManifestURL)
 
-                let result = try await CloudBudgetContext.$current.withValue(budget) {
-                    try budget.checkRemaining(stage: "transcribe")
-                    return try await transcribe(
-                        try Data(contentsOf: audioURL), absoluteStart, segmentLabel, speakerRoster
-                    )
+                preparationSeconds = preparationStart.duration(to: .now).secondsValue
+                let cloudStart = ContinuousClock.now
+                let result: CloudTranscriptionResult
+                do {
+                    result = try await CloudDiagnosticContext.$current.withValue(diagnosticCollector) {
+                        try await CloudBudgetContext.$current.withValue(budget) {
+                            try budget.checkRemaining(stage: "transcribe")
+                            return try await transcribe(
+                                try Data(contentsOf: audioURL), absoluteStart, record.endSeconds, segmentLabel, speakerRoster
+                            )
+                        }
+                    }
+                } catch {
+                    cloudSeconds = cloudStart.duration(to: .now).secondsValue
+                    throw error
                 }
+                cloudSeconds = cloudStart.duration(to: .now).secondsValue
                 try budget.checkRemaining(stage: "validate")
-                let validatedText = try OutputContractValidator.validate(
+                let contractText = try OutputContractValidator.validate(
                     text: result.text,
                     path: transcriptURL.path,
                     prompt: job.snapshot.prompt
                 )
+                let checked = TranscriptTimestampValidator.validate(text: contractText,
+                    startSeconds: record.startSeconds, endSeconds: record.endSeconds)
+                let validatedText = checked.text
+                segmentManifest.segments[segmentIndex - 1].diagnostic = diagnosticCollector.snapshot(
+                    start: record.startSeconds, end: record.endSeconds, outcome: .completed,
+                    preparation: preparationSeconds, cloud: cloudSeconds, review: checked.review)
+                if checked.review.needsReview {
+                    update(.warning(code: "timestamp_review", message: "第 \(segmentIndex) 段的段內時間待核對；全文保留，已改標實際音訊範圍。"))
+                } else if checked.review.disposition == .boundsCorrected {
+                    update(.log(level: "info", message: "第 \(segmentIndex) 段的時間標記已校正至實際音訊起訖。"))
+                }
                 speakerRoster.observe(
                     transcript: validatedText,
                     segmentIndex: segmentIndex,
@@ -1793,6 +1836,9 @@ public final class TranscriptionEngine {
                        segmentsDirectory: segmentsDirectory
                    )
                 {
+                    let diagnostic = diagnosticCollector.snapshot(start: record.startSeconds,
+                        end: record.endSeconds, outcome: .split, preparation: preparationSeconds, cloud: cloudSeconds)
+                    segmentManifest.discardedDiagnostics = (segmentManifest.discardedDiagnostics ?? []) + [diagnostic]
                     try segmentManifest.replaceSegment(
                         segmentIndex: segmentIndex,
                         with: children
@@ -1876,6 +1922,9 @@ public final class TranscriptionEngine {
                 throw CancellationError()
             } catch {
                 if Self.isExplicitGoogleSafetyBlock(error) {
+                    segmentManifest.segments[segmentIndex - 1].diagnostic = diagnosticCollector.snapshot(
+                        start: record.startSeconds, end: record.endSeconds, outcome: .blocked,
+                        preparation: preparationSeconds, cloud: cloudSeconds)
                     try? segmentManifest.mark(
                         segmentIndex: segmentIndex,
                         status: .blockedBySafety,
@@ -1923,6 +1972,7 @@ public final class TranscriptionEngine {
             }
         }
 
+        let postprocessingStart = ContinuousClock.now
         let mergeableSegments = try segmentManifest
             .validatedSegmentsAllowingSafetyBlocks()
         let blockedSegments = mergeableSegments.filter {
@@ -2028,6 +2078,9 @@ public final class TranscriptionEngine {
                 unit: "postprocessing|\(mergeableSegments.count)|\(mergeableSegments.count)"
             )
         )
+        let cloudDiagnostics = CloudJobDiagnostics(audioDurationSeconds: metadata.duration,
+            segments: (segmentManifest.discardedDiagnostics ?? []) + mergeableSegments.compactMap(\.diagnostic),
+            postprocessingSeconds: postprocessingStart.duration(to: .now).secondsValue)
         let finalOutputURL = try writeUniqueText(
             finalTranscribedText,
             sourceURL: sourceURL,
@@ -2037,7 +2090,7 @@ public final class TranscriptionEngine {
                 sourceSlice: job.sourceSlice
             ),
             publicationJob: job,
-            publicationResult: { .init(outputURL: $0, rawOutputURL: nil, duration: Date().timeIntervalSince(startedAt), containsSkippedAudio: !blockedSegments.isEmpty, cloudSegmentMetadata: segmentMetadata, incompleteCloudSegmentIndices: blockedSegments.map(\.segmentIndex), recoveryDirectory: gapRecoveryDirectory) }
+            publicationResult: { .init(outputURL: $0, rawOutputURL: nil, duration: Date().timeIntervalSince(startedAt), containsSkippedAudio: !blockedSegments.isEmpty, cloudSegmentMetadata: segmentMetadata, incompleteCloudSegmentIndices: blockedSegments.map(\.segmentIndex), recoveryDirectory: gapRecoveryDirectory, cloudDiagnostics: cloudDiagnostics) }
         )
 
         update(
@@ -2056,7 +2109,8 @@ public final class TranscriptionEngine {
             containsSkippedAudio: !blockedSegments.isEmpty,
             cloudSegmentMetadata: segmentMetadata,
             incompleteCloudSegmentIndices: blockedSegments.map(\.segmentIndex),
-            recoveryDirectory: gapRecoveryDirectory
+            recoveryDirectory: gapRecoveryDirectory,
+            cloudDiagnostics: cloudDiagnostics
         )
     }
 

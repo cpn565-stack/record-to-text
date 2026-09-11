@@ -932,6 +932,7 @@ public struct TranscriptionJob: Codable, Equatable, Identifiable, Sendable {
     public var failure: JobFailure?
     public var logLines: [String]
     public var cloudSegmentMetadata: [CloudTranscriptionMetadata]?
+    public var cloudDiagnostics: CloudJobDiagnostics?
     public var resumeFromRecoveryDirectory: String?
     /// Optional for compatibility with ledgers written before completeness existed.
     public var outputCompleteness: OutputCompleteness?
@@ -971,6 +972,7 @@ public struct TranscriptionJob: Codable, Equatable, Identifiable, Sendable {
         self.failure = nil
         self.logLines = []
         self.cloudSegmentMetadata = cloudSegmentMetadata
+        self.cloudDiagnostics = nil
         self.resumeFromRecoveryDirectory = resumeFromRecoveryDirectory
         self.outputCompleteness = nil
     }
@@ -1004,6 +1006,7 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
     public let cloudFallbackUsed: Bool?
     public let outputCompleteness: OutputCompleteness?
     public let outputGapReason: String?
+    public let cloudDiagnostics: CloudJobDiagnostics?
 
     public var resolvedOutputCompleteness: OutputCompleteness {
         outputCompleteness ?? .unknown
@@ -1025,7 +1028,8 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
         cloudRetryCount: Int? = nil,
         cloudFallbackUsed: Bool? = nil,
         outputCompleteness: OutputCompleteness? = nil,
-        outputGapReason: String? = nil
+        outputGapReason: String? = nil,
+        cloudDiagnostics: CloudJobDiagnostics? = nil
     ) {
         self.id = id
         self.sourcePath = sourcePath
@@ -1043,6 +1047,7 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
         self.cloudFallbackUsed = cloudFallbackUsed
         self.outputCompleteness = outputCompleteness
         self.outputGapReason = outputGapReason
+        self.cloudDiagnostics = cloudDiagnostics
     }
 
     public init(job: TranscriptionJob) {
@@ -1072,7 +1077,8 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
                 ? nil
                 : cloudMetadata.contains(where: \.usedFallback),
             outputCompleteness: job.resolvedOutputCompleteness,
-            outputGapReason: job.resolvedOutputCompleteness == .hasGaps ? job.failure?.userMessage : nil
+            outputGapReason: job.resolvedOutputCompleteness == .hasGaps ? job.failure?.userMessage : nil,
+            cloudDiagnostics: job.cloudDiagnostics
         )
     }
 
@@ -1288,6 +1294,7 @@ public struct PipelineResult: Codable, Equatable, Sendable {
     public let cloudSegmentMetadata: [CloudTranscriptionMetadata]
     public let incompleteCloudSegmentIndices: [Int]
     public let recoveryDirectory: URL?
+    public let cloudDiagnostics: CloudJobDiagnostics?
 
     public init(
         outputURL: URL,
@@ -1296,7 +1303,8 @@ public struct PipelineResult: Codable, Equatable, Sendable {
         containsSkippedAudio: Bool = false,
         cloudSegmentMetadata: [CloudTranscriptionMetadata] = [],
         incompleteCloudSegmentIndices: [Int] = [],
-        recoveryDirectory: URL? = nil
+        recoveryDirectory: URL? = nil,
+        cloudDiagnostics: CloudJobDiagnostics? = nil
     ) {
         self.outputURL = outputURL
         self.rawOutputURL = rawOutputURL
@@ -1305,6 +1313,7 @@ public struct PipelineResult: Codable, Equatable, Sendable {
         self.cloudSegmentMetadata = cloudSegmentMetadata
         self.incompleteCloudSegmentIndices = incompleteCloudSegmentIndices
         self.recoveryDirectory = recoveryDirectory
+        self.cloudDiagnostics = cloudDiagnostics
     }
 }
 

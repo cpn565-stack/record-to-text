@@ -86,9 +86,16 @@ final class VertexAIGeminiBackendTests: XCTestCase {
         let backend = VertexAIGeminiBackend(
             authService: GCloudAuthService(customGCloudPath: fakeGCloudURL.path), urlSession: mockSession,
             configuration: .init(projectID: "mock-project", location: "global", modelID: "gemini-3.8-flash"))
-        let result = try await backend.transcribe(audioData: Data("audio".utf8))
+        let collector = CloudDiagnosticCollector()
+        let result = try await CloudDiagnosticContext.$current.withValue(collector) {
+            try await backend.transcribe(audioData: Data("audio".utf8))
+        }
         XCTAssertEqual(result, "完整逐字稿")
         XCTAssertEqual(requests, 2)
+        let diagnostic = collector.snapshot(start: 0, end: 10, outcome: .completed, preparation: nil, cloud: nil)
+        XCTAssertEqual(diagnostic.retryReasons, [.emptyResponse])
+        XCTAssertTrue(diagnostic.stageTimings.contains { $0.stage == .auth && $0.seconds > 0 })
+        XCTAssertTrue(diagnostic.stageTimings.contains { $0.stage == .backoff && $0.seconds > 0 })
     }
 
     func testRepeatedEmptyStopIsBoundedWithoutModelFallback() async throws {

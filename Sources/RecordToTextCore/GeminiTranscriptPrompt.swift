@@ -84,4 +84,28 @@ public enum GeminiTranscriptPrompt {
             ? instruction
             : "\(trimmed)\n\n\(instruction)"
     }
+
+    public static func promptByAppendingTimeBounds(
+        _ prompt: String, startSeconds: Double, endSeconds: Double
+    ) -> String {
+        guard startSeconds.isFinite, endSeconds.isFinite, startSeconds >= 0,
+              endSeconds > startSeconds, endSeconds < Double(Int.max / 2) else { return prompt }
+        var intervals: [String] = []
+        var cursor = startSeconds
+        // Production audio is bounded to 20 minutes; bound prompt size for other callers.
+        while cursor < endSeconds, intervals.count < 32 {
+            let end = min(cursor + 300, endSeconds)
+            intervals.append(TranscriptTimestampValidator.range(start: cursor, end: end))
+            cursor = end
+        }
+        return """
+        \(prompt)
+
+        【實際音訊範圍】
+        本片段只涵蓋 \(TranscriptTimestampValidator.range(start: startSeconds, end: endSeconds))，此範圍優先於固定五分鐘的示例。最後一個區間必須結束於實際片段終點，不得向後湊滿五分鐘。
+        請依音訊在相應位置依序標註以下區間（話題提早轉換可另細分），不可把多個區間的內容集中在一個標記下：
+        \(intervals.joined(separator: "\n"))
+        時間區間只能標記實際聽到的內容，不得為湊區間補寫對話。
+        """
+    }
 }

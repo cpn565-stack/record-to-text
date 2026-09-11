@@ -294,6 +294,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             }
 
             let fallbackModel = "gemini-3.6-flash"
+            CloudDiagnosticContext.current?.retry(.modelFallback)
             let reason = error.localizedDescription
             logger?(
                 "warning",
@@ -372,6 +373,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                 throw error
             } catch {
                 try CloudBudgetContext.check("upload")
+                CloudDiagnosticContext.current?.retry(.inlineUploadFallback)
                 logger?("warning", "Files API 上傳未成功，降級至串流 Inline Base64 路徑：\(error.localizedDescription)")
             }
         }
@@ -477,6 +479,11 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                     retryAfterSeconds: retryAfter
                 )
                 try CloudBudgetContext.validateBackoff(seconds: delay)
+                let diagnosticReason: CloudRetryReason
+                if isNetworkFailure { diagnosticReason = .network }
+                else if case .rateLimited = error as? GoogleAIStudioError { diagnosticReason = .rateLimited }
+                else { diagnosticReason = .serverError }
+                CloudDiagnosticContext.current?.retry(diagnosticReason)
                 let reason = isNetworkFailure ? "網路暫時中斷" : "暫時忙碌"
                 logger?(
                     "info",
@@ -667,6 +674,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             return (data, httpResponse)
         } catch {
             if GeminiTransportHelper.isPOSIXMessageTooLarge(error) {
+                CloudDiagnosticContext.current?.retry(.transportReset)
                 logger?("info", "本機傳輸通道失敗（POSIX 40），正改用全新連線 (TCP/Ephemeral) 重試，非音檔時長問題。")
                 let retrySession = GeminiTransportHelper.makeEphemeralRetrySession(protocolClasses: session.configuration.protocolClasses)
                 // The retry session owns a connection pool; release it as soon

@@ -1879,6 +1879,7 @@ final class AppViewModel: ObservableObject {
                 jobs[index].progressTotal = nil
                 jobs[index].outputPath = result.outputURL.path
                 jobs[index].rawOutputPath = result.rawOutputURL?.path
+                jobs[index].cloudDiagnostics = result.cloudDiagnostics
                 jobs[index].cloudSegmentMetadata =
                     result.cloudSegmentMetadata.isEmpty
                         ? nil

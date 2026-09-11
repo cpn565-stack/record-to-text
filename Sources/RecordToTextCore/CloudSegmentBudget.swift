@@ -182,6 +182,13 @@ public enum CloudBudgetContext {
         try await perform(stage: "backoff") { try await Task.sleep(for: .seconds(seconds)) }
     }
     public static func perform<T>(stage: String, maximumDuration: Duration? = nil, operation: @escaping () async throws -> T) async throws -> T {
+        let diagnosticStart = ContinuousClock.now
+        let collector = CloudDiagnosticContext.current
+        defer {
+            if let measuredStage = CloudDiagnosticStage(rawValue: stage) {
+                collector?.record(stage: measuredStage, seconds: diagnosticStart.duration(to: .now).secondsValue)
+            }
+        }
         if let current { return try await current.withDeadline(stage: stage, operationLimit: maximumDuration, operation: operation) }
         if let maximumDuration {
             return try await CloudSegmentBudget().withDeadline(stage: stage, operationLimit: maximumDuration, operation: operation)

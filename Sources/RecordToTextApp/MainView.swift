@@ -837,7 +837,7 @@ private struct JobRowView: View {
                     viewModel.retryJob(job.id, usingCurrentSettings: true)
                 }
             }
-            if !job.logLines.isEmpty {
+            if !job.logLines.isEmpty || job.cloudDiagnostics != nil {
                 Button("複製除錯資訊") {
                     JobDebugClipboard.copy(job)
                 }
@@ -885,6 +885,11 @@ private struct JobRowView: View {
             rowHeader
             progressSection
             failureSection
+            if let notice = job.cloudDiagnostics?.timestampNotice {
+                Text(notice)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
             logSection
         }
         .onAppear(perform: rememberCurrentSegment)
@@ -1291,6 +1296,11 @@ private struct RecentJobRow: View {
                         .foregroundStyle(.orange)
                         .lineLimit(3)
                 }
+                if let notice = summary.cloudDiagnostics?.timestampNotice {
+                    Text(notice)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
 
                 HStack(spacing: 7) {
                     Text(summary.statusWithCompletionTime())
@@ -1388,6 +1398,11 @@ private struct RecentJobRow: View {
                     viewModel.retryRecentJob(summary)
                 }
             }
+            if summary.cloudDiagnostics != nil {
+                Button("複製除錯資訊") {
+                    JobDebugClipboard.copy(summary)
+                }
+            }
             Divider()
             Button("從列表刪除", role: .destructive) {
                 isDeletePresented = true
@@ -1437,6 +1452,17 @@ private struct RecentJobRow: View {
 }
 
 enum JobDebugClipboard {
+    static func copy(_ summary: RecentJobSummary) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(dump(summary), forType: .string)
+    }
+
+    static func dump(_ summary: RecentJobSummary) -> String {
+        ["record-to-text 完成工作診斷", "版本：\(bundleVersionLabel)",
+         "工作：\(summary.id.uuidString)",
+         summary.cloudDiagnostics?.debugSummary ?? "（舊工作未保存分段診斷）"].joined(separator: "\n")
+    }
+
     static func copy(_ job: TranscriptionJob) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(dump(job), forType: .string)
@@ -1512,6 +1538,10 @@ enum JobDebugClipboard {
             if retries > 0 {
                 lines.append("重試：\(retries)")
             }
+        }
+        if let diagnostics = job.cloudDiagnostics {
+            lines.append("--- 分段診斷 ---")
+            lines.append(diagnostics.debugSummary)
         }
         lines.append("--- 執行日誌 ---")
         if job.logLines.isEmpty {

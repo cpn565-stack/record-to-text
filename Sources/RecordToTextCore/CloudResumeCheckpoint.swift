@@ -5,17 +5,20 @@ public struct ReusableCloudSegment: Equatable, Sendable {
     public let transcript: String
     public let status: AudioSegmentStatus
     public let metadata: CloudTranscriptionMetadata?
+    public let diagnostic: CloudSegmentDiagnostic?
 
     public init(
         segmentIndex: Int,
         transcript: String,
         status: AudioSegmentStatus,
-        metadata: CloudTranscriptionMetadata?
+        metadata: CloudTranscriptionMetadata?,
+        diagnostic: CloudSegmentDiagnostic? = nil
     ) {
         self.segmentIndex = segmentIndex
         self.transcript = transcript
         self.status = status
         self.metadata = metadata
+        self.diagnostic = diagnostic
     }
 }
 
@@ -24,6 +27,7 @@ public struct CloudResumeCheckpoint: Equatable, Sendable {
     public let plan: AudioSegmentationPlan
     public let reusableSegments: [Int: ReusableCloudSegment]
     public var rootSegmentIDs: [Int: UUID] = [:]
+    public var discardedDiagnostics: [CloudSegmentDiagnostic] = []
     public let splitDepths: [Int: Int]
     public let speakerRoster: SpeakerRoster?
 
@@ -255,7 +259,8 @@ public enum CloudResumeCheckpointLoader {
                 segmentIndex: record.segmentIndex,
                 transcript: transcript,
                 status: record.status,
-                metadata: record.cloudMetadata
+                metadata: record.cloudMetadata,
+                diagnostic: record.diagnostic
             )
         }
 
@@ -283,6 +288,7 @@ public enum CloudResumeCheckpointLoader {
             speakerRoster: manifest.speakerRoster
         )
         checkpoint.rootSegmentIDs = rootSegmentIDs
+        checkpoint.discardedDiagnostics = manifest.discardedDiagnostics ?? []
         return checkpoint
     }
 

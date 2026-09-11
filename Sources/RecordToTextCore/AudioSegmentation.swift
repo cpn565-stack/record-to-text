@@ -73,6 +73,7 @@ public struct AudioSegmentRecord: Codable, Equatable, Sendable {
     public var completedEventCount: Int
     public var failureMessage: String?
     public var cloudMetadata: CloudTranscriptionMetadata?
+    public var diagnostic: CloudSegmentDiagnostic?
     public var reusedFromCheckpoint: Bool?
     public var rootSegmentID: UUID?
     public var deadlineReason: String?
@@ -104,6 +105,7 @@ public struct AudioSegmentRecord: Codable, Equatable, Sendable {
         self.completedEventCount = completedEventCount
         self.failureMessage = failureMessage
         self.cloudMetadata = cloudMetadata
+        self.diagnostic = nil
         self.reusedFromCheckpoint = reusedFromCheckpoint
         self.splitDepth = splitDepth
         self.rootSegmentID = rootSegmentID
@@ -123,6 +125,7 @@ public struct AudioSegmentManifest: Codable, Equatable, Sendable {
     public var expectedSegmentCount: Int
     public var segments: [AudioSegmentRecord]
     public var speakerRoster: SpeakerRoster?
+    public var discardedDiagnostics: [CloudSegmentDiagnostic]?
 
     public init(
         schemaVersion: Int = 1,
@@ -140,6 +143,7 @@ public struct AudioSegmentManifest: Codable, Equatable, Sendable {
         self.expectedSegmentCount = expectedSegmentCount
         self.segments = segments
         self.speakerRoster = speakerRoster
+        self.discardedDiagnostics = nil
     }
 
     public mutating func mark(

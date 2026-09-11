@@ -4,6 +4,20 @@ import XCTest
 
 @MainActor
 final class JobDebugClipboardTests: XCTestCase {
+    func testRecentDiagnosticCopyIsAvailableWithoutLogOrPrivateContent() {
+        let diagnostics = CloudJobDiagnostics(audioDurationSeconds: 10,
+            segments: [.init(startSeconds: 0, endSeconds: 10, outcome: .completed,
+                timestampReview: .init(disposition: .segmentRangeOnly, issues: [.missingIntervals]))],
+            postprocessingSeconds: 0.1)
+        let summary = RecentJobSummary(id: UUID(), sourcePath: "/PRIVATE/source.wav", outputPath: "/PRIVATE/out.txt",
+            stage: .completed, startedAt: nil, completedAt: nil, modelID: "fixture", glossaryName: "PRIVATE-GLOSSARY",
+            cloudDiagnostics: diagnostics)
+        let dump = JobDebugClipboard.dump(summary)
+        XCTAssertTrue(dump.contains("[00:00 - 00:10]"))
+        XCTAssertTrue(dump.contains("segmentRangeOnly"))
+        XCTAssertFalse(dump.contains("PRIVATE"))
+    }
+
     func testSummaryKeepsNewestHumanMessagesInChronologicalOrder() {
         XCTAssertEqual(JobDebugClipboard.statusSummary(from: [
             "舊訊息", "正在準備", "HTTP 200", "", "正在轉錄", "responseId=fixture"
