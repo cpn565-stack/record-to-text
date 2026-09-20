@@ -1,5 +1,7 @@
 # record-to-text v1.0 需求追蹤
 
+> 現況規格入口：[record-to-text 產品暨系統規格書（0.2.1 build 6，2026-09-11）](product-system-spec-2026-09-11.md)。以下保留早期需求追蹤；分段上限、續跑、驗證與交付狀態已有後續變更，請以新版現況規格為準。
+
 本文件是 2026-07-30《Qwen 會議轉錄器 App 產品需求與技術規格書 v1.0》的實作追蹤摘要，不取代原始規格。已確認的規格修正以 [product-decisions.md](product-decisions.md) 為準。
 
 ## 產品定位
