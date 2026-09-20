@@ -165,7 +165,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         if httpResponse.statusCode == 200 {
             return true
         }
-        let errorMsg = parseErrorMessage(from: data)
+        let errorMsg = GeminiResponseParser.errorMessage(from: data)
         switch httpResponse.statusCode {
         case 400, 401, 403:
             // These statuses are how Google reports a rejected key.
@@ -299,46 +299,15 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         workingDirectory: URL?,
         logger: ((_ level: String, _ message: String) -> Void)?
     ) async throws -> CloudTranscriptionResult {
-        do {
-            return try await executeWithRetries(
+        try await GeminiGenerationRetry.run(
+            preferredModelID: preferredModelID, fallbackPolicy: fallbackPolicy,
+            serviceName: "Gemini", logger: logger
+        ) { modelID, retryCount, fallbackReason in
+            return try await self.generateTranscript(
                 requestedModelID: preferredModelID,
-                effectiveModelID: preferredModelID,
-                fallbackReason: nil,
-                priorRetryCount: 0,
-                preparedAudio: preparedAudio,
-                apiKey: apiKey,
-                audioByteCount: audioByteCount,
-                terms: terms,
-                customPrompt: customPrompt,
-                timeOffsetSeconds: timeOffsetSeconds,
-                thinkingLevel: thinkingLevel,
-                workingDirectory: workingDirectory,
-                logger: logger
-            )
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch let error as GoogleAIStudioError {
-            guard
-                fallbackPolicy == .flashOnly,
-                preferredModelID.contains("3.7") || preferredModelID.contains("3.8"),
-                Self.isRetryableServerFailure(error)
-            else {
-                throw error
-            }
-
-            let fallbackModel = "gemini-3.6-flash"
-            CloudDiagnosticContext.current?.retry(.modelFallback)
-            let reason = error.localizedDescription
-            logger?(
-                "warning",
-                "Gemini 重試後仍不可用；依使用者設定改用 \(fallbackModel)。原始原因：\(reason)"
-            )
-            return try await executeWithRetries(
-                requestedModelID: preferredModelID,
-                effectiveModelID: fallbackModel,
-                fallbackReason: reason,
-                priorRetryCount:
-                    GeminiTransportHelper.RetryPolicy.maximumAttempts - 1,
+                effectiveModelID: modelID,
+                retryCount: retryCount,
+                fallbackReason: fallbackReason,
                 preparedAudio: preparedAudio,
                 apiKey: apiKey,
                 audioByteCount: audioByteCount,
@@ -353,15 +322,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
     }
 
     static func isRetryableServerFailure(_ error: GoogleAIStudioError) -> Bool {
-        switch error {
-        case .rateLimited:
-            return true
-        case let .requestFailed(statusCode, _):
-            return GeminiTransportHelper.RetryPolicy
-                .isRetryableStatusCode(statusCode)
-        default:
-            return false
-        }
+        GeminiGenerationRetry.isRetryableServerFailure(error)
     }
 
     private struct PreparedAudio {
@@ -440,105 +401,6 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             return
         }
         await deleteRemoteFileShielded(fileName: fileName, apiKey: apiKey, logger: logger)
-    }
-
-    private func executeWithRetries(
-        requestedModelID: String,
-        effectiveModelID: String,
-        fallbackReason: String?,
-        priorRetryCount: Int,
-        preparedAudio: [String: Any],
-        apiKey: String,
-        audioByteCount: Int,
-        terms: [String],
-        customPrompt: String,
-        timeOffsetSeconds: Double,
-        thinkingLevel: GeminiThinkingLevel,
-        workingDirectory: URL?,
-        logger: ((_ level: String, _ message: String) -> Void)?
-    ) async throws -> CloudTranscriptionResult {
-        let quota = CloudNetworkContext.segmentAttempts?.quota(for: effectiveModelID) ?? CloudRequestAttempts()
-        return try await CloudNetworkContext.$generation.withValue(quota) {
-            let policy = GeminiTransportHelper.RetryPolicy.self
-            CloudDiagnosticContext.current?.setModel(effectiveModelID)
-            var lastError: Error?
-
-            for attempt in 1...policy.maximumAttempts {
-                try CloudBudgetContext.check("generation")
-                if let budget = CloudBudgetContext.current {
-                    logger?("info", "budget root=\(budget.rootSegmentID) model=\(effectiveModelID) attempt=\(attempt) elapsed=\(budget.elapsed().secondsValue) remaining=\(budget.remaining().secondsValue)")
-                }
-                do {
-                    return try await generateTranscript(
-                        requestedModelID: requestedModelID,
-                        effectiveModelID: effectiveModelID,
-                        retryCount: priorRetryCount + attempt - 1,
-                        fallbackReason: fallbackReason,
-                        preparedAudio: preparedAudio,
-                        apiKey: apiKey,
-                        audioByteCount: audioByteCount,
-                        terms: terms,
-                        customPrompt: customPrompt,
-                        timeOffsetSeconds: timeOffsetSeconds,
-                        thinkingLevel: thinkingLevel,
-                        workingDirectory: workingDirectory,
-                        logger: logger
-                    )
-                } catch is CancellationError {
-                    throw CancellationError()
-                } catch {
-                    if Task.isCancelled || GeminiTransportHelper.isNetworkCancellation(error) {
-                        throw CancellationError()
-                    }
-                    CloudDiagnosticContext.current?.failure(error, stage: .generation)
-                    let isNetworkFailure = GeminiTransportHelper.isTransientNetworkFailure(error)
-                    var retryAfter: Double?
-                    var retryable = isNetworkFailure
-                    if let serviceError = error as? GoogleAIStudioError {
-                        switch serviceError {
-                        case let .rateLimited(_, delay):
-                            retryAfter = delay
-                            retryable = true
-                        case let .requestFailed(statusCode, _):
-                            retryable = policy.isRetryableStatusCode(statusCode)
-                        default:
-                            retryable = false
-                        }
-                    }
-                    guard retryable else {
-                        throw error
-                    }
-                    lastError = error
-                    guard attempt < policy.maximumAttempts, quota.count < 4 else {
-                        break
-                    }
-                    let delay = policy.backoffSeconds(
-                        forAttempt: attempt,
-                        retryAfterSeconds: retryAfter
-                    )
-                    try CloudBudgetContext.validateBackoff(seconds: delay)
-                    let diagnosticReason: CloudRetryReason
-                    if isNetworkFailure { diagnosticReason = .network }
-                    else if case .rateLimited = error as? GoogleAIStudioError { diagnosticReason = .rateLimited }
-                    else { diagnosticReason = .serverError }
-                    CloudDiagnosticContext.current?.retry(diagnosticReason)
-                    let reason = isNetworkFailure ? "網路暫時中斷" : "暫時忙碌"
-                    logger?(
-                        "info",
-                        "Gemini \(effectiveModelID) \(reason)，\(String(format: "%.1f", delay)) 秒後進行第 \(attempt + 1) 次嘗試。"
-                    )
-                    try await CloudBudgetContext.backoff(seconds: delay)
-                }
-            }
-
-            if let lastError {
-                throw lastError
-            }
-            throw GoogleAIStudioError.requestFailed(
-                statusCode: 503,
-                message: "伺服器忙碌，重試後仍失敗。"
-            )
-        }
     }
 
     private func generateTranscript(
@@ -659,7 +521,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         )
 
         guard httpResponse.statusCode == 200 else {
-            let errorMsg = parseErrorMessage(from: data)
+            let errorMsg = GeminiResponseParser.errorMessage(from: data)
             if httpResponse.statusCode == 429 {
                 if GeminiTransportHelper.isDailyQuotaExceeded(
                     data: data,
@@ -975,135 +837,12 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         )
     }
 
-    private func parseErrorMessage(from data: Data) -> String {
-        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let errorObj = json["error"] as? [String: Any],
-           let message = errorObj["message"] as? String {
-            return message
-        }
-        return String(decoding: data, as: UTF8.self)
-    }
-
     func parseCandidateText(
         from data: Data,
         httpStatusCode: Int = 200,
         logger: ((_ level: String, _ message: String) -> Void)? = nil
     ) throws -> String {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw GoogleAIStudioError.invalidJSONResponse
-        }
-
-        if let diagnostics = GeminiPromptFeedbackParser.diagnosticsIfBlocked(
-            from: json,
-            httpStatusCode: httpStatusCode
-        ) {
-            logger?("warning", diagnostics.logSummary)
-            throw GoogleAIStudioError.promptBlocked(diagnostics)
-        }
-
-        guard let candidates = json["candidates"] as? [[String: Any]],
-              let firstCandidate = candidates.first else {
-            logger?(
-                "warning",
-                GeminiResponseInventory.summary(
-                    from: json,
-                    reason: "no_candidates",
-                    rawByteCount: data.count
-                )
-            )
-            throw GoogleAIStudioError.emptyResponse
-        }
-
-        guard let finishReason = firstCandidate["finishReason"] as? String,
-              !finishReason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        else {
-            logger?(
-                "warning",
-                GeminiResponseInventory.summary(
-                    from: json,
-                    reason: "missing_finish_reason",
-                    rawByteCount: data.count
-                )
-            )
-            throw GoogleAIStudioError.incompleteResponse(
-                finishReason: "MISSING_FINISH_REASON",
-                message: firstCandidate["finishMessage"] as? String
-            )
-        }
-        let normalizedFinishReason = GeminiTranscriptFinishReason.normalized(finishReason)
-        if GeminiTranscriptFinishReason.isSafetyBlock(normalizedFinishReason) {
-            throw GoogleAIStudioError.prohibitedContent(
-                firstCandidate["finishMessage"] as? String ?? normalizedFinishReason
-            )
-        }
-
-        if !GeminiTranscriptFinishReason.isTruncated(normalizedFinishReason),
-           (firstCandidate["content"] as? [String: Any])?["parts"] as? [[String: Any]] == nil {
-            logger?("warning", GeminiResponseInventory.summary(
-                from: json, reason: "missing_candidate_parts", rawByteCount: data.count
-            ))
-            throw GoogleAIStudioError.emptyResponse
-        }
-        let content = firstCandidate["content"] as? [String: Any]
-        let parts = content?["parts"] as? [[String: Any]] ?? []
-
-        var textChunks: [String] = []
-        for part in parts {
-            if part["thought"] as? Bool == true {
-                continue
-            }
-            if let text = part["text"] as? String {
-                textChunks.append(text)
-            }
-        }
-
-        let combined = textChunks.joined().trimmingCharacters(in: .whitespacesAndNewlines)
-        let sanitized = sanitizeTranscript(combined)
-        if GeminiTranscriptFinishReason.isTruncated(normalizedFinishReason) {
-            logger?(
-                "warning",
-                GeminiResponseInventory.summary(from: json, reason: "MAX_TOKENS", rawByteCount: data.count)
-            )
-            throw CloudOutputTruncatedError(
-                partialText: sanitized,
-                finishMessage: firstCandidate["finishMessage"] as? String
-            )
-        }
-        guard !sanitized.isEmpty else {
-            logger?(
-                "warning",
-                GeminiResponseInventory.summary(
-                    from: json,
-                    reason: "empty_transcript_text",
-                    rawByteCount: data.count
-                )
-            )
-            throw GoogleAIStudioError.emptyResponse
-        }
-
-        guard GeminiTranscriptFinishReason.allowsUsableText(normalizedFinishReason) else {
-            throw GoogleAIStudioError.incompleteResponse(
-                finishReason: normalizedFinishReason,
-                message: firstCandidate["finishMessage"] as? String
-            )
-        }
-        return sanitized
-    }
-
-    private func sanitizeTranscript(_ rawText: String) -> String {
-        var text = rawText
-
-        if let range = text.range(of: "## 📝 完整整理逐字稿") {
-            text = String(text[range.upperBound...])
-        } else if let range = text.range(of: "## 完整整理逐字稿") {
-            text = String(text[range.upperBound...])
-        }
-
-        text = text.replacingOccurrences(of: #"(?m)^[ \t]*#{1,6}[ \t]*(\[\d{2}:\d{2})"#, with: "$1", options: .regularExpression)
-        text = text.replacingOccurrences(of: #"(?m)^[ \t]*#{1,6}[ \t]*"#, with: "", options: .regularExpression)
-        text = text.replacingOccurrences(of: #"\*\*([^*]+)\*\*"#, with: "$1", options: .regularExpression)
-        text = text.replacingOccurrences(of: #"(?m)^[ \t]*---[ \t]*$"#, with: "", options: .regularExpression)
-
-        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        try GeminiResponseParser.transcript(from: data, errors: GoogleAIStudioError.self,
+            httpStatusCode: httpStatusCode, logger: logger)
     }
 }

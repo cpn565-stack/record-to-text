@@ -6,7 +6,7 @@
 
 已實作有上限的網路等待、同片段重送、上傳確認、失敗診斷、佇列暫停與手動續作。方案 B 的持久化雲端生成工作不在範圍；同步生成中斷後仍可能需要重新生成及再次計費。
 
-本紀錄針對分支 `codex/record-to-text-reliability-v2`、基底 `2fe11e9` 之後的網路恢復實作。自動驗證完成後，依使用者打包要求將來源升為 **0.2.1 build 7**，release build 與 App ad-hoc 簽章驗證通過。尚未安裝；已安裝 build 6 不包含本次修改。
+本紀錄針對分支 `codex/record-to-text-reliability-v2`、基底 `2fe11e9` 之後的網路恢復實作，已保存為 `dde71e7` 並 push。自動驗證完成後，依使用者打包要求將來源升為 **0.2.1 build 7**，該 checkpoint 的 release build 與 App ad-hoc 簽章驗證通過。後續精簡及最新 **308 XCTest／0 failures** 見 [程式體積檢查](code-size-review-2026-09-21.md)；使用者因 App 執行中要求暫不重建／安裝。已安裝 build 6 不包含本次修改。
 
 自動化驗證使用合成音訊、注入式時鐘、mock transport 與隔離資料夾；不使用私人錄音或有效雲端憑證。真實 VPN／網路切換、兩個 backend 的付費呼叫與 native GUI 操作仍未執行。下方「通過」均指自動化覆蓋範圍。
 
@@ -79,6 +79,6 @@ git diff --check
 
 1. 在可用的 Vertex／AI Studio 測試設定，以可公開短音訊測生成前離線、生成中切網路、120 秒後恢復、等候取消。需分別記錄 backend、實際發送數、恢復停止原因；不可把 mock 的時間或結果當成真實服務證據。
 2. native GUI 確認等待文案、暫停操作、雙擊續作、取消、退出／重開；檢查小視窗可操作與診斷複製内容。
-3. 使用者後續要求先 commit／push 及精簡程式，再安裝最終版本；DMG 暫不交付。目前 installed build 6 不包含本次修改。
+3. 程式精簡及自動驗證已完成。使用者最新要求 App 執行中先不要重建，故暫不重建／安裝；DMG 暫不交付。目前 installed build 6 不包含本次修改，精簡前的 build 7 bundle 亦不能作為最後原始碼的交付版本。
 
 先前暫停原因與中間快照見 [2026-09-21 交班](handoff-2026-09-21-network-recovery.md)。本頁為接續後的驗證紀錄，優先於舊交班的待辦狀態。

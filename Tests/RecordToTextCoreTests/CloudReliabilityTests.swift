@@ -235,6 +235,21 @@ final class GeminiCloudResponseValidationTests: XCTestCase {
         }
     }
 
+    func testSharedParserKeepsBackendWhitespaceAndExcludesThoughts() throws {
+        let data = try JSONSerialization.data(withJSONObject: ["candidates": [[
+            "finishReason": "STOP",
+            "content": ["parts": [
+                ["thought": true, "text": "不應輸出內部思考"],
+                ["text": "草稿\n## 📝 完整整理逐字稿\n## [00:00 - 00:02]\n**講者 1**：第一句。\n\n\n\n"],
+                ["text": "[00:02 - 00:04]\n講者 1：第二句。"]
+            ]]
+        ]]])
+        let first = "[00:00 - 00:02]\n講者 1：第一句。"
+        let second = "[00:02 - 00:04]\n講者 1：第二句。"
+        XCTAssertEqual(try GoogleAIStudioBackend().parseCandidateText(from: data), first + "\n\n\n\n" + second)
+        XCTAssertEqual(try VertexAIGeminiBackend().parseCandidateText(from: data), first + "\n\n" + second)
+    }
+
     func testPromptFeedbackOtherIsNotFakeHTTP400AndCapturesDiagnostics() throws {
         let data = promptFeedbackResponseData(blockReason: "OTHER")
         let expected = Self.sampleOtherDiagnostics
