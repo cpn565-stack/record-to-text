@@ -885,6 +885,7 @@ public struct JobFailure: Codable, Equatable, Sendable {
     public let recoverable: Bool
     public let recoveryDirectory: String?
     public let partialTranscriptPath: String?
+    public let cloudDiagnostic: CloudFailureDiagnostic?
 
     public init(
         stage: TranscriptionStage,
@@ -892,7 +893,8 @@ public struct JobFailure: Codable, Equatable, Sendable {
         technicalDetails: String,
         recoverable: Bool,
         recoveryDirectory: String? = nil,
-        partialTranscriptPath: String? = nil
+        partialTranscriptPath: String? = nil,
+        cloudDiagnostic: CloudFailureDiagnostic? = nil
     ) {
         self.stage = stage
         self.userMessage = userMessage
@@ -900,6 +902,7 @@ public struct JobFailure: Codable, Equatable, Sendable {
         self.recoverable = recoverable
         self.recoveryDirectory = recoveryDirectory
         self.partialTranscriptPath = partialTranscriptPath
+        self.cloudDiagnostic = cloudDiagnostic
     }
 }
 
@@ -933,6 +936,8 @@ public struct TranscriptionJob: Codable, Equatable, Identifiable, Sendable {
     public var logLines: [String]
     public var cloudSegmentMetadata: [CloudTranscriptionMetadata]?
     public var cloudDiagnostics: CloudJobDiagnostics?
+    public var networkRecovery: CloudNetworkRecovery?
+    public var networkContinuationJobID: UUID?
     public var resumeFromRecoveryDirectory: String?
     /// Optional for compatibility with ledgers written before completeness existed.
     public var outputCompleteness: OutputCompleteness?
@@ -1318,6 +1323,7 @@ public struct PipelineResult: Codable, Equatable, Sendable {
 }
 
 public enum PipelineUpdate: Sendable {
+    case networkRecovery(CloudNetworkRecovery?)
     case stage(TranscriptionStage)
     case progress(current: Double, total: Double, unit: String)
     case log(level: String, message: String)

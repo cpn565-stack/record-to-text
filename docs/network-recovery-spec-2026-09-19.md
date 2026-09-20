@@ -2,7 +2,7 @@
 
 日期：2026-09-19
 
-狀態：調查與修改規格完成，尚未修改 App 程式或部署。
+狀態（2026-09-21 更新）：方案 A 的 Core／App 實作與故障注入測試已加入 working tree，接續驗證見 [實作與驗證紀錄](network-recovery-implementation-2026-09-21.md)。尚未安裝或部署；native GUI／真實網路及付費驗收另列待辦。下文「目前／現況」調查以 2026-09-19 基準版本為準，不代表修改後程式。
 
 基準：原始碼 `7c337d2`；查驗時 `/Applications/record-to-text.app` 為 0.2.1 build 6。
 
@@ -14,7 +14,7 @@
 
 本次建議先實作方案 A：沿用目前同步轉錄，加入有上限的網路恢復。方案 B「雲端背景工作，之後查回同一結果」另列可行方向，不包含在第一階段交付。
 
-規格中的等待秒數與新增狀態均為建議值，並非目前 App 已有功能。此次僅檢查程式、工作／復原 metadata 與 mock 測試；未重送使用者錄音，未中斷使用者網路，未調整 VPN、模型或設定。
+規格制定時的等待秒數與新增狀態為建議值；2026-09-21 實作已採用方案 A 的上限及狀態，具體調整與驗證界線見上述實作紀錄。原調查與接續開發未重送使用者錄音、未中斷使用者網路、未調整 VPN 或 live App 設定。
 
 ## 2. 最近錯誤的實際證據
 
@@ -106,7 +106,7 @@ Apple 說明 `networkConnectionLost` 表示請求進行中承載 HTTP 的連線�
 2. 收到 transient 錯誤時保存結構化事件，依政策等待；path 恢復後維持至少 3 秒穩定，再於退避最低時間已滿時重試。path 事件不得繞過退避下限或增加次數。
 3. `NWPathMonitor` 只作提示。VPN 壞掉時底層 Wi-Fi／手機介面仍可能顯示 `satisfied`；即使沒有 path 變化，也要按 15／45／120 秒排程重試實際原服務請求。
 4. 不另外發付費模型呼叫作健康檢查；「網路介面可用」不等於「Google 可達」。只有實際 request 結果能證明該次服務連通。
-5. 使用 App 自有 URLSession，設定 `waitsForConnectivity = true`，透過 delegate 提示建立連線等待；等待與操作均須可取消並受上述計時控制。
+5. 使用 App 自有 URLSession，upload／generation 設定 `waitsForConnectivity = true`，透過 delegate 提示建立連線等待；等待與操作均須可取消並受上述計時控制。2026-09-21 實作細化：bodyless metadata GET 採 `false`，網路失敗由共用恢復 loop 計時；公開 delegate 沒有適合 GET 的連線恢復回呼，不能把正常 GET 伺服器處理耗時當作網路等待。GET 的 15 秒及有效輪詢餘額上限不變。
 6. 已斷掉的 request 不會因 `waitsForConnectivity` 接回原結果；這個屬性只處理建立連線時的等待。[Apple waitsForConnectivity](https://developer.apple.com/documentation/foundation/urlsessionconfiguration/waitsforconnectivity)
 7. 一般 connectionLost／連線建立失敗後，下次 attempt 可使用一次新 session；不因純慢回應就不停重建。不可使用私有 API 關閉 HTTP/3，也不可宣稱 `assumesHTTP3Capable = false` 保證使用 TCP。
 8. 次數用完、300 秒等待額度用完或 900 秒根期限到達，立即停止自動恢復。先到者生效，網路反覆變動不能無限延長。
@@ -241,7 +241,7 @@ A1–A3 必須整合驗收，不能只把 retry 次數調大就宣稱完成。�
 
 實機驗收另使用可公開的短音訊，在已確認可用的 Vertex／AI Studio 測試設定各跑一組：生成前離線、生成中切換網路、120 秒後恢復、等候中取消。真實網路切換及付費呼叫不屬本次調查已執行項目。記錄僅保留診斷摘要與請求數，不錄製私人逐字稿。
 
-本次已執行的驗證：16 個既有 mock 測試全部通過，涵蓋現有四次重試、斷線後成功、重試中取消與單段期限；這只證明原有基線，不代表上表新增功能已驗收。
+2026-09-19 調查時已執行的基線驗證：16 個既有 mock 測試全部通過，涵蓋原有四次重試、斷線後成功、重試中取消與單段期限。新增功能的 N01–N18 對照及 2026-09-21 完整檢查結果見 [實作與驗證紀錄](network-recovery-implementation-2026-09-21.md)，勿將下方舊基線結果當成最新驗收。
 
 可重現基線檢查指令（2026-09-19 執行結果：16 tests、0 failures）：
 

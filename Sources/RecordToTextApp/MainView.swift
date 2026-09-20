@@ -925,7 +925,7 @@ private struct JobRowView: View {
                 }
 
                 HStack(spacing: 7) {
-                    Text(job.statusWithCompletionTime())
+                    Text(job.networkRecovery?.state == .paused ? "網路恢復逾限，已暫停" : job.statusWithCompletionTime())
                         .font(.caption)
                         .foregroundStyle(statusColor)
 
@@ -956,7 +956,20 @@ private struct JobRowView: View {
 
     @ViewBuilder
     private var progressSection: some View {
-        if job.snapshot.backendType != .localQwen,
+        if let recovery = job.networkRecovery, recovery.state == .waiting || recovery.state == .retrying {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(recovery.message).font(.caption)
+                if recovery.resultUnknown {
+                    Text("前次請求的結果未知；重送可能產生重複費用。")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                Text("剩餘等待額度：\(Int(recovery.remainingWaitSeconds)) 秒").font(.caption2).foregroundStyle(.secondary)
+                if let retryAt = recovery.nextRetryAt {
+                    Text("下次重試不早於 \(retryAt.formatted(date: .omitted, time: .standard))")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+        } else if job.snapshot.backendType != .localQwen,
            job.id == viewModel.activeJobID,
            let segmentProgress = CloudSegmentProgressState(
                unit: job.progressUnit
@@ -1045,6 +1058,20 @@ private struct JobRowView: View {
 
     @ViewBuilder
     private var failureSection: some View {
+        if let recovery = job.networkRecovery, recovery.state == .paused {
+            HStack {
+                Button(recovery.completedSegmentCount > 0 ? "從已完成片段繼續" : "重新嘗試") {
+                    viewModel.resumeNetworkPausedJob(job.id)
+                }
+                .buttonStyle(.link)
+                Button("取消這筆工作") { viewModel.cancelNetworkPausedJob(job.id) }
+                    .buttonStyle(.link)
+            }
+        }
+        if job.networkRecovery?.resultUnknown == true {
+            Text("前次請求可能已被 Google 處理；重送未完成片段可能再次計費。")
+                .font(.caption2).foregroundStyle(.secondary)
+        }
         if let failure = job.failure {
             VStack(alignment: .leading, spacing: 5) {
                 Text(failure.userMessage)

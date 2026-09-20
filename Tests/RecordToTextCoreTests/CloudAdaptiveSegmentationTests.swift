@@ -55,7 +55,7 @@ private final class MockAIStudioTransport: @unchecked Sendable {
         }
 
         if urlString.hasPrefix("https://upload.example.test/resumable/") && request.httpMethod == "POST" {
-            let fileID = UUID().uuidString
+            let fileID = UUID().uuidString.lowercased()
             lock.withLock { filesCreated.append("files/\(fileID)") }
             let response = HTTPURLResponse(
                 url: url,
@@ -143,6 +143,13 @@ private final class MockAIStudioTransport: @unchecked Sendable {
             }
         }
 
+        if urlString.hasPrefix("https://generativelanguage.googleapis.com/v1beta/files/") && request.httpMethod == "GET" {
+            let name = String(urlString.dropFirst("https://generativelanguage.googleapis.com/v1beta/".count))
+            let exists = lock.withLock { filesCreated.contains(name) && !filesDeleted.contains(name) }
+            return (HTTPURLResponse(url: url, statusCode: exists ? 200 : 404, httpVersion: nil, headerFields: nil)!,
+                    try JSONSerialization.data(withJSONObject: ["name": name, "state": "ACTIVE"]))
+        }
+
         if urlString.hasPrefix("https://generativelanguage.googleapis.com/v1beta/files/") && request.httpMethod == "DELETE" {
             let fileName = String(urlString.dropFirst("https://generativelanguage.googleapis.com/v1beta/".count))
             lock.withLock { filesDeleted.append(fileName) }
@@ -193,6 +200,64 @@ private final class CloudSilenceDetectorSpy: SilenceDetectionServicing, @uncheck
 }
 
 final class CloudAdaptiveSegmentationTests: XCTestCase {
+    func testThirdSegmentNetworkPauseResumesWithoutReuploadingFirstTwo() async throws {
+        let root = try TestSupport.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = ApplicationPaths(root: root.appendingPathComponent("Support"))
+        try paths.createDirectories()
+        let runtime = RuntimeEnvironment.candidate(paths: paths,
+            settings: AppSettings.defaultValue(developerMode: true), bundledHelperURL: nil)
+        let source = root.appendingPathComponent("fixture.wav")
+        try await makeSineAudioFixture(durationSeconds: 6, destinationURL: source, ffmpegURL: runtime.ffmpeg)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockAdaptiveCloudURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel(); MockAdaptiveCloudURLProtocol.handler = nil }
+        let clock = RecoveryClock()
+        let backend = GoogleAIStudioBackend(urlSession: session, configuration: .init(apiKey: "mock"))
+        let engine = TranscriptionEngine(cloudNetworkEnvironment: clock.environment(), runtime: runtime,
+            paths: paths, googleAIStudioBackend: backend, maximumASRSegmentDuration: 2,
+            silenceDetectionService: CloudSilenceDetectorSpy())
+        let snapshot = JobSnapshot(modelID: "fixture", glossaryID: nil, glossaryName: nil,
+            terms: [], prompt: "忠實轉錄", outputLocationMode: .fixedDirectory,
+            outputDirectory: root.path, keepRawTranscript: false, backendType: .googleAIStudio,
+            googleAIStudioAPIKey: "mock", silenceAwareCloudSegmentation: false)
+        let initial = MockAIStudioTransport(responses: [
+            .success(("STOP", "[00:00 - 00:02]\n講者 1：第一段。")),
+            .success(("STOP", "[00:02 - 00:04]\n講者 1：第二段。"))
+        ] + Array(repeating: .failure(URLError(.networkConnectionLost)), count: 4))
+        MockAdaptiveCloudURLProtocol.handler = { try initial.handle(request: $0) }
+        var recovery: URL?
+        do {
+            _ = try await engine.run(job: .init(sourcePath: source.path, snapshot: snapshot)) { _ in }
+            XCTFail("Expected pause")
+        } catch let error as PipelineExecutionError {
+            recovery = error.recoveryDirectory
+            XCTAssertEqual(error.networkRecovery?.completedSegmentCount, 2)
+            XCTAssertEqual(error.networkRecovery?.state, .paused)
+        }
+        let directory = try XCTUnwrap(recovery)
+        let manifest = try JSONDecoder().decode(AudioSegmentManifest.self,
+            from: Data(contentsOf: directory.appendingPathComponent(RecoveryScanner.segmentManifestFileName)))
+        let completed = Array(manifest.segments.prefix(2))
+        let original = try completed.map { try Data(contentsOf: URL(fileURLWithPath: $0.outputPath)) }
+        XCTAssertEqual(initial.createdFiles.count, 3)
+        XCTAssertEqual(initial.recordedGenerateRequests.count, 6)
+        let remaining = MockAIStudioTransport(responses: [.success(("STOP", "[00:04 - 00:06]\n講者 1：第三段。"))])
+        MockAdaptiveCloudURLProtocol.handler = { try remaining.handle(request: $0) }
+        let resumed = TranscriptionJob(sourcePath: source.path, snapshot: snapshot, resumeFromRecoveryDirectory: directory.path)
+        let result = try await engine.run(job: resumed, persistCompletion: { _ in false }) { _ in }
+        XCTAssertEqual(remaining.createdFiles.count, 1)
+        XCTAssertEqual(remaining.recordedGenerateRequests.count, 1)
+        let diagnostics = try XCTUnwrap(result.cloudDiagnostics)
+        XCTAssertEqual(diagnostics.segments.map(\.reusedFromCheckpoint), [true, true, false])
+        XCTAssertEqual(try completed.map { try Data(contentsOf: URL(fileURLWithPath: $0.outputPath)) }, original)
+        let text = try String(contentsOf: result.outputURL, encoding: .utf8)
+        for content in ["第一段", "第二段", "第三段"] { XCTAssertTrue(text.contains(content)) }
+        try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory
+            .appendingPathComponent("record-to-text").appendingPathComponent(resumed.id.uuidString))
+    }
+
     func testSpeakerLabelsSurviveSegmentsMergeAndLegacyCheckpointResume() async throws {
         let root = try TestSupport.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -208,7 +273,7 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
         configuration.protocolClasses = [MockAdaptiveCloudURLProtocol.self]
         let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel(); MockAdaptiveCloudURLProtocol.handler = nil }
-        let backend = GoogleAIStudioBackend(urlSession: session,
+        let backend = GoogleAIStudioBackend(networkEnvironment: RecoveryClock().environment(), urlSession: session,
             configuration: .init(apiKey: "mock", modelID: "gemini-3.7-flash"))
         let engine = TranscriptionEngine(runtime: runtime, paths: paths, googleAIStudioBackend: backend,
             maximumASRSegmentDuration: 2, silenceDetectionService: CloudSilenceDetectorSpy())
@@ -270,7 +335,7 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
         config.protocolClasses = [MockAdaptiveCloudURLProtocol.self]
         let session = URLSession(configuration: config)
         defer { session.invalidateAndCancel() }
-        let backend = GoogleAIStudioBackend(urlSession: session,
+        let backend = GoogleAIStudioBackend(networkEnvironment: RecoveryClock().environment(), urlSession: session,
             configuration: .init(apiKey: "mock", modelID: "gemini-3.8-flash"))
         let collector = CloudDiagnosticCollector()
         let text = try await CloudDiagnosticContext.$current.withValue(collector) {
@@ -281,7 +346,7 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
         XCTAssertEqual(transport.createdFiles.count, 1)
         XCTAssertEqual(transport.deletedFiles.count, 1)
         let diagnostic = collector.snapshot(start: 0, end: 4, outcome: .completed, preparation: nil, cloud: nil)
-        XCTAssertEqual(diagnostic.retryReasons, [.network])
+        XCTAssertEqual(diagnostic.retryReasons, [.network, .transportReset])
         XCTAssertTrue(diagnostic.stageTimings.contains { $0.stage == .backoff && $0.seconds > 0 })
         XCTAssertTrue(diagnostic.stageTimings.contains { $0.stage == .generation && $0.seconds > 0 })
     }
@@ -304,6 +369,9 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
                 XCTAssertEqual(error.stage, "backoff")
                 XCTAssertEqual(transport.recordedGenerateRequests.count, 1)
                 XCTAssertEqual(transport.createdFiles.count, 1)
+            } catch let error as CloudNetworkRecoveryExhausted {
+                XCTAssertEqual(error.recovery.stopReason, .rootDeadline)
+                XCTAssertEqual(transport.recordedGenerateRequests.count, 1)
             }
             try await Task.sleep(for: .milliseconds(30))
             session.invalidateAndCancel()
@@ -543,6 +611,10 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
                 XCTAssertEqual(manifest.segments[0].status, .completed)
                 XCTAssertEqual(manifest.segments[1].status, .failed)
                 XCTAssertEqual(manifest.segments[1].deadlineReason, "generation")
+                XCTAssertEqual(manifest.segments[0].diagnostic?.outcome, .completed)
+                XCTAssertEqual(manifest.segments[1].diagnostic?.outcome, .deadlineExceeded)
+                XCTAssertEqual(manifest.discardedDiagnostics?.count, 1)
+                XCTAssertNotNil(manifest.failureHistory)
                 XCTAssertEqual(manifest.segments[0].rootSegmentID, manifest.segments[1].rootSegmentID)
                 XCTAssertEqual(manifest.segments[0].rootSegmentID, deadline.rootSegmentID)
                 XCTAssertTrue(try String(contentsOfFile: manifest.segments[0].outputPath).contains("左子段完整稿"))
@@ -846,7 +918,7 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
             XCTFail("Expected run to throw when maximum split depth is exceeded with MAX_TOKENS")
         } catch let pipelineError as PipelineExecutionError {
             XCTAssertEqual(pipelineError.stage, .transcribing)
-            XCTAssertTrue(pipelineError.underlying is CloudOutputTruncatedError || pipelineError.underlying is AudioSegmentationError)
+            XCTAssertTrue((pipelineError.underlying as? CloudSegmentExecutionError)?.underlying is CloudOutputTruncatedError)
 
             // Assert NO formal output created
             let outputFiles = try FileManager.default.contentsOfDirectory(atPath: outputDirectory.path)

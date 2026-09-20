@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 public enum GoogleAIStudioError: LocalizedError, Equatable {
     case missingAPIKey
@@ -14,6 +15,7 @@ public enum GoogleAIStudioError: LocalizedError, Equatable {
     case audioPayloadTooLarge(sizeBytes: Int, limitBytes: Int)
     case transportMessageTooLarge
     case fileUploadFailed(String)
+    case filesAPIUnsupported
     case fileProcessingTimedOut
     case cancelled
 
@@ -51,6 +53,8 @@ public enum GoogleAIStudioError: LocalizedError, Equatable {
             return "連到 Google 的傳輸通道失敗（本機無法送出這包資料）。這不是音檔超過 Gemini 時長上限。請重試；若持續發生，需要改為先上傳音檔再轉錄。"
         case let .fileUploadFailed(message):
             return "Google AI Studio 音訊上傳失敗：\(message)"
+        case .filesAPIUnsupported:
+            return "目前服務不支援 Files API。"
         case .fileProcessingTimedOut:
             return "Google AI Studio 檔案處理超時，請稍後重試。"
         case .cancelled:
@@ -96,16 +100,19 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
     }
 
     private let urlSession: URLSession
+    private let networkEnvironment: CloudNetworkEnvironment
     private let lock = NSLock()
     private var config: Configuration
 
     public static let maximumInlineAudioBytes: Int = 20 * 1024 * 1024 // 20 MB
 
     public init(
-        urlSession: URLSession = .shared,
+        networkEnvironment: CloudNetworkEnvironment = .init(),
+        urlSession: URLSession = GeminiTransportHelper.makeEphemeralRetrySession(),
         configuration: Configuration = .default
     ) {
         self.urlSession = urlSession
+        self.networkEnvironment = networkEnvironment
         self.config = configuration
     }
 
@@ -183,6 +190,17 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         workingDirectory: URL? = nil,
         logger: ((_ level: String, _ message: String) -> Void)? = nil
     ) async throws -> CloudTranscriptionResult {
+        if CloudNetworkContext.current == nil || CloudNetworkContext.segmentAttempts == nil {
+            let budget = CloudBudgetContext.current ?? CloudSegmentBudget(now: networkEnvironment.now)
+            let context = CloudNetworkContext.current ?? CloudNetworkRecoveryContext(budget: budget, environment: networkEnvironment)
+            return try await CloudBudgetContext.$current.withValue(budget) {
+                try await CloudNetworkContext.$current.withValue(context) {
+                    try await CloudNetworkContext.$segmentAttempts.withValue(CloudModelAttempts()) {
+                        try await self.transcribeDetailed(audioData: audioData, mimeType: mimeType, terms: terms, customPrompt: customPrompt, timeOffsetSeconds: timeOffsetSeconds, workingDirectory: workingDirectory, logger: logger)
+                    }
+                }
+            }
+        }
         let currentConfig = getConfiguration()
 
         guard let apiKey = currentConfig.apiKey?
@@ -192,7 +210,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             throw GoogleAIStudioError.missingAPIKey
         }
 
-        let preparedAudio = try await prepareAudioPart(
+        var preparedAudio = try await prepareAudioPart(
             apiKey: apiKey,
             audioData: audioData,
             mimeType: mimeType,
@@ -201,35 +219,50 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             logger: logger
         )
 
-        let result: CloudTranscriptionResult
-        do {
-            result = try await runTranscriptionAttempts(
-                preferredModelID: currentConfig.modelID,
-                preparedAudio: preparedAudio.audioPart,
-                apiKey: apiKey,
-                audioByteCount: audioData.count,
-                terms: terms,
-                customPrompt: customPrompt,
-                timeOffsetSeconds: timeOffsetSeconds,
-                thinkingLevel: currentConfig.thinkingLevel,
-                fallbackPolicy: currentConfig.fallbackPolicy,
-                workingDirectory: workingDirectory,
-                logger: logger
-            )
-        } catch {
+        var rebuilt = false
+        while true {
+            let result: CloudTranscriptionResult
+            do {
+                result = try await runTranscriptionAttempts(
+                    preferredModelID: currentConfig.modelID,
+                    preparedAudio: preparedAudio.audioPart,
+                    apiKey: apiKey,
+                    audioByteCount: audioData.count,
+                    terms: terms,
+                    customPrompt: customPrompt,
+                    timeOffsetSeconds: timeOffsetSeconds,
+                    thinkingLevel: currentConfig.thinkingLevel,
+                    fallbackPolicy: currentConfig.fallbackPolicy,
+                    workingDirectory: workingDirectory,
+                    logger: logger
+                )
+            } catch {
+                var failure = error
+                do {
+                    if !rebuilt, case let .requestFailed(statusCode, _) = error as? GoogleAIStudioError,
+                       [400, 403, 404, 410].contains(statusCode), let name = preparedAudio.uploadedFileName,
+                       (CloudNetworkContext.segmentAttempts?.quota(for: currentConfig.modelID).count ?? 4) < 4,
+                       try await remoteFileIsMissing(name: name, apiKey: apiKey) {
+                        rebuilt = true
+                        preparedAudio = try await prepareAudioPart(apiKey: apiKey, audioData: audioData,
+                            mimeType: mimeType, useFilesAPI: true, workingDirectory: workingDirectory, logger: logger)
+                        continue
+                    }
+                } catch { failure = error }
+                await deletePreparedRemoteFile(
+                    preparedAudio,
+                    apiKey: apiKey,
+                    logger: logger
+                )
+                throw failure
+            }
             await deletePreparedRemoteFile(
                 preparedAudio,
                 apiKey: apiKey,
                 logger: logger
             )
-            throw error
+            return result
         }
-        await deletePreparedRemoteFile(
-            preparedAudio,
-            apiKey: apiKey,
-            logger: logger
-        )
-        return result
     }
 
     /// Backward-compatible text-only entry point used by existing callers.
@@ -336,7 +369,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         let uploadedFileName: String?
     }
 
-    /// Uploads once per transcribe() call; retries reuse the result.
+    /// Generation retries reuse preparation; only a confirmed missing URI is rebuilt.
     private func prepareAudioPart(
         apiKey: String,
         audioData: Data,
@@ -373,6 +406,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                 throw error
             } catch {
                 try CloudBudgetContext.check("upload")
+                guard error as? GoogleAIStudioError == .filesAPIUnsupported else { throw error }
                 CloudDiagnosticContext.current?.retry(.inlineUploadFallback)
                 logger?("warning", "Files API 上傳未成功，降級至串流 Inline Base64 路徑：\(error.localizedDescription)")
             }
@@ -423,83 +457,88 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         workingDirectory: URL?,
         logger: ((_ level: String, _ message: String) -> Void)?
     ) async throws -> CloudTranscriptionResult {
-        let policy = GeminiTransportHelper.RetryPolicy.self
-        var lastError: Error?
+        let quota = CloudNetworkContext.segmentAttempts?.quota(for: effectiveModelID) ?? CloudRequestAttempts()
+        return try await CloudNetworkContext.$generation.withValue(quota) {
+            let policy = GeminiTransportHelper.RetryPolicy.self
+            CloudDiagnosticContext.current?.setModel(effectiveModelID)
+            var lastError: Error?
 
-        for attempt in 1...policy.maximumAttempts {
-            try CloudBudgetContext.check("generation")
-            if let budget = CloudBudgetContext.current {
-                logger?("info", "budget root=\(budget.rootSegmentID) model=\(effectiveModelID) attempt=\(attempt) elapsed=\(budget.elapsed().secondsValue) remaining=\(budget.remaining().secondsValue)")
-            }
-            do {
-                return try await generateTranscript(
-                    requestedModelID: requestedModelID,
-                    effectiveModelID: effectiveModelID,
-                    retryCount: priorRetryCount + attempt - 1,
-                    fallbackReason: fallbackReason,
-                    preparedAudio: preparedAudio,
-                    apiKey: apiKey,
-                    audioByteCount: audioByteCount,
-                    terms: terms,
-                    customPrompt: customPrompt,
-                    timeOffsetSeconds: timeOffsetSeconds,
-                    thinkingLevel: thinkingLevel,
-                    workingDirectory: workingDirectory,
-                    logger: logger
-                )
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                if Task.isCancelled || GeminiTransportHelper.isNetworkCancellation(error) {
+            for attempt in 1...policy.maximumAttempts {
+                try CloudBudgetContext.check("generation")
+                if let budget = CloudBudgetContext.current {
+                    logger?("info", "budget root=\(budget.rootSegmentID) model=\(effectiveModelID) attempt=\(attempt) elapsed=\(budget.elapsed().secondsValue) remaining=\(budget.remaining().secondsValue)")
+                }
+                do {
+                    return try await generateTranscript(
+                        requestedModelID: requestedModelID,
+                        effectiveModelID: effectiveModelID,
+                        retryCount: priorRetryCount + attempt - 1,
+                        fallbackReason: fallbackReason,
+                        preparedAudio: preparedAudio,
+                        apiKey: apiKey,
+                        audioByteCount: audioByteCount,
+                        terms: terms,
+                        customPrompt: customPrompt,
+                        timeOffsetSeconds: timeOffsetSeconds,
+                        thinkingLevel: thinkingLevel,
+                        workingDirectory: workingDirectory,
+                        logger: logger
+                    )
+                } catch is CancellationError {
                     throw CancellationError()
-                }
-                let isNetworkFailure = GeminiTransportHelper.isTransientNetworkFailure(error)
-                var retryAfter: Double?
-                var retryable = isNetworkFailure
-                if let serviceError = error as? GoogleAIStudioError {
-                    switch serviceError {
-                    case let .rateLimited(_, delay):
-                        retryAfter = delay
-                        retryable = true
-                    case let .requestFailed(statusCode, _):
-                        retryable = policy.isRetryableStatusCode(statusCode)
-                    default:
-                        retryable = false
+                } catch {
+                    if Task.isCancelled || GeminiTransportHelper.isNetworkCancellation(error) {
+                        throw CancellationError()
                     }
+                    CloudDiagnosticContext.current?.failure(error, stage: .generation)
+                    let isNetworkFailure = GeminiTransportHelper.isTransientNetworkFailure(error)
+                    var retryAfter: Double?
+                    var retryable = isNetworkFailure
+                    if let serviceError = error as? GoogleAIStudioError {
+                        switch serviceError {
+                        case let .rateLimited(_, delay):
+                            retryAfter = delay
+                            retryable = true
+                        case let .requestFailed(statusCode, _):
+                            retryable = policy.isRetryableStatusCode(statusCode)
+                        default:
+                            retryable = false
+                        }
+                    }
+                    guard retryable else {
+                        throw error
+                    }
+                    lastError = error
+                    guard attempt < policy.maximumAttempts, quota.count < 4 else {
+                        break
+                    }
+                    let delay = policy.backoffSeconds(
+                        forAttempt: attempt,
+                        retryAfterSeconds: retryAfter
+                    )
+                    try CloudBudgetContext.validateBackoff(seconds: delay)
+                    let diagnosticReason: CloudRetryReason
+                    if isNetworkFailure { diagnosticReason = .network }
+                    else if case .rateLimited = error as? GoogleAIStudioError { diagnosticReason = .rateLimited }
+                    else { diagnosticReason = .serverError }
+                    CloudDiagnosticContext.current?.retry(diagnosticReason)
+                    let reason = isNetworkFailure ? "網路暫時中斷" : "暫時忙碌"
+                    logger?(
+                        "info",
+                        "Gemini \(effectiveModelID) \(reason)，\(String(format: "%.1f", delay)) 秒後進行第 \(attempt + 1) 次嘗試。"
+                    )
+                    try await CloudBudgetContext.backoff(seconds: delay)
                 }
-                guard retryable else {
-                    throw error
-                }
-                lastError = error
-                guard attempt < policy.maximumAttempts else {
-                    break
-                }
-                let delay = policy.backoffSeconds(
-                    forAttempt: attempt,
-                    retryAfterSeconds: retryAfter
-                )
-                try CloudBudgetContext.validateBackoff(seconds: delay)
-                let diagnosticReason: CloudRetryReason
-                if isNetworkFailure { diagnosticReason = .network }
-                else if case .rateLimited = error as? GoogleAIStudioError { diagnosticReason = .rateLimited }
-                else { diagnosticReason = .serverError }
-                CloudDiagnosticContext.current?.retry(diagnosticReason)
-                let reason = isNetworkFailure ? "網路暫時中斷" : "暫時忙碌"
-                logger?(
-                    "info",
-                    "Gemini \(effectiveModelID) \(reason)，\(String(format: "%.1f", delay)) 秒後進行第 \(attempt + 1) 次嘗試。"
-                )
-                try await CloudBudgetContext.backoff(seconds: delay)
             }
-        }
 
-        if let lastError {
-            throw lastError
+            if let lastError {
+                throw lastError
+            }
+            throw GoogleAIStudioError.requestFailed(
+                statusCode: 503,
+                message: "伺服器忙碌，重試後仍失敗。"
+            )
         }
-        throw GoogleAIStudioError.requestFailed(
-            statusCode: 503,
-            message: "伺服器忙碌，重試後仍失敗。"
-        )
     }
 
     private func generateTranscript(
@@ -651,7 +690,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             from: data,
             requestedModelID: requestedModelID,
             effectiveModelID: effectiveModelID,
-            retryCount: retryCount,
+            retryCount: max(retryCount, (CloudNetworkContext.generation?.count ?? 1) - 1),
             fallbackReason: fallbackReason,
             thinkingLevel: thinkingLevel,
             latencySeconds: latency
@@ -668,38 +707,11 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
     ) async throws -> (Data, HTTPURLResponse) {
         do {
             let (data, response) = try await GeminiTransportHelper.budgetedUpload(session: session, request: request, fileURL: fileURL)
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw GoogleAIStudioError.invalidJSONResponse
-            }
-            return (data, httpResponse)
+            guard let http = response as? HTTPURLResponse else { throw GoogleAIStudioError.invalidJSONResponse }
+            return (data, http)
         } catch {
-            if GeminiTransportHelper.isPOSIXMessageTooLarge(error) {
-                CloudDiagnosticContext.current?.retry(.transportReset)
-                logger?("info", "本機傳輸通道失敗（POSIX 40），正改用全新連線 (TCP/Ephemeral) 重試，非音檔時長問題。")
-                let retrySession = GeminiTransportHelper.makeEphemeralRetrySession(protocolClasses: session.configuration.protocolClasses)
-                // The retry session owns a connection pool; release it as soon
-                // as this single retry finishes instead of leaking one per hit.
-                defer { retrySession.finishTasksAndInvalidate() }
-                var retryRequest = request
-                retryRequest.assumesHTTP3Capable = false
-
-                do {
-                    let (data, response) = try await GeminiTransportHelper.budgetedUpload(session: retrySession, request: retryRequest, fileURL: fileURL)
-                    guard let httpResponse = response as? HTTPURLResponse else {
-                        throw GoogleAIStudioError.invalidJSONResponse
-                    }
-                    logger?("info", "傳輸通道重試成功（HTTP \(httpResponse.statusCode)）。")
-                    return (data, httpResponse)
-                } catch let retryError {
-                    if GeminiTransportHelper.isPOSIXMessageTooLarge(retryError) {
-                        logger?("warning", "重試後仍為 POSIX 40 傳輸失敗。")
-                        throw GoogleAIStudioError.transportMessageTooLarge
-                    }
-                    throw retryError
-                }
-            } else {
-                throw error
-            }
+            if GeminiTransportHelper.isPOSIXMessageTooLarge(error) { throw GoogleAIStudioError.transportMessageTooLarge }
+            throw error
         }
     }
 
@@ -720,7 +732,34 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             try? FileManager.default.removeItem(at: tempAudioFile)
         }
 
-        // 1. 初始化 Resumable Upload
+        // A client-assigned name lets files.get confirm a lost final response.
+        let requestedName = "files/" + UUID().uuidString.lowercased()
+        let makeRequest = {
+            try await self.startFilesUpload(apiKey: apiKey, name: requestedName,
+                byteCount: audioData.count, mimeType: mimeType)
+        }
+        let uploadRequest = try await makeRequest()
+        let expectedHash = Data(SHA256.hash(data: audioData)).base64EncodedString()
+        let (uploadData, uploadResponse) = try await GeminiTransportHelper.budgetedUpload(
+            session: urlSession, request: uploadRequest, fileURL: tempAudioFile,
+            attempts: CloudNetworkContext.segmentAttempts?.quota(for: "preparation:filesUpload", stage: .upload),
+            confirmUpload: {
+                let (data, response) = try await self.remoteFileMetadata(name: requestedName, apiKey: apiKey)
+                guard response.statusCode == 200,
+                      let file = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      file["name"] as? String == requestedName,
+                      file["sizeBytes"] as? String == String(audioData.count),
+                      file["sha256Hash"] as? String == expectedHash else { return nil }
+                return (try JSONSerialization.data(withJSONObject: ["file": file]), response)
+            }, restartUpload: makeRequest)
+        guard let uploadHTTP = uploadResponse as? HTTPURLResponse else { throw GoogleAIStudioError.invalidJSONResponse }
+
+        return try await finishFilesUpload(data: uploadData, response: uploadHTTP, apiKey: apiKey, logger: logger)
+    }
+
+    private func startFilesUpload(apiKey: String, name: String, byteCount: Int, mimeType: String) async throws -> URLRequest {
+        // Each initialization has its own bounded transport scope. Recreating
+        // a session does not recreate the root budget or generation ledger.
         guard let initURL = URL(string: "https://generativelanguage.googleapis.com/upload/v1beta/files") else {
             throw GoogleAIStudioError.invalidJSONResponse
         }
@@ -730,20 +769,23 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         initRequest.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
         initRequest.setValue("resumable", forHTTPHeaderField: "X-Goog-Upload-Protocol")
         initRequest.setValue("start", forHTTPHeaderField: "X-Goog-Upload-Command")
-        initRequest.setValue("\(audioData.count)", forHTTPHeaderField: "X-Goog-Upload-Header-Content-Length")
+        initRequest.setValue("\(byteCount)", forHTTPHeaderField: "X-Goog-Upload-Header-Content-Length")
         initRequest.setValue(mimeType, forHTTPHeaderField: "X-Goog-Upload-Header-Content-Type")
         initRequest.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
 
         let initMetadata: [String: Any] = [
-            "file": ["display_name": "audio_\(UUID().uuidString)"]
+            "file": ["name": name, "display_name": "record-to-text audio"]
         ]
         initRequest.httpBody = try JSONSerialization.data(withJSONObject: initMetadata)
         initRequest.timeoutInterval = 30
 
-        let (initData, initResponse) = try await GeminiTransportHelper.budgetedData(session: urlSession, request: initRequest, stage: "upload")
+        let (_, initResponse) = try await GeminiTransportHelper.budgetedData(session: urlSession, request: initRequest,
+            stage: "upload", attempts: CloudNetworkContext.segmentAttempts?.quota(for: "preparation:filesInit", stage: .upload))
         guard let initHTTP = initResponse as? HTTPURLResponse else {
             throw GoogleAIStudioError.invalidJSONResponse
         }
+        if [404, 405, 501].contains(initHTTP.statusCode) { throw GoogleAIStudioError.filesAPIUnsupported }
+        guard initHTTP.statusCode == 200 else { throw CloudHTTPFailure(status: initHTTP.statusCode, stage: .upload) }
 
         let headerUploadURL = initHTTP.value(forHTTPHeaderField: "X-Goog-Upload-URL")
             ?? initHTTP.value(forHTTPHeaderField: "x-goog-upload-url")
@@ -753,28 +795,42 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         guard initHTTP.statusCode == 200,
               let uploadURLString = headerUploadURL,
               let uploadURL = URL(string: uploadURLString) else {
-            let errorMsg = parseErrorMessage(from: initData)
-            throw GoogleAIStudioError.fileUploadFailed("無法初始化 Files API 上傳：\(errorMsg)")
+            throw GoogleAIStudioError.fileUploadFailed("初始化回應缺少上傳位置。")
         }
 
         // 2. 串流上傳音訊檔案資料
         var uploadRequest = URLRequest(url: uploadURL)
         uploadRequest.httpMethod = "POST"
-        uploadRequest.setValue("\(audioData.count)", forHTTPHeaderField: "Content-Length")
+        uploadRequest.setValue("\(byteCount)", forHTTPHeaderField: "Content-Length")
         uploadRequest.setValue("0", forHTTPHeaderField: "X-Goog-Upload-Offset")
         uploadRequest.setValue("upload, finalize", forHTTPHeaderField: "X-Goog-Upload-Command")
         uploadRequest.timeoutInterval = 300
 
-        let (uploadData, uploadHTTP) = try await sendWithPOSIXRetry(
-            request: uploadRequest,
-            fileURL: tempAudioFile,
-            session: urlSession,
-            logger: logger
-        )
+        return uploadRequest
+    }
 
+    private func remoteFileMetadata(name: String, apiKey: String) async throws -> (Data, HTTPURLResponse) {
+        guard name.range(of: #"^files/[a-z0-9-]{1,40}$"#, options: .regularExpression) != nil,
+              let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/\(name)") else {
+            throw GoogleAIStudioError.invalidJSONResponse
+        }
+        var request = URLRequest(url: url)
+        request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
+        request.timeoutInterval = 15
+        let (data, response) = try await GeminiTransportHelper.budgetedData(session: urlSession, request: request, stage: "poll")
+        guard let http = response as? HTTPURLResponse else { throw GoogleAIStudioError.invalidJSONResponse }
+        return (data, http)
+    }
+
+    private func remoteFileIsMissing(name: String, apiKey: String) async throws -> Bool {
+        let (_, response) = try await remoteFileMetadata(name: name, apiKey: apiKey)
+        return [404, 410].contains(response.statusCode)
+    }
+
+    private func finishFilesUpload(data uploadData: Data, response uploadHTTP: HTTPURLResponse,
+                                   apiKey: String, logger: ((_ level: String, _ message: String) -> Void)?) async throws -> (fileUri: String, fileName: String) {
         guard uploadHTTP.statusCode == 200 else {
-            let errorMsg = parseErrorMessage(from: uploadData)
-            throw GoogleAIStudioError.fileUploadFailed("Files API 音訊上傳失敗（HTTP \(uploadHTTP.statusCode)）：\(errorMsg)")
+            throw CloudHTTPFailure(status: uploadHTTP.statusCode, stage: .upload)
         }
 
         guard let json = try? JSONSerialization.jsonObject(with: uploadData) as? [String: Any],
@@ -796,13 +852,15 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
 
             // 3. 輪詢檔案狀態直到 ACTIVE。取消必須向外傳遞，才能立即清理遠端檔案。
             //    以單調時鐘計算預算，避免睡眠秒數與累加值漂移。
-            let pollingDeadline = ContinuousClock.now.advanced(by: .seconds(60))
-            while currentState == "PROCESSING" && ContinuousClock.now < pollingDeadline {
+            let polling = CloudPollingBudget(context: CloudNetworkContext.current)
+            while currentState == "PROCESSING" && polling.remaining > 0 {
                 try Task.checkCancellation()
                 try await CloudBudgetContext.perform(stage: "poll") {
-                    try await Task.sleep(for: min(.milliseconds(1500), ContinuousClock.now.duration(to: pollingDeadline)))
+                    let delay = Duration.seconds(min(1.5, polling.remaining))
+                    if let context = CloudNetworkContext.current { try await context.environment.sleep(delay) }
+                    else { try await Task.sleep(for: delay) }
                 }
-                guard ContinuousClock.now < pollingDeadline else { break }
+                guard polling.remaining > 0 else { break }
 
                 guard let pollURL = URL(string: "https://generativelanguage.googleapis.com/v1beta/\(fileName)") else {
                     throw GoogleAIStudioError.invalidJSONResponse
@@ -810,17 +868,18 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                 var pollRequest = URLRequest(url: pollURL)
                 pollRequest.httpMethod = "GET"
                 pollRequest.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
-                pollRequest.timeoutInterval = min(15, ContinuousClock.now.duration(to: pollingDeadline).secondsValue)
+                pollRequest.timeoutInterval = min(15, polling.remaining)
 
-                let (pollData, pollResponse) = try await GeminiTransportHelper.budgetedData(session: urlSession, request: pollRequest, stage: "poll")
+                let (pollData, pollResponse) = try await CloudNetworkContext.$polling.withValue(polling) {
+                    try await GeminiTransportHelper.budgetedData(session: urlSession, request: pollRequest, stage: "poll")
+                }
                 guard let pollHTTP = pollResponse as? HTTPURLResponse else {
                     throw GoogleAIStudioError.invalidJSONResponse
                 }
-                guard pollHTTP.statusCode == 200,
-                      let pollJson = try? JSONSerialization.jsonObject(with: pollData) as? [String: Any]
+                guard pollHTTP.statusCode == 200 else { throw CloudHTTPFailure(status: pollHTTP.statusCode, stage: .poll) }
+                guard let pollJson = try? JSONSerialization.jsonObject(with: pollData) as? [String: Any]
                 else {
-                    let errorMsg = parseErrorMessage(from: pollData)
-                    throw GoogleAIStudioError.fileUploadFailed("查詢檔案處理狀態失敗（HTTP \(pollHTTP.statusCode)）：\(errorMsg)")
+                    throw GoogleAIStudioError.invalidJSONResponse
                 }
                 currentState = pollJson["state"] as? String ?? "PROCESSING"
             }
@@ -855,7 +914,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         apiKey: String,
         logger: ((_ level: String, _ message: String) -> Void)?
     ) async {
-        if CloudBudgetContext.current != nil {
+        if CloudNetworkContext.current?.waitForCleanup == false {
             // Cleanup has its own bounded allowance and cannot delay failure UI.
             Task.detached(priority: .utility) {
                 let cleanupBudget = CloudSegmentBudget(limit: .seconds(5))

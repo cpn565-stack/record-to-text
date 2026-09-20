@@ -1,38 +1,117 @@
 import Foundation
 
 public enum GeminiTransportHelper {
-    static func budgetedUpload(session: URLSession, request: URLRequest, fileURL: URL) async throws -> (Data, URLResponse) {
+    static func budgetedUpload(session: URLSession, request: URLRequest, fileURL: URL,
+                              attempts: CloudRequestAttempts? = nil,
+                              confirmUpload: (() async throws -> (Data, URLResponse)?)? = nil,
+                              restartUpload: (() async throws -> URLRequest)? = nil) async throws -> (Data, URLResponse) {
         let stage = request.url?.absoluteString.contains("generateContent") == true ? "generation" : "upload"
-        var bounded = request
-        bounded.timeoutInterval = try CloudBudgetContext.timeout(min(300, request.timeoutInterval), stage: stage)
-        let finalRequest = bounded
-        return try await CloudBudgetContext.perform(stage: stage, maximumDuration: .seconds(min(300, request.timeoutInterval))) {
-            try await CancellableCloudRequest().run(session: session, request: finalRequest, fileURL: fileURL)
-        }
+        return try await send(session: session, request: request, fileURL: fileURL, stage: stage,
+                              attempts: attempts, confirmUpload: confirmUpload, restartUpload: restartUpload)
     }
-    static func budgetedData(session: URLSession, request: URLRequest, stage: String) async throws -> (Data, URLResponse) {
-        var bounded = request
-        bounded.timeoutInterval = try CloudBudgetContext.timeout(request.timeoutInterval, stage: stage)
-        let finalRequest = bounded
-        return try await CloudBudgetContext.perform(stage: stage, maximumDuration: .seconds(request.timeoutInterval)) {
-            try await CancellableCloudRequest().run(session: session, request: finalRequest, fileURL: nil)
+    static func budgetedData(session: URLSession, request: URLRequest, stage: String, attempts: CloudRequestAttempts? = nil) async throws -> (Data, URLResponse) {
+        try await send(session: session, request: request, fileURL: nil, stage: stage, attempts: attempts)
+    }
+    private static func send(session: URLSession, request: URLRequest, fileURL: URL?, stage: String,
+                             attempts: CloudRequestAttempts? = nil,
+                             confirmUpload: (() async throws -> (Data, URLResponse)?)? = nil,
+                             restartUpload: (() async throws -> URLRequest)? = nil) async throws -> (Data, URLResponse) {
+        let context = CloudNetworkContext.current
+        let generation = stage == "generation"
+        let quota = attempts ?? (generation ? CloudNetworkContext.generation : nil)
+        var previousError: Error?
+        var request = request
+        for attempt in 1...4 {
+            try CloudBudgetContext.check(stage)
+            if let quota, quota.count >= 4 {
+                if let context, context.lastFailure != nil { throw context.exhausted(.attemptsExhausted) }
+                throw CloudRequestLimitExceeded(stage: quota.stage)
+            }
+            try await context?.wait()
+            if previousError != nil, let confirmUpload {
+                let unresolved = context?.lastFailure
+                if let confirmed = try await confirmUpload() {
+                    context?.requestSucceeded()
+                    return confirmed
+                }
+                if let unresolved { context?.noteFailure(unresolved, generation: false) }
+                if let restartUpload { request = try await restartUpload() }
+            }
+            var bounded = request
+            var maximum = min(300, request.timeoutInterval)
+            if stage == "poll", let polling = CloudNetworkContext.polling {
+                guard polling.remaining > 0 else { throw GoogleAIStudioError.fileProcessingTimedOut }
+                maximum = min(maximum, polling.remaining)
+            }
+            bounded.timeoutInterval = try CloudBudgetContext.timeout(maximum, stage: stage)
+            let finalRequest = bounded
+            let ownedSession = context?.session(using: session, resetFor: previousError) ?? session
+            let activeSession = request.httpMethod == "GET"
+                ? context?.metadataTransport(using: ownedSession) ?? ownedSession : ownedSession
+            do {
+                let result = try await CloudBudgetContext.perform(stage: stage, maximumDuration: .seconds(maximum)) {
+                    try await CancellableCloudRequest().run(session: activeSession, request: finalRequest, fileURL: fileURL, attempts: quota)
+                }
+                if let http = result.1 as? HTTPURLResponse, http.statusCode >= 400 {
+                    CloudDiagnosticContext.current?.failure(.http(http.statusCode, stage: .init(rawValue: stage) ?? .unknown))
+                    // Upload and metadata requests own their retry scope. Generation
+                    // HTTP/model policy remains in the backend; sends still share quota.
+                    if !generation, RetryPolicy.isRetryableStatusCode(http.statusCode), attempt < 4 {
+                        let delay = RetryPolicy.backoffSeconds(forAttempt: attempt, retryAfterSeconds: retryAfterSeconds(response: http, data: result.0))
+                        try await CloudBudgetContext.backoff(seconds: delay)
+                        continue
+                    }
+                }
+                context?.requestSucceeded()
+                return result
+            } catch {
+                if Task.isCancelled || isNetworkCancellation(error) { throw CancellationError() }
+                if let deadline = error as? CloudSegmentDeadlineExceeded {
+                    if let context, context.isWaiting || context.lastFailure != nil { throw context.exhausted(.rootDeadline) }
+                    throw deadline
+                }
+                guard let context else { throw error }
+                let transient = isTransientNetworkFailure(error)
+                let posix = isPOSIXMessageTooLarge(error)
+                guard transient || posix else { throw error }
+                if transient { context.noteFailure(.classify(error, stage: .init(rawValue: stage) ?? .unknown), generation: generation) }
+                let sends = quota?.count ?? attempt
+                guard attempt < 4, sends < 4 else {
+                    if transient {
+                        // The final body may have reached the server even though
+                        // its response was lost. A read-only confirmation is not
+                        // a fifth upload and still consumes the same root budget.
+                        if let confirmUpload {
+                            let unresolved = context.lastFailure
+                            try await context.wait()
+                            if let confirmed = try await confirmUpload() {
+                                context.requestSucceeded()
+                                return confirmed
+                            }
+                            if let unresolved { context.noteFailure(unresolved, generation: false) }
+                        }
+                        throw context.exhausted(.attemptsExhausted)
+                    }
+                    throw error
+                }
+                if posix {
+                    guard !context.sessionWasReset else { throw error }
+                    _ = context.session(using: session, resetFor: NSError(domain: NSPOSIXErrorDomain, code: 40))
+                } else {
+                    try await context.retry(after: sends, error: error, generation: generation)
+                }
+                previousError = error
+            }
         }
+        throw CloudRequestLimitExceeded(stage: .init(rawValue: stage) ?? .unknown)
     }
 
     /// 檢查錯誤是否為 POSIX 40 (EMSGSIZE: Message too long) 或相關底層 CFStream 錯誤
     /// Retry only temporary URL loading failures. Unknown errors and cancellation
     /// must not become automatic generation retries.
     public static func isTransientNetworkFailure(_ error: Error) -> Bool {
-        let nsError = error as NSError
-        guard nsError.domain == NSURLErrorDomain else { return false }
-        return [
-            URLError.timedOut.rawValue,
-            URLError.networkConnectionLost.rawValue,
-            URLError.notConnectedToInternet.rawValue,
-            URLError.cannotConnectToHost.rawValue,
-            URLError.cannotFindHost.rawValue,
-            URLError.dnsLookupFailed.rawValue
-        ].contains(nsError.code)
+        guard !(error is CloudNetworkRecoveryExhausted) else { return false }
+        return CloudFailureDiagnostic.classify(error).isTransientNetworkFailure
     }
 
     public static func isNetworkCancellation(_ error: Error) -> Bool {
@@ -120,7 +199,7 @@ public enum GeminiTransportHelper {
         return fileURL
     }
 
-    /// 建立乾淨獨立的 Ephemeral Session，避開快取的 HTTP/3 連線池
+    /// Creates an App-owned connection pool; transport protocol is chosen by URLSession.
     public static func makeEphemeralRetrySession(
         protocolClasses: [AnyClass]? = nil
     ) -> URLSession {
@@ -128,6 +207,7 @@ public enum GeminiTransportHelper {
         if let protocolClasses {
             config.protocolClasses = protocolClasses
         }
+        config.waitsForConnectivity = true
         config.timeoutIntervalForRequest = 300
         config.timeoutIntervalForResource = 600
         return URLSession(configuration: config)
@@ -213,7 +293,7 @@ public enum GeminiTransportHelper {
             let normalizedJitter = min(max(jitterFraction, 0), 1)
             let jitter = exponential * 0.5 * normalizedJitter
             let computed = exponential + jitter
-            return min(max(computed, retryAfterSeconds ?? 0), 60)
+            return max(min(computed, 60), retryAfterSeconds ?? 0)
         }
     }
 }

@@ -93,7 +93,8 @@ public struct AudioSegmentRecord: Codable, Equatable, Sendable {
         reusedFromCheckpoint: Bool? = nil,
         splitDepth: Int? = nil,
         rootSegmentID: UUID? = nil,
-        deadlineReason: String? = nil
+        deadlineReason: String? = nil,
+        diagnostic: CloudSegmentDiagnostic? = nil
     ) {
         self.segmentIndex = segmentIndex
         self.segmentCount = segmentCount
@@ -105,7 +106,7 @@ public struct AudioSegmentRecord: Codable, Equatable, Sendable {
         self.completedEventCount = completedEventCount
         self.failureMessage = failureMessage
         self.cloudMetadata = cloudMetadata
-        self.diagnostic = nil
+        self.diagnostic = diagnostic
         self.reusedFromCheckpoint = reusedFromCheckpoint
         self.splitDepth = splitDepth
         self.rootSegmentID = rootSegmentID
@@ -126,6 +127,8 @@ public struct AudioSegmentManifest: Codable, Equatable, Sendable {
     public var segments: [AudioSegmentRecord]
     public var speakerRoster: SpeakerRoster?
     public var discardedDiagnostics: [CloudSegmentDiagnostic]?
+    public var failureHistory: CloudFailureHistory?
+    public var networkRecovery: CloudNetworkRecovery?
 
     public init(
         schemaVersion: Int = 1,

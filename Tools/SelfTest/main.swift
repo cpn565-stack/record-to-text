@@ -1126,7 +1126,8 @@ tests.check(
     {
         let config = GoogleAIStudioBackend.Configuration(
             apiKey: "AIzaTestKey",
-            modelID: "gemini-3.7-flash"
+            modelID: "gemini-3.7-flash",
+            useFilesAPI: false
         )
         let backend = GoogleAIStudioBackend(configuration: config)
         let largeData = Data(count: 25 * 1024 * 1024)

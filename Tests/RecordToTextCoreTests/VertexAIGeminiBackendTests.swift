@@ -218,6 +218,7 @@ final class VertexAIGeminiBackendTests: XCTestCase {
             return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, data)
         }
         let backend = VertexAIGeminiBackend(
+            networkEnvironment: RecoveryClock().environment(),
             authService: GCloudAuthService(customGCloudPath: fakeGCloudURL.path),
             urlSession: mockSession,
             configuration: .init(projectID: "mock-project", location: "global", modelID: "gemini-3.8-flash")
@@ -225,6 +226,25 @@ final class VertexAIGeminiBackendTests: XCTestCase {
         let text = try await backend.transcribe(audioData: Data("audio".utf8))
         XCTAssertEqual(text, "完整逐字稿")
         XCTAssertEqual(requests, 2)
+    }
+
+    func test401POSIXAndNetworkShareFourGenerationSends() async throws {
+        var sends = 0
+        MockURLProtocol.requestHandler = { request in
+            sends += 1
+            if sends == 1 { return (HTTPURLResponse(url: request.url!, statusCode: 401, httpVersion: nil, headerFields: nil)!, Data()) }
+            if sends == 2 { throw NSError(domain: NSPOSIXErrorDomain, code: 40) }
+            throw URLError(.networkConnectionLost)
+        }
+        let backend = VertexAIGeminiBackend(networkEnvironment: RecoveryClock().environment(),
+            authService: GCloudAuthService(customGCloudPath: fakeGCloudURL.path), urlSession: mockSession,
+            configuration: .init(projectID: "fixture", fallbackPolicy: .flashOnly))
+        do { _ = try await backend.transcribe(audioData: Data()); XCTFail("Expected bounded pause") }
+        catch let error as CloudNetworkRecoveryExhausted {
+            XCTAssertEqual(error.recovery.lastFailure?.category, .connectionLost)
+            XCTAssertEqual(error.recovery.stopReason, .attemptsExhausted)
+        }
+        XCTAssertEqual(sends, 4)
     }
 
     func testSuccessfulTranscription() async throws {

@@ -96,7 +96,7 @@ public final class CloudSegmentBudget: @unchecked Sendable {
                             try await operation()
                         }
                         try self.checkRemaining(stage: stage)
-                        if let operationDeadline, self.now() >= operationDeadline { throw URLError(.timedOut) }
+                        if let operationDeadline, self.now() >= operationDeadline { throw CloudRequestDeadlineExceeded(stage: stage) }
                         gate.finish(.success(value))
                     } catch {
                         let failure: Error = !Task.isCancelled && self.remaining() <= .zero
@@ -111,7 +111,7 @@ public final class CloudSegmentBudget: @unchecked Sendable {
                         let allowance = operationDeadline.map { min(self.remaining(), max(.zero, self.now().duration(to: $0))) } ?? self.remaining()
                         try await self.sleeper(allowance)
                         try Task.checkCancellation()
-                        let error: Error = self.remaining() <= .zero ? self.deadlineError(stage: stage) : URLError(.timedOut)
+                        let error: Error = self.remaining() <= .zero ? self.deadlineError(stage: stage) : CloudRequestDeadlineExceeded(stage: stage)
                         self.event?("cancel requested root=\(self.rootSegmentID) stage=\(stage)")
                         gate.finish(.failure(error))
                     } catch { }
@@ -189,11 +189,16 @@ public enum CloudBudgetContext {
                 collector?.record(stage: measuredStage, seconds: diagnosticStart.duration(to: .now).secondsValue)
             }
         }
-        if let current { return try await current.withDeadline(stage: stage, operationLimit: maximumDuration, operation: operation) }
-        if let maximumDuration {
-            return try await CloudSegmentBudget().withDeadline(stage: stage, operationLimit: maximumDuration, operation: operation)
+        do {
+            if let current { return try await current.withDeadline(stage: stage, operationLimit: maximumDuration, operation: operation) }
+            if let maximumDuration {
+                return try await CloudSegmentBudget().withDeadline(stage: stage, operationLimit: maximumDuration, operation: operation)
+            }
+            try Task.checkCancellation()
+            return try await operation()
+        } catch {
+            collector?.failure(error, stage: .init(rawValue: stage) ?? .unknown)
+            throw error
         }
-        try Task.checkCancellation()
-        return try await operation()
     }
 }

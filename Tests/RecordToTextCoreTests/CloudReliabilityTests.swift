@@ -60,13 +60,13 @@ final class GeminiCloudResponseValidationTests: XCTestCase {
             throw URLError(.notConnectedToInternet)
         }
         defer { AIStudioMockURLProtocol.handler = nil; session.invalidateAndCancel() }
-        let backend = GoogleAIStudioBackend(urlSession: session,
+        let backend = GoogleAIStudioBackend(networkEnvironment: RecoveryClock().environment(), urlSession: session,
             configuration: .init(apiKey: "mock", modelID: "gemini-3.8-flash", useFilesAPI: false, fallbackPolicy: .flashOnly))
         do {
             _ = try await backend.transcribe(audioData: Data("audio".utf8))
             XCTFail("Expected exhausted retries")
         } catch {
-            XCTAssertEqual((error as NSError).code, URLError.notConnectedToInternet.rawValue)
+            XCTAssertEqual((error as? CloudNetworkRecoveryExhausted)?.recovery.lastFailure?.category, .offline)
         }
         XCTAssertEqual(calls.value, 4)
     }
@@ -84,10 +84,12 @@ final class GeminiCloudResponseValidationTests: XCTestCase {
         defer { AIStudioMockURLProtocol.handler = nil; session.invalidateAndCancel() }
         let backend = GoogleAIStudioBackend(urlSession: session,
             configuration: .init(apiKey: "mock", modelID: "gemini-3.8-flash", useFilesAPI: false))
+        let context = CloudNetworkRecoveryContext(budget: CloudSegmentBudget(), environment: .init(path: { .satisfied }))
+        context.configure(segment: 1, total: 1, completed: 0, observer: { if $0.state == .waiting { waiting.fulfill() } })
         let task = Task {
-            try await backend.transcribe(audioData: Data("audio".utf8), logger: { _, message in
-                if message.contains("網路暫時中斷") { waiting.fulfill() }
-            })
+            try await CloudNetworkContext.$current.withValue(context) {
+                try await backend.transcribe(audioData: Data("audio".utf8))
+            }
         }
         await fulfillment(of: [waiting], timeout: 3)
         task.cancel()
@@ -112,7 +114,7 @@ final class GeminiCloudResponseValidationTests: XCTestCase {
                     self.responseData())
         }
         defer { AIStudioMockURLProtocol.handler = nil; session.invalidateAndCancel() }
-        let backend = GoogleAIStudioBackend(urlSession: session,
+        let backend = GoogleAIStudioBackend(networkEnvironment: RecoveryClock().environment(), urlSession: session,
             configuration: .init(apiKey: "mock", modelID: "gemini-3.8-flash", useFilesAPI: false))
         let result = try await backend.transcribe(audioData: Data("audio".utf8))
         XCTAssertEqual(result, "忠實逐字稿")
@@ -686,10 +688,12 @@ final class GeminiCloudResponseValidationTests: XCTestCase {
                 useFilesAPI: true
             )
         )
-        let transcript = try await backend.transcribe(
-            audioData: Data("audio".utf8)
-        )
-        XCTAssertEqual(transcript, "忠實逐字稿")
+        do {
+            _ = try await backend.transcribe(audioData: Data("audio".utf8))
+            XCTFail("Malformed Files response must not silently switch to inline")
+        } catch let error as GoogleAIStudioError {
+            guard case .fileUploadFailed = error else { return XCTFail("Unexpected error: \(error)") }
+        }
         XCTAssertEqual(deleteCount.value, 1)
     }
 

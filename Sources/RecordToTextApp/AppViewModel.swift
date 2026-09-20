@@ -86,6 +86,7 @@ final class AppViewModel: ObservableObject {
         }
     )
     private let paths: ApplicationPaths
+    private let engineFactory: ((ResolvedRuntime) -> TranscriptionEngine)?
     private let settingsRepository: JSONRepository<AppSettings>
     private let glossaryRepository: JSONRepository<GlossaryCollection>
     private let recentJobsRepository: JSONRepository<RecentJobCollection>
@@ -114,6 +115,14 @@ final class AppViewModel: ObservableObject {
     private var queuePausedForPromptConsent = false
     private var resumeQueueAfterPromptConsent = false
     private var queuePausedForEnvironment = false
+    private var networkContinuationInFlight = Set<UUID>()
+    private var terminatingForNetwork = Set<UUID>()
+    private var isTerminating = false
+    var queuePausedForNetwork: Bool {
+        !networkContinuationInFlight.isEmpty || jobs.contains {
+            $0.stage == .interrupted && $0.networkRecovery != nil && $0.networkRecovery?.state != .resolved
+        }
+    }
     private var legacySettingsCredentialMigrationPending = false
     private var legacyLedgerCredentialMigrationPending = false
     private var credentialStoreSynchronizedForLegacyMigration = false
@@ -123,9 +132,11 @@ final class AppViewModel: ObservableObject {
         fileManager: FileManager = .default,
         credentialStore: any GoogleAIStudioCredentialStoring = KeychainGoogleAIStudioCredentialStore(),
         settingsSaveOverride: ((AppSettings) throws -> Void)? = nil,
-        jobLedgerSaveOverride: ((JobLedgerCollection) throws -> Void)? = nil
+        jobLedgerSaveOverride: ((JobLedgerCollection) throws -> Void)? = nil,
+        engineFactory: ((ResolvedRuntime) -> TranscriptionEngine)? = nil
     ) {
         self.paths = paths
+        self.engineFactory = engineFactory
         self.fileManager = fileManager
         self.credentialStore = credentialStore
         let settingsRepository = JSONRepository<AppSettings>(url: paths.settings)
@@ -210,11 +221,36 @@ final class AppViewModel: ObservableObject {
         }
         var summaries = loadedRecentJobs.jobs
         var didInterruptJobs = false
+        for index in loadedLedger.jobs.indices where loadedLedger.jobs[index].stage == .interrupted {
+            let job = loadedLedger.jobs[index]
+            let continuationNotStarted = job.networkRecovery?.state == .resolved && job.networkContinuationJobID.map { id in
+                loadedLedger.jobs.contains { $0.id == id && $0.stage == .queued }
+            } == true
+            if job.networkRecovery?.state == .unknown || continuationNotStarted {
+                loadedLedger.jobs[index].networkRecovery?.state = .paused
+                loadedLedger.jobs[index].networkRecovery?.stopReason = .appRestarted
+                didInterruptJobs = true
+            }
+        }
         for index in loadedLedger.jobs.indices where !loadedLedger.jobs[index].stage.isTerminal {
+            // Queued work was never sent and must remain queued across a pause.
+            if loadedLedger.jobs[index].stage == .queued { continue }
             let interruptedJob = loadedLedger.jobs[index]
             loadedLedger.jobs[index].stage = .interrupted
             loadedLedger.jobs[index].completedAt = Date()
             loadedLedger.jobs[index].logLines.append("App 上次結束時工作尚未完成。")
+            if interruptedJob.snapshot.backendType != .localQwen {
+                var recovery = interruptedJob.networkRecovery ?? .init(state: .paused,
+                    waitedSeconds: 0, remainingWaitSeconds: 300, segmentIndex: 1, segmentCount: 1,
+                    completedSegmentCount: 0, resultUnknown: true)
+                recovery.state = .paused; recovery.stopReason = .appRestarted
+                loadedLedger.jobs[index].networkRecovery = recovery
+                let directory = paths.tempRecovery.appendingPathComponent(interruptedJob.id.uuidString)
+                loadedLedger.jobs[index].failure = JobFailure(stage: .interrupted,
+                    userMessage: "上次雲端工作尚未完成，已保留工作；請手動重新嘗試或續跑。",
+                    technicalDetails: "Cloud job interrupted by app restart.", recoverable: true,
+                    recoveryDirectory: fileManager.fileExists(atPath: directory.path) ? directory.path : nil)
+            }
             if interruptedJob.snapshot.backendType == .localQwen {
                 let directory = paths.tempRecovery.appendingPathComponent(
                     interruptedJob.id.uuidString,
@@ -848,10 +884,12 @@ final class AppViewModel: ObservableObject {
     /// from the live list and recent history. Does not delete source audio,
     /// output TXT, or Temp-Recovery folders.
     func removeFinishedJob(_ id: UUID) {
+        guard !networkContinuationInFlight.contains(id) else { return }
         if let job = jobs.first(where: { $0.id == id }) {
             guard job.stage.isTerminal else {
                 return
             }
+            if job.networkRecovery != nil { manualDrainRequested = false }
             jobs.removeAll(where: { $0.id == id })
         }
         recentJobs.removeAll(where: { $0.id == id })
@@ -861,7 +899,8 @@ final class AppViewModel: ObservableObject {
     /// Clears every finished job from the queue and the recent-jobs list.
     /// Active and queued work are kept.
     func removeAllFinishedJobs() {
-        jobs.removeAll(where: { $0.stage.isTerminal })
+        if queuePausedForNetwork { manualDrainRequested = false }
+        jobs.removeAll(where: { $0.stage.isTerminal && !networkContinuationInFlight.contains($0.id) })
         recentJobs.removeAll()
         persistJobs()
     }
@@ -1164,6 +1203,15 @@ final class AppViewModel: ObservableObject {
         guard oldJob.stage.isTerminal else {
             return
         }
+        if oldJob.networkRecovery?.state == .paused {
+            if usingCurrentSettings {
+                cancelNetworkPausedJob(id)
+                enqueueValidatedJobs([(url: oldJob.sourceURL, sourceSlice: oldJob.sourceSlice)])
+            } else {
+                resumeNetworkPausedJob(id)
+            }
+            return
+        }
 
         if usingCurrentSettings {
             enqueueValidatedJobs([
@@ -1225,6 +1273,10 @@ final class AppViewModel: ObservableObject {
             return
         }
         let oldJob = jobs[index]
+        if oldJob.networkRecovery?.state == .paused {
+            resumeNetworkPausedJob(id)
+            return
+        }
         guard canResumeCloudJob(oldJob),
               let recoveryDirectory = oldJob.failure?.recoveryDirectory
         else {
@@ -1255,6 +1307,64 @@ final class AppViewModel: ObservableObject {
         persistJobs()
         manualDrainRequested = true
         scheduleQueueIfNeeded()
+    }
+
+    /// Parent state and the one continuation identity are saved in the same
+    /// journal snapshot. The in-memory gate remains closed until flush succeeds.
+    func resumeNetworkPausedJob(_ id: UUID) {
+        guard !isTerminating, !networkContinuationInFlight.contains(id), activeJobID == nil,
+              let index = jobs.firstIndex(where: { $0.id == id }),
+              jobs[index].stage == .interrupted,
+              jobs[index].networkRecovery?.state == .paused else { return }
+        let original = jobs[index]
+        guard fileManager.fileExists(atPath: original.sourcePath) else {
+            alert = UserFacingAlert(title: "來源錄音不存在", message: "找不到原始錄音，無法重新嘗試。")
+            return
+        }
+        networkContinuationInFlight.insert(id)
+        let continuationID: UUID
+        if let existing = original.networkContinuationJobID,
+           jobs.contains(where: { $0.id == existing && $0.stage == .queued }) {
+            continuationID = existing
+        } else {
+            var continuation = TranscriptionJob(sourcePath: original.sourcePath,
+                snapshot: original.snapshot.withGoogleAIStudioAPIKey(nil), sourceSlice: original.sourceSlice,
+                resumeFromRecoveryDirectory: canResumeCloudJob(original) ? original.failure?.recoveryDirectory : nil)
+            continuation.logLines.append("使用原工作快照重新嘗試；已完成片段會先驗證並沿用。")
+            continuationID = continuation.id
+            jobs[index].networkContinuationJobID = continuationID
+            jobs.insert(continuation, at: jobs.firstIndex(where: { $0.stage == .queued }) ?? jobs.count)
+        }
+        if let parent = jobs.firstIndex(where: { $0.id == id }) { jobs[parent].networkRecovery?.state = .resolved }
+        persistJobs()
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.flushJobPersistence()
+                self.networkContinuationInFlight.remove(id)
+                guard !self.isTerminating, self.jobs.contains(where: { $0.id == continuationID && $0.stage == .queued }) else { return }
+                self.manualDrainRequested = true
+                self.scheduleQueueIfNeeded()
+            } catch {
+                if let parent = self.jobs.firstIndex(where: { $0.id == id }) { self.jobs[parent].networkRecovery?.state = .paused }
+                self.networkContinuationInFlight.remove(id)
+                self.manualDrainRequested = false
+                self.jobPersistenceError = error.localizedDescription
+                self.persistJobs()
+            }
+        }
+    }
+
+    func cancelNetworkPausedJob(_ id: UUID) {
+        guard !networkContinuationInFlight.contains(id),
+              let index = jobs.firstIndex(where: { $0.id == id }),
+              jobs[index].stage == .interrupted, jobs[index].networkRecovery != nil else { return }
+        manualDrainRequested = false
+        let continuationID = jobs[index].networkContinuationJobID
+        jobs[index].stage = .cancelled
+        jobs[index].networkRecovery = nil
+        if let continuationID { jobs.removeAll { $0.id == continuationID && $0.stage == .queued } }
+        persistJobs()
     }
 
     func resumeLocalQwenJobFromCheckpoint(_ id: UUID) {
@@ -1417,8 +1527,10 @@ final class AppViewModel: ObservableObject {
     }
 
     func stopAllForTermination() async {
+        isTerminating = true
         manualDrainRequested = false
-        for index in jobs.indices where jobs[index].stage == .queued {
+        let preserveNetworkQueue = queuePausedForNetwork || jobs.contains { $0.networkRecovery?.state == .waiting || $0.networkRecovery?.state == .retrying }
+        for index in jobs.indices where jobs[index].stage == .queued && !preserveNetworkQueue {
             jobs[index].stage = .cancelled
             jobs[index].completedAt = Date()
         }
@@ -1426,6 +1538,7 @@ final class AppViewModel: ObservableObject {
         flushPendingSettingsPersistence()
 
         if let activeJobID {
+            if preserveNetworkQueue { terminatingForNetwork.insert(activeJobID) }
             cancellationRequested.insert(activeJobID)
         }
 
@@ -1729,10 +1842,10 @@ final class AppViewModel: ObservableObject {
     }
 
     private func scheduleQueueIfNeeded() {
-        guard queueTask == nil, hasQueuedJobs else {
+        guard !isTerminating, queueTask == nil, hasQueuedJobs else {
             return
         }
-        guard !queuePausedForEnvironment, !queuePausedForPromptConsent else {
+        guard !queuePausedForEnvironment, !queuePausedForPromptConsent, !queuePausedForNetwork else {
             return
         }
         // Always require an explicit start (manualDrainRequested).
@@ -1750,9 +1863,11 @@ final class AppViewModel: ObservableObject {
 
     private func drainQueue() async {
         while !Task.isCancelled,
+              !isTerminating,
               manualDrainRequested,
               !queuePausedForEnvironment,
               !queuePausedForPromptConsent,
+              !queuePausedForNetwork,
               let nextJobID = jobs.first(where: { $0.stage == .queued })?.id {
             if isGoogleAIStudioCredentialLoading {
                 queueTask = nil
@@ -1799,7 +1914,7 @@ final class AppViewModel: ObservableObject {
             {
                 engine = reusableEngine
             } else {
-                engine = TranscriptionEngine(runtime: runtime, paths: paths)
+                engine = engineFactory?(runtime) ?? TranscriptionEngine(runtime: runtime, paths: paths)
                 reusableEngine = engine
                 reusableEngineRuntime = runtime
             }
@@ -1868,6 +1983,11 @@ final class AppViewModel: ObservableObject {
         activeJobID = nil
         pruneHistoryIfNeeded()
         persistJobs()
+        if queuePausedForNetwork {
+            manualDrainRequested = false
+            do { try await flushJobPersistence() }
+            catch { jobPersistenceError = error.localizedDescription }
+        }
     }
 
     func acceptCompletedResult(_ result: PipelineResult, id: UUID) async -> Bool {
@@ -1954,6 +2074,10 @@ final class AppViewModel: ObservableObject {
         }
 
         switch update {
+        case let .networkRecovery(recovery):
+            let isTransition = jobs[index].networkRecovery?.state != recovery?.state
+            jobs[index].networkRecovery = recovery?.state == .resolved ? nil : recovery
+            persistJobs(urgency: isTransition ? .critical : .coalescible)
         case let .stage(stage):
             jobs[index].stage = stage
             // Keep progress bar values across stage transitions so the bar
@@ -2016,6 +2140,9 @@ final class AppViewModel: ObservableObject {
                 technicalDetails: String(reflecting: error)
             )
         } else {
+            jobs[index].cloudDiagnostics = CloudJobDiagnostics.load(manifestURL:
+                paths.tempRecovery.appendingPathComponent(id.uuidString)
+                    .appendingPathComponent(RecoveryScanner.segmentManifestFileName))
             recoveryFailure = Self.cancellationRecoveryFailure(
                 jobID: id,
                 paths: paths,
@@ -2029,6 +2156,13 @@ final class AppViewModel: ObservableObject {
         jobs[index].progressUnit = nil
         jobs[index].completedAt = Date()
         jobs[index].failure = recoveryFailure
+        if terminatingForNetwork.remove(id) != nil {
+            jobs[index].stage = .interrupted
+            jobs[index].networkRecovery?.state = .paused
+            jobs[index].networkRecovery?.stopReason = .appRestarted
+        } else {
+            jobs[index].networkRecovery = nil
+        }
         if recoveryFailure == nil {
             jobs[index].logLines.append("工作已取消，未保留未完成文字。")
         } else if jobs[index].snapshot.backendType == .localQwen {
@@ -2129,6 +2263,7 @@ final class AppViewModel: ObservableObject {
         }
 
         let pipelineError = error as? PipelineExecutionError
+        jobs[index].cloudDiagnostics = pipelineError?.cloudDiagnostics
         let stage = pipelineError?.stage ?? jobs[index].stage
         let recoveryDirectory = pipelineError?.recoveryDirectory?.path
         let partialTranscriptPath = recoveryDirectory.flatMap { path in
@@ -2139,18 +2274,20 @@ final class AppViewModel: ObservableObject {
                 : nil
         }
 
-        jobs[index].stage = .failed
+        jobs[index].networkRecovery = pipelineError?.networkRecovery
+        jobs[index].stage = pipelineError?.networkRecovery == nil ? .failed : .interrupted
         jobs[index].progressCurrent = nil
         jobs[index].progressTotal = nil
         jobs[index].progressUnit = nil
         jobs[index].completedAt = Date()
         jobs[index].failure = JobFailure(
             stage: stage,
-            userMessage: error.localizedDescription,
-            technicalDetails: String(reflecting: error),
+            userMessage: pipelineError?.networkRecovery?.message ?? error.localizedDescription,
+            technicalDetails: pipelineError?.failureDiagnostic?.debugSummary ?? String(reflecting: error),
             recoverable: true,
             recoveryDirectory: recoveryDirectory,
-            partialTranscriptPath: partialTranscriptPath
+            partialTranscriptPath: partialTranscriptPath,
+            cloudDiagnostic: pipelineError?.failureDiagnostic
         )
         jobs[index].logLines.append("失敗：\(error.localizedDescription)")
     }

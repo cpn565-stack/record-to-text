@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 public enum VertexAIError: LocalizedError, Equatable {
     case invalidEndpointURL(String)
@@ -103,6 +104,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
 
     private var authService: GCloudAuthService
     private let urlSession: URLSession
+    private let networkEnvironment: CloudNetworkEnvironment
     private let lock = NSLock()
     private var config: Configuration
 
@@ -110,12 +112,14 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
     public static let maximumInlineAudioBytes: Int = 20 * 1024 * 1024
 
     public init(
+        networkEnvironment: CloudNetworkEnvironment = .init(),
         authService: GCloudAuthService = GCloudAuthService(),
-        urlSession: URLSession = .shared,
+        urlSession: URLSession = GeminiTransportHelper.makeEphemeralRetrySession(),
         configuration: Configuration = .default
     ) {
         self.authService = authService
         self.urlSession = urlSession
+        self.networkEnvironment = networkEnvironment
         self.config = configuration
     }
 
@@ -150,6 +154,17 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         workingDirectory: URL? = nil,
         logger: ((_ level: String, _ message: String) -> Void)? = nil
     ) async throws -> CloudTranscriptionResult {
+        if CloudNetworkContext.current == nil || CloudNetworkContext.segmentAttempts == nil {
+            let budget = CloudBudgetContext.current ?? CloudSegmentBudget(now: networkEnvironment.now)
+            let context = CloudNetworkContext.current ?? CloudNetworkRecoveryContext(budget: budget, environment: networkEnvironment)
+            return try await CloudBudgetContext.$current.withValue(budget) {
+                try await CloudNetworkContext.$current.withValue(context) {
+                    try await CloudNetworkContext.$segmentAttempts.withValue(CloudModelAttempts()) {
+                        try await self.transcribeDetailed(audioData: audioData, mimeType: mimeType, terms: terms, customPrompt: customPrompt, timeOffsetSeconds: timeOffsetSeconds, workingDirectory: workingDirectory, logger: logger)
+                    }
+                }
+            }
+        }
         let currentConfig = getConfiguration()
         let authService = lock.withLock { self.authService }
 
@@ -178,7 +193,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             throw VertexAIError.authenticationFailed(error.localizedDescription)
         }
 
-        let preparedAudio = try await prepareAudioPart(
+        var preparedAudio = try await prepareAudioPart(
             bucket: currentConfig.gcsBucket?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
             authService: authService,
@@ -193,40 +208,57 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let location = rawLocation.isEmpty ? "global" : rawLocation
 
-        let result: CloudTranscriptionResult
-        do {
-            result = try await runTranscriptionAttempts(
-                preferredModelID: currentConfig.modelID,
-                projectID: resolvedProjectID,
-                location: location,
-                preparedAudio: preparedAudio.audioPart,
-                accessToken: accessToken,
-                authService: authService,
-                audioByteCount: audioData.count,
-                terms: terms,
-                customPrompt: customPrompt,
-                timeOffsetSeconds: timeOffsetSeconds,
-                thinkingLevel: currentConfig.thinkingLevel,
-                fallbackPolicy: currentConfig.fallbackPolicy,
-                workingDirectory: workingDirectory,
-                logger: logger
-            )
-        } catch {
+        var rebuilt = false
+        while true {
+            let result: CloudTranscriptionResult
+            do {
+                result = try await runTranscriptionAttempts(
+                    preferredModelID: currentConfig.modelID,
+                    projectID: resolvedProjectID,
+                    location: location,
+                    preparedAudio: preparedAudio.audioPart,
+                    accessToken: accessToken,
+                    authService: authService,
+                    audioByteCount: audioData.count,
+                    terms: terms,
+                    customPrompt: customPrompt,
+                    timeOffsetSeconds: timeOffsetSeconds,
+                    thinkingLevel: currentConfig.thinkingLevel,
+                    fallbackPolicy: currentConfig.fallbackPolicy,
+                    workingDirectory: workingDirectory,
+                    logger: logger
+                )
+            } catch {
+                var failure = error
+                do {
+                    if !rebuilt, case let .requestFailed(statusCode, _) = error as? VertexAIError,
+                       [400, 403, 404, 410].contains(statusCode), let bucket = preparedAudio.gcsBucket,
+                       let name = preparedAudio.gcsObjectName,
+                       (CloudNetworkContext.segmentAttempts?.quota(for: currentConfig.modelID).count ?? 4) < 4,
+                       try await gcsObjectIsMissing(bucket: bucket, objectName: name, accessToken: accessToken) {
+                        rebuilt = true
+                        preparedAudio = try await prepareAudioPart(bucket: bucket, authService: authService,
+                            accessToken: accessToken, audioData: audioData, mimeType: mimeType,
+                            workingDirectory: workingDirectory, logger: logger)
+                        continue
+                    }
+                } catch { failure = error }
+                await deletePreparedGCSObject(
+                    preparedAudio,
+                    accessToken: accessToken,
+                    authService: authService,
+                    logger: logger
+                )
+                throw failure
+            }
             await deletePreparedGCSObject(
                 preparedAudio,
                 accessToken: accessToken,
                 authService: authService,
                 logger: logger
             )
-            throw error
+            return result
         }
-        await deletePreparedGCSObject(
-            preparedAudio,
-            accessToken: accessToken,
-            authService: authService,
-            logger: logger
-        )
-        return result
     }
 
     public func transcribe(
@@ -342,7 +374,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         let gcsObjectName: String?
     }
 
-    /// Uploads once per transcribe() call; retries reuse the result.
+    /// Generation retries reuse preparation; only a confirmed missing URI is rebuilt.
     private func prepareAudioPart(
         bucket: String?,
         authService: GCloudAuthService,
@@ -447,95 +479,100 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         workingDirectory: URL?,
         logger: ((_ level: String, _ message: String) -> Void)?
     ) async throws -> CloudTranscriptionResult {
-        let policy = GeminiTransportHelper.RetryPolicy.self
-        var lastError: Error?
+        let quota = CloudNetworkContext.segmentAttempts?.quota(for: effectiveModelID) ?? CloudRequestAttempts()
+        return try await CloudNetworkContext.$generation.withValue(quota) {
+            let policy = GeminiTransportHelper.RetryPolicy.self
+            CloudDiagnosticContext.current?.setModel(effectiveModelID)
+            var lastError: Error?
 
-        for attempt in 1...policy.maximumAttempts {
-            try CloudBudgetContext.check("generation")
-            if let budget = CloudBudgetContext.current {
-                logger?("info", "budget root=\(budget.rootSegmentID) model=\(effectiveModelID) attempt=\(attempt) elapsed=\(budget.elapsed().secondsValue) remaining=\(budget.remaining().secondsValue)")
-            }
-            do {
-                let generated = try await generateTranscript(
-                    requestedModelID: requestedModelID,
-                    effectiveModelID: effectiveModelID,
-                    retryCount: priorRetryCount + attempt - 1,
-                    fallbackReason: fallbackReason,
-                    projectID: projectID,
-                    location: location,
-                    preparedAudio: preparedAudio,
-                    accessToken: accessToken,
-                    authService: authService,
-                    inputByteCount: inputByteCount,
-                    terms: terms,
-                    customPrompt: customPrompt,
-                    timeOffsetSeconds: timeOffsetSeconds,
-                    thinkingLevel: thinkingLevel,
-                    workingDirectory: workingDirectory,
-                    logger: logger
-                )
-                return generated.result
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                if Task.isCancelled || GeminiTransportHelper.isNetworkCancellation(error) {
+            for attempt in 1...policy.maximumAttempts {
+                try CloudBudgetContext.check("generation")
+                if let budget = CloudBudgetContext.current {
+                    logger?("info", "budget root=\(budget.rootSegmentID) model=\(effectiveModelID) attempt=\(attempt) elapsed=\(budget.elapsed().secondsValue) remaining=\(budget.remaining().secondsValue)")
+                }
+                do {
+                    let generated = try await generateTranscript(
+                        requestedModelID: requestedModelID,
+                        effectiveModelID: effectiveModelID,
+                        retryCount: priorRetryCount + attempt - 1,
+                        fallbackReason: fallbackReason,
+                        projectID: projectID,
+                        location: location,
+                        preparedAudio: preparedAudio,
+                        accessToken: accessToken,
+                        authService: authService,
+                        inputByteCount: inputByteCount,
+                        terms: terms,
+                        customPrompt: customPrompt,
+                        timeOffsetSeconds: timeOffsetSeconds,
+                        thinkingLevel: thinkingLevel,
+                        workingDirectory: workingDirectory,
+                        logger: logger
+                    )
+                    return generated.result
+                } catch is CancellationError {
                     throw CancellationError()
-                }
-                let isNetworkFailure = GeminiTransportHelper.isTransientNetworkFailure(error)
-                var retryAfter: Double?
-                var retryable = isNetworkFailure
-                if let serviceError = error as? VertexAIError {
-                    switch serviceError {
-                    case let .rateLimited(_, delay):
-                        retryAfter = delay
-                        retryable = true
-                    case let .requestFailed(statusCode, _):
-                        retryable = policy.isRetryableStatusCode(statusCode)
-                    case .emptyCompletedResponse:
-                        retryable = true
-                    default:
-                        retryable = false
+                } catch {
+                    if Task.isCancelled || GeminiTransportHelper.isNetworkCancellation(error) {
+                        throw CancellationError()
                     }
-                }
-                guard retryable else {
-                    throw error
-                }
-                lastError = error
-                guard attempt < policy.maximumAttempts else {
-                    if error as? VertexAIError == .emptyCompletedResponse {
-                        logger?("warning", "Vertex Gemini 連續嘗試後仍回傳 STOP 空內容，已達最多 \(policy.maximumAttempts) 次嘗試；停止自動重試並保留已完成片段。")
+                    CloudDiagnosticContext.current?.failure(error, stage: .generation)
+                    let isNetworkFailure = GeminiTransportHelper.isTransientNetworkFailure(error)
+                    var retryAfter: Double?
+                    var retryable = isNetworkFailure
+                    if let serviceError = error as? VertexAIError {
+                        switch serviceError {
+                        case let .rateLimited(_, delay):
+                            retryAfter = delay
+                            retryable = true
+                        case let .requestFailed(statusCode, _):
+                            retryable = policy.isRetryableStatusCode(statusCode)
+                        case .emptyCompletedResponse:
+                            retryable = true
+                        default:
+                            retryable = false
+                        }
                     }
-                    break
+                    guard retryable else {
+                        throw error
+                    }
+                    lastError = error
+                    guard attempt < policy.maximumAttempts, quota.count < 4 else {
+                        if error as? VertexAIError == .emptyCompletedResponse {
+                            logger?("warning", "Vertex Gemini 連續嘗試後仍回傳 STOP 空內容，已達最多 \(policy.maximumAttempts) 次嘗試；停止自動重試並保留已完成片段。")
+                        }
+                        break
+                    }
+                    let delay = policy.backoffSeconds(
+                        forAttempt: attempt,
+                        retryAfterSeconds: retryAfter
+                    )
+                    try CloudBudgetContext.validateBackoff(seconds: delay)
+                    let diagnosticReason: CloudRetryReason
+                    if error as? VertexAIError == .emptyCompletedResponse { diagnosticReason = .emptyResponse }
+                    else if isNetworkFailure { diagnosticReason = .network }
+                    else if case .rateLimited = error as? VertexAIError { diagnosticReason = .rateLimited }
+                    else { diagnosticReason = .serverError }
+                    CloudDiagnosticContext.current?.retry(diagnosticReason)
+                    let reason = error as? VertexAIError == .emptyCompletedResponse
+                        ? "回報 STOP 但沒有逐字稿文字，將沿用同一模型與音訊重試"
+                        : isNetworkFailure ? "網路暫時中斷" : "暫時忙碌"
+                    logger?(
+                        "info",
+                        "Vertex Gemini \(effectiveModelID) \(reason)，\(String(format: "%.1f", delay)) 秒後進行第 \(attempt + 1) 次嘗試。"
+                    )
+                    try await CloudBudgetContext.backoff(seconds: delay)
                 }
-                let delay = policy.backoffSeconds(
-                    forAttempt: attempt,
-                    retryAfterSeconds: retryAfter
-                )
-                try CloudBudgetContext.validateBackoff(seconds: delay)
-                let diagnosticReason: CloudRetryReason
-                if error as? VertexAIError == .emptyCompletedResponse { diagnosticReason = .emptyResponse }
-                else if isNetworkFailure { diagnosticReason = .network }
-                else if case .rateLimited = error as? VertexAIError { diagnosticReason = .rateLimited }
-                else { diagnosticReason = .serverError }
-                CloudDiagnosticContext.current?.retry(diagnosticReason)
-                let reason = error as? VertexAIError == .emptyCompletedResponse
-                    ? "回報 STOP 但沒有逐字稿文字，將沿用同一模型與音訊重試"
-                    : isNetworkFailure ? "網路暫時中斷" : "暫時忙碌"
-                logger?(
-                    "info",
-                    "Vertex Gemini \(effectiveModelID) \(reason)，\(String(format: "%.1f", delay)) 秒後進行第 \(attempt + 1) 次嘗試。"
-                )
-                try await CloudBudgetContext.backoff(seconds: delay)
             }
-        }
 
-        if let lastError {
-            throw lastError
+            if let lastError {
+                throw lastError
+            }
+            throw VertexAIError.requestFailed(
+                statusCode: 503,
+                message: "伺服器忙碌，重試後仍失敗。"
+            )
         }
-        throw VertexAIError.requestFailed(
-            statusCode: 503,
-            message: "伺服器忙碌，重試後仍失敗。"
-        )
     }
 
     private func generateTranscript(
@@ -754,15 +791,6 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             do {
                 let freshToken = try await CloudBudgetContext.perform(stage: "auth") { try await authService.getAccessToken(forceRefresh: true) }
                 resolvedAccessToken = freshToken
-                urlRequest.setValue("Bearer \(freshToken)", forHTTPHeaderField: "Authorization")
-                let retryResult = try await sendWithPOSIXRetry(
-                    request: urlRequest,
-                    fileURL: tempRequestFile,
-                    session: urlSession,
-                    logger: logger
-                )
-                data = retryResult.0
-                httpResponse = retryResult.1
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
@@ -771,6 +799,13 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                     "Access Token 已失效，重新驗證仍失敗：\(error.localizedDescription)"
                 )
             }
+            // A refreshed credential does not turn a subsequent transport
+            // failure into an authentication failure.
+            urlRequest.setValue("Bearer \(resolvedAccessToken)", forHTTPHeaderField: "Authorization")
+            let retryResult = try await sendWithPOSIXRetry(
+                request: urlRequest, fileURL: tempRequestFile, session: urlSession, logger: logger)
+            data = retryResult.0
+            httpResponse = retryResult.1
         }
 
         logger?(
@@ -810,7 +845,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             from: data,
             requestedModelID: requestedModelID,
             effectiveModelID: effectiveModelID,
-            retryCount: retryCount,
+            retryCount: max(retryCount, (CloudNetworkContext.generation?.count ?? 1) - 1),
             fallbackReason: fallbackReason,
             thinkingLevel: thinkingLevel,
             latencySeconds: Date().timeIntervalSince(startedAt)
@@ -830,38 +865,11 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
     ) async throws -> (Data, HTTPURLResponse) {
         do {
             let (data, response) = try await GeminiTransportHelper.budgetedUpload(session: session, request: request, fileURL: fileURL)
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw VertexAIError.invalidJSONResponse
-            }
-            return (data, httpResponse)
+            guard let http = response as? HTTPURLResponse else { throw VertexAIError.invalidJSONResponse }
+            return (data, http)
         } catch {
-            if GeminiTransportHelper.isPOSIXMessageTooLarge(error) {
-                CloudDiagnosticContext.current?.retry(.transportReset)
-                logger?("info", "本機傳輸通道失敗（POSIX 40），正改用全新連線 (TCP/Ephemeral) 重試，非音檔時長問題。")
-                let retrySession = GeminiTransportHelper.makeEphemeralRetrySession(protocolClasses: session.configuration.protocolClasses)
-                // The retry session owns a connection pool; release it as soon
-                // as this single retry finishes instead of leaking one per hit.
-                defer { retrySession.finishTasksAndInvalidate() }
-                var retryRequest = request
-                retryRequest.assumesHTTP3Capable = false
-
-                do {
-                    let (data, response) = try await GeminiTransportHelper.budgetedUpload(session: retrySession, request: retryRequest, fileURL: fileURL)
-                    guard let httpResponse = response as? HTTPURLResponse else {
-                        throw VertexAIError.invalidJSONResponse
-                    }
-                    logger?("info", "傳輸通道重試成功（HTTP \(httpResponse.statusCode)）。")
-                    return (data, httpResponse)
-                } catch let retryError {
-                    if GeminiTransportHelper.isPOSIXMessageTooLarge(retryError) {
-                        logger?("warning", "重試後仍為 POSIX 40 傳輸失敗。")
-                        throw VertexAIError.transportMessageTooLarge
-                    }
-                    throw retryError
-                }
-            } else {
-                throw error
-            }
+            if GeminiTransportHelper.isPOSIXMessageTooLarge(error) { throw VertexAIError.transportMessageTooLarge }
+            throw error
         }
     }
 
@@ -896,23 +904,44 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         request.setValue("\(audioData.count)", forHTTPHeaderField: "Content-Length")
         request.timeoutInterval = 300
 
-        let (data, httpResponse) = try await sendWithPOSIXRetry(
-            request: request,
-            fileURL: tempAudioFile,
-            session: urlSession,
-            logger: logger
-        )
+        let expectedHash = Data(Insecure.MD5.hash(data: audioData)).base64EncodedString()
+        let (_, response) = try await GeminiTransportHelper.budgetedUpload(
+            session: urlSession, request: request, fileURL: tempAudioFile,
+            attempts: CloudNetworkContext.segmentAttempts?.quota(for: "preparation:gcsUpload", stage: .upload), confirmUpload: {
+                let (data, response) = try await self.gcsMetadata(bucket: bucket, objectName: objectName, accessToken: accessToken)
+                guard response.statusCode == 200,
+                      let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      object["name"] as? String == objectName,
+                      object["size"] as? String == String(audioData.count),
+                      object["md5Hash"] as? String == expectedHash else { return nil }
+                return (data, response)
+            })
+        guard let httpResponse = response as? HTTPURLResponse else { throw VertexAIError.invalidJSONResponse }
 
         if httpResponse.statusCode < 200 || httpResponse.statusCode >= 300 {
-            let errorMsg = parseErrorMessage(from: data)
-            throw VertexAIError.requestFailed(
-                statusCode: httpResponse.statusCode,
-                message: "GCS 音訊上傳失敗：\(errorMsg)"
-            )
+            throw CloudHTTPFailure(status: httpResponse.statusCode, stage: .upload)
         }
     }
 
     /// 刪除 GCS 遠端暫存物件
+    private func gcsMetadata(bucket: String, objectName: String, accessToken: String) async throws -> (Data, HTTPURLResponse) {
+        guard let encoded = objectName.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: "https://storage.googleapis.com/storage/v1/b/\(bucket)/o/\(encoded)") else {
+            throw VertexAIError.invalidEndpointURL("GCS metadata URL 格式錯誤")
+        }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 15
+        let (data, response) = try await GeminiTransportHelper.budgetedData(session: urlSession, request: request, stage: "poll")
+        guard let http = response as? HTTPURLResponse else { throw VertexAIError.invalidJSONResponse }
+        return (data, http)
+    }
+
+    private func gcsObjectIsMissing(bucket: String, objectName: String, accessToken: String) async throws -> Bool {
+        let (_, response) = try await gcsMetadata(bucket: bucket, objectName: objectName, accessToken: accessToken)
+        return [404, 410].contains(response.statusCode)
+    }
+
     private func deleteGCSObjectShielded(
         bucket: String,
         objectName: String,
@@ -920,7 +949,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         authService: GCloudAuthService,
         logger: ((_ level: String, _ message: String) -> Void)?
     ) async {
-        if CloudBudgetContext.current != nil {
+        if CloudNetworkContext.current?.waitForCleanup == false {
             // Cleanup has its own bounded allowance and cannot delay failure UI.
             Task.detached(priority: .utility) {
                 let cleanupBudget = CloudSegmentBudget(limit: .seconds(5))

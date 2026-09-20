@@ -4,19 +4,35 @@ public struct PipelineExecutionError: LocalizedError {
     public let stage: TranscriptionStage
     public let underlying: Error
     public let recoveryDirectory: URL?
+    public let cloudDiagnostics: CloudJobDiagnostics?
+    public var networkRecovery: CloudNetworkRecovery? {
+        let cause = (underlying as? CloudSegmentExecutionError)?.underlying ?? underlying
+        return (cause as? CloudNetworkRecoveryExhausted)?.recovery
+    }
+    public var failureDiagnostic: CloudFailureDiagnostic? {
+        if let segment = underlying as? CloudSegmentExecutionError { return segment.diagnostic }
+        if let network = underlying as? CloudNetworkRecoveryExhausted { return .classify(network) }
+        if underlying is CloudSegmentDeadlineExceeded || underlying is CloudRequestDeadlineExceeded {
+            return .classify(underlying)
+        }
+        return nil
+    }
 
     public init(
         stage: TranscriptionStage,
         underlying: Error,
-        recoveryDirectory: URL?
+        recoveryDirectory: URL?,
+        cloudDiagnostics: CloudJobDiagnostics? = nil
     ) {
         self.stage = stage
         self.underlying = underlying
         self.recoveryDirectory = recoveryDirectory
+        self.cloudDiagnostics = cloudDiagnostics
     }
 
     public var errorDescription: String? {
-        underlying.localizedDescription
+        if underlying is CloudSegmentExecutionError { return underlying.localizedDescription }
+        return failureDiagnostic?.userMessage ?? underlying.localizedDescription
     }
 }
 
@@ -97,6 +113,7 @@ public final class TranscriptionEngine {
     private let googleAIStudioBackend: GoogleAIStudioBackend
     private let vertexAIBackend: VertexAIGeminiBackend
     private let cloudSegmentBudgetLimit: Duration
+    private let cloudNetworkEnvironment: CloudNetworkEnvironment
     private let sleepPrevention: SleepPreventionService
     private let maximumASRSegmentDuration: TimeInterval
     private let cloudAdaptiveMinimumChildDuration: TimeInterval
@@ -210,6 +227,7 @@ public final class TranscriptionEngine {
     }
 
     internal init(
+        cloudNetworkEnvironment: CloudNetworkEnvironment = .init(),
         runtime: ResolvedRuntime,
         paths: ApplicationPaths,
         runner: ProcessRunner = ProcessRunner(),
@@ -224,6 +242,7 @@ public final class TranscriptionEngine {
         cloudSegmentBudgetLimit: Duration = .seconds(900)
     ) {
         self.cloudSegmentBudgetLimit = cloudSegmentBudgetLimit
+        self.cloudNetworkEnvironment = cloudNetworkEnvironment
         self.runtime = runtime
         self.paths = paths
         self.runner = runner
@@ -903,17 +922,11 @@ public final class TranscriptionEngine {
                     try? fileManager.removeItem(at: localRecoveryDirectory)
                 }
 
-                // A cancellation can arrive after one or more paid cloud
-                // segments have completed. Preserve the same minimal text-only
-                // checkpoint used for failures before the outer defer removes
-                // the working directory. The job still reports cancellation;
-                // RecoveryScanner exposes the partial transcript separately.
+                // Preserve diagnostics even when no segment has completed.
+                // Recovery still contains only metadata and completed text;
+                // an empty checkpoint is not advertised as reusable text.
                 if job.snapshot.backendType != .localQwen,
-                   fileManager.fileExists(atPath: segmentManifestURL.path),
-                   Self.cloudCheckpointContainsRecoverableText(
-                       manifestURL: segmentManifestURL,
-                       fileManager: fileManager
-                   )
+                   fileManager.fileExists(atPath: segmentManifestURL.path)
                 {
                     do {
                         _ = try preserveCloudRecoveryData(
@@ -984,7 +997,9 @@ public final class TranscriptionEngine {
             throw PipelineExecutionError(
                 stage: currentStage.current(),
                 underlying: error,
-                recoveryDirectory: preservedRecovery
+                recoveryDirectory: preservedRecovery,
+                cloudDiagnostics: job.snapshot.backendType == .localQwen ? nil
+                    : CloudJobDiagnostics.load(manifestURL: segmentManifestURL)
             )
         }
     }
@@ -1578,7 +1593,9 @@ public final class TranscriptionEngine {
             )
         }
 
+        let failureHistory = CloudFailureHistoryCollector(jobID: job.id, backend: job.snapshot.backendType)
         var budgets: [UUID: CloudSegmentBudget] = [:]
+        var networkContexts: [UUID: CloudNetworkRecoveryContext] = [:]
         var zeroBasedIndex = 0
         while zeroBasedIndex < segmentManifest.segments.count {
             try Task.checkCancellation()
@@ -1633,15 +1650,38 @@ public final class TranscriptionEngine {
             let budget: CloudSegmentBudget
             if let existing = budgets[rootID] { budget = existing }
             else {
-                budget = CloudSegmentBudget(rootSegmentID: rootID, limit: cloudSegmentBudgetLimit, event: { update(.log(level: "info", message: $0)) })
+                budget = CloudSegmentBudget(rootSegmentID: rootID, limit: cloudSegmentBudgetLimit,
+                    now: cloudNetworkEnvironment.now, event: { update(.log(level: "info", message: $0)) })
                 budgets[rootID] = budget
                 update(.log(level: "info", message: "budget created root=\(rootID) limit=\(cloudSegmentBudgetLimit.secondsValue) resumed=\(resumeCheckpoint != nil)；續跑重新計時。"))
             }
             budget.setSegment(index: segmentIndex, depth: record.splitDepth ?? 0)
-            let diagnosticCollector = CloudDiagnosticCollector()
+            let network = networkContexts[rootID] ?? CloudNetworkRecoveryContext(budget: budget, environment: cloudNetworkEnvironment, waitForCleanup: false)
+            networkContexts[rootID] = network
+            network.configure(segment: segmentIndex, total: totalSegments,
+                completed: segmentManifest.segments.filter { $0.completedEventCount == 1 }.count,
+                observer: { update(.networkRecovery($0)) })
+            let diagnosticCollector = CloudDiagnosticCollector(history: failureHistory,
+                rootSegmentID: rootID, segmentIndex: segmentIndex,
+                completedSegmentCount: segmentManifest.segments.filter { $0.completedEventCount == 1 }.count,
+                budget: budget, network: network)
+            diagnosticCollector.setModel(job.snapshot.backendType == .vertexAI
+                ? job.snapshot.vertexAIModelID : job.snapshot.googleAIStudioModelID)
             let preparationStart = ContinuousClock.now
             var preparationSeconds: Double?
             var cloudSeconds: Double?
+            func captureFailure(_ error: Error, outcome: CloudSegmentDiagnostic.Outcome) {
+                let diagnostic = diagnosticCollector.failure(error, stage: .init(rawValue: budget.stage) ?? .unknown)
+                segmentManifest.segments[segmentIndex - 1].diagnostic = diagnosticCollector.snapshot(
+                    start: record.startSeconds, end: record.endSeconds, outcome: outcome,
+                    preparation: preparationSeconds ?? preparationStart.duration(to: .now).secondsValue, cloud: cloudSeconds)
+                segmentManifest.segments[segmentIndex - 1].diagnostic?.failure = diagnostic
+            }
+            defer {
+                segmentManifest.failureHistory = failureHistory.snapshot()
+                segmentManifest.networkRecovery = network.snapshot()
+                try? writeSegmentManifest(segmentManifest, to: segmentManifestURL)
+            }
             do {
                 try budget.checkRemaining(stage: "extract")
                 currentStage.set(.convertingAudio)
@@ -1735,11 +1775,13 @@ public final class TranscriptionEngine {
                 let result: CloudTranscriptionResult
                 do {
                     result = try await CloudDiagnosticContext.$current.withValue(diagnosticCollector) {
+                        try await CloudNetworkContext.$current.withValue(network) {
                         try await CloudBudgetContext.$current.withValue(budget) {
                             try budget.checkRemaining(stage: "transcribe")
                             return try await transcribe(
                                 try Data(contentsOf: audioURL), absoluteStart, record.endSeconds, segmentLabel, speakerRoster
                             )
+                        }
                         }
                     }
                 } catch {
@@ -1877,6 +1919,7 @@ public final class TranscriptionEngine {
                             cloudAdaptiveMinimumChildDuration)
                     ].compactMap { $0 }.joined(separator: "；")
                 )
+                captureFailure(terminalError, outcome: .failed)
                 try? segmentManifest.mark(
                     segmentIndex: segmentIndex,
                     status: .failed,
@@ -1891,28 +1934,31 @@ public final class TranscriptionEngine {
                     error: terminalError,
                     to: workingDirectory
                 )
-                if totalSegments == 1 {
-                    throw terminalError
-                }
-                throw AudioSegmentationError.segmentTranscriptionFailed(
-                    index: segmentIndex,
-                    count: totalSegments,
-                    reason: terminalError.localizedDescription
-                )
+                throw CloudSegmentExecutionError(segmentIndex: segmentIndex, segmentCount: totalSegments,
+                    underlying: terminalError, diagnostic: CloudFailureDiagnostic.classify(terminalError, stage: .split))
                 } catch let error as CloudSegmentDeadlineExceeded {
+                    captureFailure(error, outcome: .deadlineExceeded)
                     segmentManifest.segments[segmentIndex - 1].deadlineReason = error.stage
                     try? segmentManifest.mark(segmentIndex: segmentIndex, status: .failed, failureMessage: error.localizedDescription)
                     try? writeSegmentManifest(segmentManifest, to: segmentManifestURL)
                     update(.log(level: "warning", message: "deadline exhausted root=\(rootID) stage=\(error.stage)；停止切段。"))
                     throw error
+                } catch {
+                    captureFailure(error, outcome: .failed)
+                    try? segmentManifest.mark(segmentIndex: segmentIndex, status: .failed, failureMessage: error.localizedDescription)
+                    throw error
                 }
             } catch let error as CloudSegmentDeadlineExceeded {
+                let terminal: Error = network.isWaiting || network.lastFailure != nil
+                    ? network.exhausted(.rootDeadline) : error
+                captureFailure(terminal, outcome: .deadlineExceeded)
                 segmentManifest.segments[segmentIndex - 1].deadlineReason = error.stage
                 try? segmentManifest.mark(segmentIndex: segmentIndex, status: .failed, failureMessage: error.localizedDescription)
                 try? writeSegmentManifest(segmentManifest, to: segmentManifestURL)
                 update(.log(level: "warning", message: "deadline exhausted root=\(rootID) stage=\(error.stage) elapsed=\(error.elapsedSeconds) cancel requested; local completion gate closed"))
-                throw error
+                throw terminal
             } catch is CancellationError {
+                captureFailure(CancellationError(), outcome: .cancelled)
                 try? segmentManifest.mark(
                     segmentIndex: segmentIndex,
                     status: .failed,
@@ -1921,6 +1967,7 @@ public final class TranscriptionEngine {
                 try? writeSegmentManifest(segmentManifest, to: segmentManifestURL)
                 throw CancellationError()
             } catch {
+                captureFailure(error, outcome: Self.isExplicitGoogleSafetyBlock(error) ? .blocked : .failed)
                 if Self.isExplicitGoogleSafetyBlock(error) {
                     segmentManifest.segments[segmentIndex - 1].diagnostic = diagnosticCollector.snapshot(
                         start: record.startSeconds, end: record.endSeconds, outcome: .blocked,
@@ -1961,14 +2008,9 @@ public final class TranscriptionEngine {
                     error: error,
                     to: workingDirectory
                 )
-                if totalSegments == 1 {
-                    throw error
-                }
-                throw AudioSegmentationError.segmentTranscriptionFailed(
-                    index: segmentIndex,
-                    count: totalSegments,
-                    reason: error.localizedDescription
-                )
+                throw CloudSegmentExecutionError(segmentIndex: segmentIndex, segmentCount: totalSegments,
+                    underlying: error, diagnostic: CloudFailureDiagnostic.classify(error,
+                        stage: .init(rawValue: budget.stage) ?? .unknown))
             }
         }
 
@@ -2080,7 +2122,8 @@ public final class TranscriptionEngine {
         )
         let cloudDiagnostics = CloudJobDiagnostics(audioDurationSeconds: metadata.duration,
             segments: (segmentManifest.discardedDiagnostics ?? []) + mergeableSegments.compactMap(\.diagnostic),
-            postprocessingSeconds: postprocessingStart.duration(to: .now).secondsValue)
+            postprocessingSeconds: postprocessingStart.duration(to: .now).secondsValue,
+            failureHistory: failureHistory.snapshot())
         let finalOutputURL = try writeUniqueText(
             finalTranscribedText,
             sourceURL: sourceURL,
@@ -2474,12 +2517,13 @@ extension TranscriptionEngine {
                     reusedFromCheckpoint: sourceRecord.reusedFromCheckpoint,
                     splitDepth: sourceRecord.splitDepth,
                     rootSegmentID: sourceRecord.rootSegmentID,
-                    deadlineReason: sourceRecord.deadlineReason
+                    deadlineReason: sourceRecord.deadlineReason,
+                    diagnostic: sourceRecord.diagnostic
                 )
             )
         }
 
-        let recoveredManifestValue = AudioSegmentManifest(
+        var recoveredManifestValue = AudioSegmentManifest(
             schemaVersion: sourceManifest.schemaVersion,
             jobID: sourceManifest.jobID,
             sourceDurationSeconds: sourceManifest.sourceDurationSeconds,
@@ -2489,6 +2533,9 @@ extension TranscriptionEngine {
             segments: recoveredRecords,
             speakerRoster: sourceManifest.speakerRoster
         )
+        recoveredManifestValue.discardedDiagnostics = sourceManifest.discardedDiagnostics
+        recoveredManifestValue.failureHistory = sourceManifest.failureHistory
+        recoveredManifestValue.networkRecovery = sourceManifest.networkRecovery
         let recoveredManifest = recoveryDirectory.appendingPathComponent(
             RecoveryScanner.segmentManifestFileName
         )

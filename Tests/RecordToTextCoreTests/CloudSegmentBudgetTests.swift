@@ -63,7 +63,7 @@ final class CloudSegmentBudgetTests: XCTestCase {
                 try await Task.sleep(for: .seconds(1))
             }
             XCTFail("Single request exceeded wall limit")
-        } catch let error as URLError { XCTAssertEqual(error.code, .timedOut) }
+        } catch let error as CloudRequestDeadlineExceeded { XCTAssertEqual(error.stage, "generation") }
         try budget.checkRemaining(stage: "retry")
         XCTAssertGreaterThan(budget.remaining(), .seconds(9))
     }
