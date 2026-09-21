@@ -54,6 +54,21 @@ public enum GeminiTransportHelper {
                 }
                 if let http = result.1 as? HTTPURLResponse, http.statusCode >= 400 {
                     CloudDiagnosticContext.current?.failure(.http(http.statusCode, stage: .init(rawValue: stage) ?? .unknown))
+                    if http.statusCode == 429 {
+                        // Keep the hint even when the backend maps this response
+                        // to its legacy daily-quota error without a delay field.
+                        context?.service.noteServerDelay(retryAfterSeconds(response: http, data: result.0),
+                            stage: .init(rawValue: stage) ?? .unknown)
+                    }
+                    if !generation, http.statusCode == 429, let context {
+                        context.requestSucceeded()
+                        try await context.service.rateLimited(after: quota?.count ?? attempt,
+                            stage: .init(rawValue: stage) ?? .unknown,
+                            serverDelay: retryAfterSeconds(response: http, data: result.0),
+                            dailyQuota: isDailyQuotaExceeded(data: result.0, message: ""),
+                            canRetry: attempt < 4, resultUnknown: context.snapshot().resultUnknown)
+                        continue
+                    }
                     // Upload and metadata requests own their retry scope. Generation
                     // HTTP/model policy remains in the backend; sends still share quota.
                     if !generation, RetryPolicy.isRetryableStatusCode(http.statusCode), attempt < 4 {
@@ -63,10 +78,14 @@ public enum GeminiTransportHelper {
                     }
                 }
                 context?.requestSucceeded()
+                if (result.1 as? HTTPURLResponse)?.statusCode != 429 {
+                    context?.service.resolve(stage: .init(rawValue: stage) ?? .unknown)
+                }
                 return result
             } catch {
                 if Task.isCancelled || isNetworkCancellation(error) { throw CancellationError() }
                 if let deadline = error as? CloudSegmentDeadlineExceeded {
+                    if let context, context.service.isRecovering { throw context.service.exhausted(.rootDeadline) }
                     if let context, context.isWaiting || context.lastFailure != nil { throw context.exhausted(.rootDeadline) }
                     throw deadline
                 }
@@ -74,6 +93,7 @@ public enum GeminiTransportHelper {
                 let transient = isTransientNetworkFailure(error)
                 let posix = isPOSIXMessageTooLarge(error)
                 guard transient || posix else { throw error }
+                if transient { context.service.resolve() }
                 if transient { context.noteFailure(.classify(error, stage: .init(rawValue: stage) ?? .unknown), generation: generation) }
                 let sends = quota?.count ?? attempt
                 guard attempt < 4, sends < 4 else {
@@ -216,32 +236,37 @@ public enum GeminiTransportHelper {
     /// Extracts a server-requested delay from Retry-After or google.rpc.RetryInfo.
     public static func retryAfterSeconds(
         response: HTTPURLResponse,
-        data: Data
+        data: Data,
+        now: Date = Date()
     ) -> Double? {
-        if let raw = response.value(forHTTPHeaderField: "Retry-After")?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           let seconds = Double(raw),
-           seconds >= 0
-        {
-            return seconds
-        }
-
-        guard
-            let object = try? JSONSerialization.jsonObject(with: data)
-                as? [String: Any],
-            let error = object["error"] as? [String: Any],
-            let details = error["details"] as? [[String: Any]]
-        else {
-            return nil
-        }
-
-        for detail in details {
-            if let retryDelay = detail["retryDelay"] as? String,
-               let seconds = parseDurationSeconds(retryDelay) {
-                return seconds
+        var delays: [Double] = []
+        if let raw = response.value(forHTTPHeaderField: "Retry-After")?.trimmingCharacters(in: .whitespacesAndNewlines) {
+            if !raw.isEmpty, raw.allSatisfy({ $0.isASCII && $0.isNumber }), let seconds = Double(raw), seconds.isFinite {
+                delays.append(seconds)
+            } else {
+                let parser = DateFormatter()
+                parser.locale = Locale(identifier: "en_US_POSIX")
+                parser.timeZone = TimeZone(secondsFromGMT: 0)
+                parser.isLenient = false
+                for format in ["EEE',' dd MMM yyyy HH':'mm':'ss 'GMT'",
+                               "EEEE',' dd-MMM-yy HH':'mm':'ss 'GMT'",
+                               "EEE MMM d HH':'mm':'ss yyyy"] {
+                    parser.dateFormat = format
+                    if let date = parser.date(from: raw) {
+                        delays.append(max(0, date.timeIntervalSince(now)))
+                        break
+                    }
+                }
             }
         }
-        return nil
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let error = object["error"] as? [String: Any],
+           let details = error["details"] as? [[String: Any]] {
+            for detail in details {
+                if let raw = detail["retryDelay"] as? String, let seconds = parseDurationSeconds(raw) { delays.append(seconds) }
+            }
+        }
+        return delays.filter { $0.isFinite && $0 >= 0 }.max()
     }
 
     public static func isDailyQuotaExceeded(
@@ -268,7 +293,7 @@ public enum GeminiTransportHelper {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.hasSuffix("s"),
            let value = Double(trimmed.dropLast()),
-           value >= 0 {
+           value.isFinite, value >= 0 {
             return value
         }
         return nil

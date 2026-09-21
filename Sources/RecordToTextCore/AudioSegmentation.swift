@@ -129,6 +129,7 @@ public struct AudioSegmentManifest: Codable, Equatable, Sendable {
     public var discardedDiagnostics: [CloudSegmentDiagnostic]?
     public var failureHistory: CloudFailureHistory?
     public var networkRecovery: CloudNetworkRecovery?
+    public var serviceRecovery: CloudServiceRecovery?
 
     public init(
         schemaVersion: Int = 1,

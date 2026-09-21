@@ -9,8 +9,13 @@ public struct PipelineExecutionError: LocalizedError {
         let cause = (underlying as? CloudSegmentExecutionError)?.underlying ?? underlying
         return (cause as? CloudNetworkRecoveryExhausted)?.recovery
     }
+    public var serviceRecovery: CloudServiceRecovery? {
+        let cause = (underlying as? CloudSegmentExecutionError)?.underlying ?? underlying
+        return (cause as? CloudServiceRecoveryExhausted)?.recovery
+    }
     public var failureDiagnostic: CloudFailureDiagnostic? {
         if let segment = underlying as? CloudSegmentExecutionError { return segment.diagnostic }
+        if let service = underlying as? CloudServiceRecoveryExhausted { return .classify(service) }
         if let network = underlying as? CloudNetworkRecoveryExhausted { return .classify(network) }
         if underlying is CloudSegmentDeadlineExceeded || underlying is CloudRequestDeadlineExceeded {
             return .classify(underlying)
@@ -1593,7 +1598,8 @@ public final class TranscriptionEngine {
             )
         }
 
-        let failureHistory = CloudFailureHistoryCollector(jobID: job.id, backend: job.snapshot.backendType)
+        let failureHistory = CloudFailureHistoryCollector(jobID: job.id, backend: job.snapshot.backendType,
+            inherited: resumeCheckpoint?.failureHistory ?? job.cloudDiagnostics?.failureHistory)
         var budgets: [UUID: CloudSegmentBudget] = [:]
         var networkContexts: [UUID: CloudNetworkRecoveryContext] = [:]
         var zeroBasedIndex = 0
@@ -1661,6 +1667,9 @@ public final class TranscriptionEngine {
             network.configure(segment: segmentIndex, total: totalSegments,
                 completed: segmentManifest.segments.filter { $0.completedEventCount == 1 }.count,
                 observer: { update(.networkRecovery($0)) })
+            network.service.configure(segment: segmentIndex, total: totalSegments,
+                completed: segmentManifest.segments.filter { $0.completedEventCount == 1 }.count,
+                observer: { update(.serviceRecovery($0)) })
             let diagnosticCollector = CloudDiagnosticCollector(history: failureHistory,
                 rootSegmentID: rootID, segmentIndex: segmentIndex,
                 completedSegmentCount: segmentManifest.segments.filter { $0.completedEventCount == 1 }.count,
@@ -1680,6 +1689,7 @@ public final class TranscriptionEngine {
             defer {
                 segmentManifest.failureHistory = failureHistory.snapshot()
                 segmentManifest.networkRecovery = network.snapshot()
+                segmentManifest.serviceRecovery = network.service.snapshot
                 try? writeSegmentManifest(segmentManifest, to: segmentManifestURL)
             }
             do {
@@ -1949,8 +1959,10 @@ public final class TranscriptionEngine {
                     throw error
                 }
             } catch let error as CloudSegmentDeadlineExceeded {
-                let terminal: Error = network.isWaiting || network.lastFailure != nil
-                    ? network.exhausted(.rootDeadline) : error
+                let terminal: Error
+                if network.service.isRecovering { terminal = network.service.exhausted(.rootDeadline) }
+                else if network.isWaiting || network.lastFailure != nil { terminal = network.exhausted(.rootDeadline) }
+                else { terminal = error }
                 captureFailure(terminal, outcome: .deadlineExceeded)
                 segmentManifest.segments[segmentIndex - 1].deadlineReason = error.stage
                 try? segmentManifest.mark(segmentIndex: segmentIndex, status: .failed, failureMessage: error.localizedDescription)
@@ -2536,6 +2548,7 @@ extension TranscriptionEngine {
         recoveredManifestValue.discardedDiagnostics = sourceManifest.discardedDiagnostics
         recoveredManifestValue.failureHistory = sourceManifest.failureHistory
         recoveredManifestValue.networkRecovery = sourceManifest.networkRecovery
+        recoveredManifestValue.serviceRecovery = sourceManifest.serviceRecovery
         let recoveredManifest = recoveryDirectory.appendingPathComponent(
             RecoveryScanner.segmentManifestFileName
         )

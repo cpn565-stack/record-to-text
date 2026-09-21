@@ -45,6 +45,9 @@ final class AppCredentialMigrationTests: XCTestCase {
         job.resumeFromRecoveryDirectory = "/checkpoint"
         XCTAssertFalse(job.canUpdateQueuedEngine(activeJobID: nil))
         job.resumeFromRecoveryDirectory = nil
+        job.continuationParentJobID = UUID()
+        XCTAssertFalse(job.canUpdateQueuedEngine(activeJobID: nil), "Zero-checkpoint resend must preserve the original model")
+        job.continuationParentJobID = nil
         job.stage = .transcribing
         XCTAssertFalse(job.canUpdateQueuedEngine(activeJobID: nil))
         XCTAssertTrue(job.snapshot.engineDisplayName.contains("本機 Qwen"))
@@ -144,6 +147,8 @@ final class AppCredentialMigrationTests: XCTestCase {
         let store = FakeCredentialStore()
         store.loadDelay = 0.4
         let model = AppViewModel(paths: fixture.paths, credentialStore: store)
+        let original = try XCTUnwrap(model.jobs.first { $0.id == fixture.jobID })
+        try Data("fixture audio".utf8).write(to: original.sourceURL)
         model.retryJob(fixture.jobID)
         let queued = try XCTUnwrap(model.jobs.first(where: { $0.stage == .queued }))
         model.startQueuedJobs()
@@ -154,6 +159,8 @@ final class AppCredentialMigrationTests: XCTestCase {
         model.removeQueuedJob(queued.id)
         await model.waitForCredentialLoading()
         XCTAssertFalse(model.jobs.contains(where: { $0.id == queued.id }))
+        XCTAssertNil(model.jobs.first { $0.id == fixture.jobID }?.cloudContinuationID)
+        XCTAssertNil(model.cloudResendStatus(fixture.jobID))
     }
 
     func testSuccessfulMigrationStoresKeyBeforeRedactingLegacyFiles() async throws {

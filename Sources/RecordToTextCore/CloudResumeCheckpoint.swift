@@ -28,6 +28,7 @@ public struct CloudResumeCheckpoint: Equatable, Sendable {
     public let reusableSegments: [Int: ReusableCloudSegment]
     public var rootSegmentIDs: [Int: UUID] = [:]
     public var discardedDiagnostics: [CloudSegmentDiagnostic] = []
+    public var failureHistory: CloudFailureHistory?
     public let splitDepths: [Int: Int]
     public let speakerRoster: SpeakerRoster?
 
@@ -289,6 +290,7 @@ public enum CloudResumeCheckpointLoader {
         )
         checkpoint.rootSegmentIDs = rootSegmentIDs
         checkpoint.discardedDiagnostics = manifest.discardedDiagnostics ?? []
+        checkpoint.failureHistory = manifest.failureHistory
         return checkpoint
     }
 

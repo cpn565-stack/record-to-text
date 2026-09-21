@@ -353,6 +353,8 @@ struct MainView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
+                QueueSleepControls(coordinator: viewModel.queueSleep, setEnabled: viewModel.setSleepAfterCompletion)
+
                 HStack(spacing: 10) {
                     Button {
                         viewModel.chooseAndMergeTranscriptFiles()
@@ -395,7 +397,9 @@ struct MainView: View {
             return false
         }
 
+        viewModel.beginFileImport()
         Task { @MainActor in
+            defer { viewModel.endFileImport() }
             let urls = await Self.fileURLs(from: providers)
             viewModel.addFiles(urls)
         }
@@ -925,7 +929,7 @@ private struct JobRowView: View {
                 }
 
                 HStack(spacing: 7) {
-                    Text(job.networkRecovery?.state == .paused ? "網路恢復逾限，已暫停" : job.statusWithCompletionTime())
+                    Text(job.serviceRecovery?.state == .paused ? "Google 忙碌，已暫停" : job.networkRecovery?.state == .paused ? "網路恢復逾限，已暫停" : job.statusWithCompletionTime())
                         .font(.caption)
                         .foregroundStyle(statusColor)
 
@@ -956,7 +960,17 @@ private struct JobRowView: View {
 
     @ViewBuilder
     private var progressSection: some View {
-        if let recovery = job.networkRecovery, recovery.state == .waiting || recovery.state == .retrying {
+        if let recovery = job.serviceRecovery, recovery.state == .coolingDown || recovery.state == .retrying {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(recovery.message).font(.caption)
+                if let retryAt = recovery.nextRetryAt {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        Text("約 \(max(0, Int(ceil(retryAt.timeIntervalSince(context.date))))) 秒後再嘗試；已發送 \(recovery.attempts)／4 次")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+            }
+        } else if let recovery = job.networkRecovery, recovery.state == .waiting || recovery.state == .retrying {
             VStack(alignment: .leading, spacing: 4) {
                 Text(recovery.message).font(.caption)
                 if recovery.resultUnknown {
@@ -1058,18 +1072,21 @@ private struct JobRowView: View {
 
     @ViewBuilder
     private var failureSection: some View {
-        if let recovery = job.networkRecovery, recovery.state == .paused {
+        if job.snapshot.backendType != .localQwen, job.stage.isTerminal,
+           job.stage != .completed || job.hasPendingGapRecovery {
             HStack {
-                Button(recovery.completedSegmentCount > 0 ? "從已完成片段繼續" : "重新嘗試") {
-                    viewModel.resumeNetworkPausedJob(job.id)
+                Button(viewModel.cloudResendStatus(job.id) ?? (cloudResumeIsAvailable ? "重送未完成片段" : "重新送出")) {
+                    viewModel.resendCloudJob(job.id)
                 }
                 .buttonStyle(.link)
-                Button("取消這筆工作") { viewModel.cancelNetworkPausedJob(job.id) }
-                    .buttonStyle(.link)
+                .disabled(viewModel.cloudResendStatus(job.id) != nil)
+                if job.isCloudRecoveryPaused {
+                    Button("取消這筆工作") { viewModel.cancelNetworkPausedJob(job.id) }.buttonStyle(.link)
+                }
             }
         }
-        if job.networkRecovery?.resultUnknown == true {
-            Text("前次請求可能已被 Google 處理；重送未完成片段可能再次計費。")
+        if job.networkRecovery?.resultUnknown == true || job.serviceRecovery?.resultUnknown == true {
+            Text("先前請求結果未知，重送未完成片段可能再次計費。")
                 .font(.caption2).foregroundStyle(.secondary)
         }
         if let failure = job.failure {
@@ -1089,16 +1106,7 @@ private struct JobRowView: View {
                             }
                         }
 
-                        if cloudResumeIsAvailable {
-                            Button(
-                                job.stage == .completed
-                                    ? "重送未完成片段"
-                                    : "從已完成片段續跑"
-                            ) {
-                                viewModel.resumeCloudJobFromCheckpoint(job.id)
-                            }
-                            .buttonStyle(.link)
-                        } else if viewModel.canResumeLocalQwenJob(job) {
+                        if viewModel.canResumeLocalQwenJob(job) {
                             Button("從已完成 Qwen chunk 續跑") {
                                 viewModel.resumeLocalQwenJobFromCheckpoint(job.id)
                             }

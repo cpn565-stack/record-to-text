@@ -41,7 +41,7 @@ public enum JobRetentionPolicy {
             retryableTerminal,
             limit: terminalHistoryLimit
         )
-        let retainedIDs = durableIDs.union(terminalIDs)
+        let retainedIDs = durableIDs.union(terminalIDs).union(continuationAncestorIDs(jobs))
         let logLimit = max(maximumLogLines, 0)
 
         return jobs.compactMap { job in
@@ -72,14 +72,32 @@ public enum JobRetentionPolicy {
             terminalHistory,
             limit: terminalHistoryLimit
         )
-        let retainedIDs = durableIDs.union(terminalIDs)
+        let retainedIDs = durableIDs.union(terminalIDs).union(continuationAncestorIDs(jobs))
         return jobs.filter { retainedIDs.contains($0.id) }
     }
 
     public static func isDurableAcrossRestarts(
         _ job: TranscriptionJob
     ) -> Bool {
-        !job.stage.isTerminal || job.stage == .interrupted || job.hasPendingGapRecovery
+        !job.stage.isTerminal || job.stage == .interrupted || job.hasPendingGapRecovery || job.continuationPending == true ||
+            (job.continuationParentJobID != nil && job.stage != .completed && job.continuationCompleted != true)
+    }
+
+    /// Preserve the route to a pending continuation even with history limit 0.
+    /// Older ledgers may have only the forward networkContinuationJobID link.
+    public static func continuationAncestorIDs(_ jobs: [TranscriptionJob]) -> Set<UUID> {
+        var retained = Set(jobs.filter(isDurableAcrossRestarts).map(\.id))
+        var ancestors = Set<UUID>()
+        var changed = true
+        while changed {
+            changed = false
+            for job in jobs {
+                guard let child = job.cloudContinuationID, retained.contains(child) else { continue }
+                ancestors.insert(job.id)
+                if retained.insert(job.id).inserted { changed = true }
+            }
+        }
+        return ancestors
     }
 
     private static func newestJobIDs(

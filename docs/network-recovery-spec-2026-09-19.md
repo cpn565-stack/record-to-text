@@ -4,6 +4,8 @@
 
 狀態（2026-09-21 更新）：方案 A 的 Core／App 實作與故障注入測試已加入 working tree，接續驗證見 [實作與驗證紀錄](network-recovery-implementation-2026-09-21.md)。尚未安裝或部署；native GUI／真實網路及付費驗收另列待辦。下文「目前／現況」調查以 2026-09-19 基準版本為準，不代表修改後程式。
 
+後續工作：[雲端 429 冷卻、手動重送與完成後休眠](cloud-cooldown-manual-resend-sleep-spec-2026-09-21.md)（2026-09-21 已開始實作，依使用者要求安全暫停；尚未完成測試）。新增服務忙碌處理，沿用本規格的網路恢復、發送上限與檢查點契約。接續狀態見 [最新交班](handoff-2026-09-21-service-recovery-sleep.md)。
+
 基準：原始碼 `7c337d2`；查驗時 `/Applications/record-to-text.app` 為 0.2.1 build 6。
 
 適用：Vertex AI、Google AI Studio；主要使用情境為中國境內 VPN／手機網路短暫不穩，稍後恢復。

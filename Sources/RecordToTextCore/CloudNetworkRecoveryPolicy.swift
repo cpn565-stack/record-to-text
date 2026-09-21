@@ -107,6 +107,7 @@ public final class CloudNetworkRecoveryContext: @unchecked Sendable {
     public let environment: CloudNetworkEnvironment
     public let policy: CloudNetworkRecoveryPolicy
     let waitForCleanup: Bool
+    let service: CloudServiceRecoveryContext
     private let budget: CloudSegmentBudget
     private let lock = NSRecursiveLock()
     private var accumulated: Double = 0
@@ -121,6 +122,7 @@ public final class CloudNetworkRecoveryContext: @unchecked Sendable {
     public init(budget: CloudSegmentBudget, policy: CloudNetworkRecoveryPolicy = .init(),
                 environment: CloudNetworkEnvironment = .init(), waitForCleanup: Bool = true) {
         self.budget = budget; self.policy = policy; self.environment = environment
+        self.service = CloudServiceRecoveryContext(budget: budget, environment: environment)
         self.waitForCleanup = waitForCleanup
         status = .init(state: .resolved, waitedSeconds: 0, remainingWaitSeconds: policy.maximumWaitSeconds,
                        segmentIndex: 1, segmentCount: 1, completedSegmentCount: 0, resultUnknown: false)

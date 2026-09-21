@@ -3,7 +3,7 @@ import Foundation
 public extension TranscriptionJob {
     func canUpdateQueuedEngine(activeJobID: UUID?) -> Bool {
         stage == .queued && id != activeJobID && startedAt == nil
-            && resumeFromRecoveryDirectory == nil
+            && resumeFromRecoveryDirectory == nil && continuationParentJobID == nil
     }
 }
 

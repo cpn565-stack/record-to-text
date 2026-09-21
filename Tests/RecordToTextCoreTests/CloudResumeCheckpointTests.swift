@@ -3,6 +3,39 @@ import XCTest
 @testable import RecordToTextCore
 
 final class CloudResumeCheckpointTests: XCTestCase {
+    func testManualResendPreservesSnapshotAndRejectsDamagedCompletedCheckpoint() throws {
+        let fixture = try makeFixture()
+        var failed = fixture.job
+        failed.stage = .failed
+        failed.failure = .init(stage: .transcribing, userMessage: "fixture", technicalDetails: "fixture",
+            recoverable: true, recoveryDirectory: fixture.recoveryDirectory.path)
+        let next = try CloudJobContinuation.make(from: failed, paths: fixture.paths)
+        XCTAssertEqual(next.snapshot, failed.snapshot)
+        XCTAssertEqual(next.continuationParentJobID, failed.id)
+        XCTAssertEqual(next.resumeFromRecoveryDirectory, fixture.recoveryDirectory.path)
+        let segment = fixture.recoveryDirectory.appendingPathComponent("segments/segment-0001.txt")
+        try Data().write(to: segment)
+        XCTAssertThrowsError(try CloudJobContinuation.make(from: failed, paths: fixture.paths))
+        try FileManager.default.removeItem(at: failed.sourceURL)
+        XCTAssertThrowsError(try CloudJobContinuation.make(from: failed, paths: fixture.paths))
+    }
+
+    func testManualResendNeverDiscardsCompletedEvidenceWithoutManifest() throws {
+        let fixture = try makeFixture()
+        var failed = fixture.job
+        failed.stage = .failed
+        failed.networkRecovery = .init(state: .resolved, waitedSeconds: 0, remainingWaitSeconds: 300,
+            segmentIndex: 1, segmentCount: 2, completedSegmentCount: 0, resultUnknown: false)
+        failed.serviceRecovery = CloudServiceRecovery()
+        failed.serviceRecovery?.completedSegmentCount = 1
+        // No recovery path at all, or an existing directory with missing manifest.
+        XCTAssertThrowsError(try CloudJobContinuation.make(from: failed, paths: fixture.paths))
+        failed.failure = .init(stage: .transcribing, userMessage: "fixture", technicalDetails: "fixture",
+            recoverable: true, recoveryDirectory: fixture.recoveryDirectory.path)
+        try FileManager.default.removeItem(at: fixture.recoveryDirectory.appendingPathComponent("segment-manifest.json"))
+        XCTAssertThrowsError(try CloudJobContinuation.make(from: failed, paths: fixture.paths))
+    }
+
     func testLoadsOnlyCompletedNonEmptyManagedSegments() throws {
         let fixture = try makeFixture()
         let checkpoint = try CloudResumeCheckpointLoader.load(

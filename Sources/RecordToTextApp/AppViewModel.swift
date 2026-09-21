@@ -39,20 +39,20 @@ enum GoogleAIStudioCredentialStorageState: Equatable {
 final class AppViewModel: ObservableObject {
     @Published private(set) var settings: AppSettings
     @Published private(set) var glossaryCollection: GlossaryCollection
-    @Published private(set) var jobs: [TranscriptionJob]
+    @Published private(set) var jobs: [TranscriptionJob] { didSet { refreshQueueSleep() } }
     @Published private(set) var recentJobs: [RecentJobSummary]
-    @Published private(set) var activeJobID: UUID?
+    @Published private(set) var activeJobID: UUID? { didSet { refreshQueueSleep() } }
     @Published private(set) var environmentReport: EnvironmentReport?
     @Published private(set) var isSelectedModelCached = false
     @Published private(set) var isSelectedModelInDefaultHFCache = false
-    @Published private(set) var modelDownloadPhase: ModelDownloadPhase = .idle
+    @Published private(set) var modelDownloadPhase: ModelDownloadPhase = .idle { didSet { refreshQueueSleep() } }
     @Published private(set) var modelDownloadProgressLine: String = ""
     @Published private(set) var recoveryScanReport: RecoveryScanReport?
     @Published private(set) var isRecoveryScanRunning = false
     @Published private(set) var isModelCacheStatusRefreshing = false
-    @Published private(set) var isGoogleAIStudioCredentialLoading = true
+    @Published private(set) var isGoogleAIStudioCredentialLoading = true { didSet { refreshQueueSleep() } }
     private var credentialLoadingTask: Task<Void, Never>?
-    @Published private(set) var isGoogleAIStudioCredentialSaving = false
+    @Published private(set) var isGoogleAIStudioCredentialSaving = false { didSet { refreshQueueSleep() } }
     @Published private(set) var googleAIStudioCredentialStorageState:
         GoogleAIStudioCredentialStorageState = .absent
 
@@ -61,15 +61,16 @@ final class AppViewModel: ObservableObject {
     @Published var isGlossaryManagerPresented = false
     @Published var isEnvironmentPresented = false
     @Published var isOnboardingPresented: Bool
-    @Published var isDuplicateConfirmationPresented = false
-    @Published var isPromptConsentPresented = false
+    @Published var isDuplicateConfirmationPresented = false { didSet { refreshQueueSleep() } }
+    @Published var isPromptConsentPresented = false { didSet { refreshQueueSleep() } }
     @Published var isRecoveryScanPresented = false
     /// Pending delete confirmation for recovery scan UI.
     @Published var recoveryItemPendingDeletion: RecoveryScanItem?
     @Published var isBulkCleanupConfirmationPresented = false
 
-    @Published private(set) var jobPersistenceError: String?
+    @Published private(set) var jobPersistenceError: String? { didSet { refreshQueueSleep() } }
     private var persistenceRevision: UInt64 = 0
+    private var durablePersistenceRevision: UInt64 = 0
     private var jobPersistenceLoadBlocked = false
     private var jobPersistenceDeferred = false
     private var persistenceSubmission: Task<Void, Never>?
@@ -82,9 +83,11 @@ final class AppViewModel: ObservableObject {
             OutputPublicationStore(paths: paths).prune(after: snapshot)
         },
         observer: { [weak self] status in
-            Task { @MainActor in self?.jobPersistenceError = status.error }
+            Task { @MainActor in self?.applyPersistenceStatus(status) }
         }
     )
+    let queueSleep: QueueCompletionSleepCoordinator
+    private var fileOperations = 0 { didSet { refreshQueueSleep() } }
     private let paths: ApplicationPaths
     private let engineFactory: ((ResolvedRuntime) -> TranscriptionEngine)?
     private let settingsRepository: JSONRepository<AppSettings>
@@ -112,17 +115,20 @@ final class AppViewModel: ObservableObject {
     private var promptConsentJobID: UUID?
     private var cancellationRequested = Set<UUID>()
     private var allowMissingPrompt = Set<UUID>()
-    private var queuePausedForPromptConsent = false
+    private var queuePausedForPromptConsent = false { didSet { refreshQueueSleep() } }
     private var resumeQueueAfterPromptConsent = false
-    private var queuePausedForEnvironment = false
-    private var networkContinuationInFlight = Set<UUID>()
+    private var queuePausedForEnvironment = false { didSet { refreshQueueSleep() } }
+    private var continuationInFlight = Set<UUID>()
+    /// Authorization lasts only for this process. A queued continuation after
+    /// restart needs another explicit click, even if its journal was durable.
+    private var authorizedContinuations = Set<UUID>()
     private var terminatingForNetwork = Set<UUID>()
     private var isTerminating = false
     var queuePausedForNetwork: Bool {
-        !networkContinuationInFlight.isEmpty || jobs.contains {
-            $0.stage == .interrupted && $0.networkRecovery != nil && $0.networkRecovery?.state != .resolved
-        }
+        jobs.contains { $0.stage == .interrupted && $0.networkRecovery != nil && $0.networkRecovery?.state != .resolved }
+            || (!continuationInFlight.isEmpty && jobs.contains { $0.networkRecovery != nil })
     }
+    var queuePausedForRecovery: Bool { !continuationInFlight.isEmpty || jobs.contains(where: \.isCloudRecoveryPaused) }
     private var legacySettingsCredentialMigrationPending = false
     private var legacyLedgerCredentialMigrationPending = false
     private var credentialStoreSynchronizedForLegacyMigration = false
@@ -133,9 +139,11 @@ final class AppViewModel: ObservableObject {
         credentialStore: any GoogleAIStudioCredentialStoring = KeychainGoogleAIStudioCredentialStore(),
         settingsSaveOverride: ((AppSettings) throws -> Void)? = nil,
         jobLedgerSaveOverride: ((JobLedgerCollection) throws -> Void)? = nil,
-        engineFactory: ((ResolvedRuntime) -> TranscriptionEngine)? = nil
+        engineFactory: ((ResolvedRuntime) -> TranscriptionEngine)? = nil,
+        queueSleep: QueueCompletionSleepCoordinator? = nil
     ) {
         self.paths = paths
+        self.queueSleep = queueSleep ?? QueueCompletionSleepCoordinator()
         self.engineFactory = engineFactory
         self.fileManager = fileManager
         self.credentialStore = credentialStore
@@ -179,6 +187,7 @@ final class AppViewModel: ObservableObject {
         do {
             recoveredJournal = try JobPersistenceStore(ledgerURL: paths.jobLedger, recentURL: paths.recentJobs).recover(repairOutputs: false)
             persistenceRevision = recoveredJournal?.revision ?? 0
+            durablePersistenceRevision = persistenceRevision
         } catch {
             recoveredJournal = nil
             jobPersistenceLoadBlocked = true
@@ -221,11 +230,23 @@ final class AppViewModel: ObservableObject {
         }
         var summaries = loadedRecentJobs.jobs
         var didInterruptJobs = false
-        for index in loadedLedger.jobs.indices where loadedLedger.jobs[index].stage == .interrupted {
+        for index in loadedLedger.jobs.indices where loadedLedger.jobs[index].stage.isTerminal {
             let job = loadedLedger.jobs[index]
-            let continuationNotStarted = job.networkRecovery?.state == .resolved && job.networkContinuationJobID.map { id in
+            if let childID = job.cloudContinuationID,
+               let child = loadedLedger.jobs.firstIndex(where: { $0.id == childID }),
+               loadedLedger.jobs[child].continuationParentJobID == nil {
+                loadedLedger.jobs[child].continuationParentJobID = job.id
+                didInterruptJobs = true
+            }
+            let continuationNotStarted = job.cloudContinuationID.map { id in
                 loadedLedger.jobs.contains { $0.id == id && $0.stage == .queued }
             } == true
+            if continuationNotStarted { loadedLedger.jobs[index].continuationPending = true }
+            if job.serviceRecovery?.state == .unknown || continuationNotStarted {
+                loadedLedger.jobs[index].serviceRecovery?.state = .paused
+                loadedLedger.jobs[index].serviceRecovery?.stopReason = .appRestarted
+                didInterruptJobs = true
+            }
             if job.networkRecovery?.state == .unknown || continuationNotStarted {
                 loadedLedger.jobs[index].networkRecovery?.state = .paused
                 loadedLedger.jobs[index].networkRecovery?.stopReason = .appRestarted
@@ -240,11 +261,16 @@ final class AppViewModel: ObservableObject {
             loadedLedger.jobs[index].completedAt = Date()
             loadedLedger.jobs[index].logLines.append("App 上次結束時工作尚未完成。")
             if interruptedJob.snapshot.backendType != .localQwen {
-                var recovery = interruptedJob.networkRecovery ?? .init(state: .paused,
-                    waitedSeconds: 0, remainingWaitSeconds: 300, segmentIndex: 1, segmentCount: 1,
-                    completedSegmentCount: 0, resultUnknown: true)
-                recovery.state = .paused; recovery.stopReason = .appRestarted
-                loadedLedger.jobs[index].networkRecovery = recovery
+                if var service = interruptedJob.serviceRecovery {
+                    service.state = .paused; service.stopReason = .appRestarted
+                    loadedLedger.jobs[index].serviceRecovery = service
+                } else {
+                    var recovery = interruptedJob.networkRecovery ?? .init(state: .paused,
+                        waitedSeconds: 0, remainingWaitSeconds: 300, segmentIndex: 1, segmentCount: 1,
+                        completedSegmentCount: 0, resultUnknown: true)
+                    recovery.state = .paused; recovery.stopReason = .appRestarted
+                    loadedLedger.jobs[index].networkRecovery = recovery
+                }
                 let directory = paths.tempRecovery.appendingPathComponent(interruptedJob.id.uuidString)
                 loadedLedger.jobs[index].failure = JobFailure(stage: .interrupted,
                     userMessage: "上次雲端工作尚未完成，已保留工作；請手動重新嘗試或續跑。",
@@ -884,12 +910,13 @@ final class AppViewModel: ObservableObject {
     /// from the live list and recent history. Does not delete source audio,
     /// output TXT, or Temp-Recovery folders.
     func removeFinishedJob(_ id: UUID) {
-        guard !networkContinuationInFlight.contains(id) else { return }
+        guard !continuationInFlight.contains(id), !JobRetentionPolicy.continuationAncestorIDs(jobs).contains(id) else { return }
         if let job = jobs.first(where: { $0.id == id }) {
             guard job.stage.isTerminal else {
                 return
             }
-            if job.networkRecovery != nil { manualDrainRequested = false }
+            if job.isCloudRecoveryPaused { manualDrainRequested = false }
+            queueSleep.cancelWork(id)
             jobs.removeAll(where: { $0.id == id })
         }
         recentJobs.removeAll(where: { $0.id == id })
@@ -899,8 +926,10 @@ final class AppViewModel: ObservableObject {
     /// Clears every finished job from the queue and the recent-jobs list.
     /// Active and queued work are kept.
     func removeAllFinishedJobs() {
-        if queuePausedForNetwork { manualDrainRequested = false }
-        jobs.removeAll(where: { $0.stage.isTerminal && !networkContinuationInFlight.contains($0.id) })
+        if queuePausedForRecovery { manualDrainRequested = false }
+        let protected = JobRetentionPolicy.continuationAncestorIDs(jobs).union(continuationInFlight)
+        for job in jobs where job.stage.isTerminal && !protected.contains(job.id) { queueSleep.cancelWork(job.id) }
+        jobs.removeAll(where: { $0.stage.isTerminal && !protected.contains($0.id) })
         recentJobs.removeAll()
         persistJobs()
     }
@@ -963,6 +992,8 @@ final class AppViewModel: ObservableObject {
     // MARK: - File intake
 
     func chooseAudioFiles() {
+        beginFileImport()
+        defer { endFileImport() }
         let panel = NSOpenPanel()
         panel.title = "選擇會議錄音"
         panel.prompt = "加入佇列"
@@ -1059,6 +1090,8 @@ final class AppViewModel: ObservableObject {
     }
 
     func chooseAndMergeTranscriptFiles() {
+        beginFileImport()
+        defer { endFileImport() }
         let panel = NSOpenPanel()
         panel.title = "選擇要合併的文字稿"
         panel.prompt = "合併文字稿"
@@ -1158,6 +1191,32 @@ final class AppViewModel: ObservableObject {
 
     // MARK: - Queue control
 
+    func setSleepAfterCompletion(_ enabled: Bool) {
+        queueSleep.prepare = { [weak self] in
+            guard let self else { return false }
+            let revision = self.persistenceRevision
+            try await self.flushJobPersistence()
+            self.refreshQueueSleep()
+            return revision == self.persistenceRevision && !self.sleepIsBlocked
+        }
+        queueSleep.setEnabled(enabled, jobs: jobs)
+        refreshQueueSleep()
+    }
+
+    func beginFileImport() { fileOperations += 1 }
+    func endFileImport() { fileOperations = max(0, fileOperations - 1) }
+
+    private var sleepIsBlocked: Bool {
+        isTerminating || queueTask != nil || activeExecutionTask != nil || activeJobID != nil ||
+        hasQueuedJobs || queuePausedForRecovery || queuePausedForEnvironment || queuePausedForPromptConsent ||
+        isGoogleAIStudioCredentialLoading || isGoogleAIStudioCredentialSaving || modelDownloadPhase.isBusy ||
+        fileOperations > 0 || isDuplicateConfirmationPresented || isPromptConsentPresented ||
+        jobPersistenceError != nil || jobPersistenceLoadBlocked || jobPersistenceDeferred ||
+        persistenceSubmission != nil || pendingPersistenceSubmission != nil ||
+        durablePersistenceRevision < persistenceRevision
+    }
+    private func refreshQueueSleep() { queueSleep.refresh(jobs: jobs, blocked: sleepIsBlocked) }
+
     func startQueuedJobs() {
         queuePausedForEnvironment = false
         manualDrainRequested = true
@@ -1173,6 +1232,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func cancelCurrentJob() {
+        if let activeJobID { queueSleep.cancelWork(activeJobID) }
         guard let activeJobID else {
             return
         }
@@ -1183,8 +1243,18 @@ final class AppViewModel: ObservableObject {
     }
 
     func removeQueuedJob(_ id: UUID) {
+        queueSleep.cancelWork(id)
         guard let job = jobs.first(where: { $0.id == id }), job.stage == .queued else {
             return
+        }
+        if let parent = jobs.firstIndex(where: { $0.cloudContinuationID == id }) {
+            manualDrainRequested = false
+            authorizedContinuations.remove(id)
+            jobs[parent].continuationJobID = nil
+            jobs[parent].networkContinuationJobID = nil
+            jobs[parent].continuationPending = false
+            jobs[parent].networkRecovery?.state = .paused
+            jobs[parent].serviceRecovery?.state = .paused
         }
         jobs.removeAll(where: { $0.id == id })
         if !hasQueuedJobs && activeJobID == nil { manualDrainRequested = false }
@@ -1203,15 +1273,11 @@ final class AppViewModel: ObservableObject {
         guard oldJob.stage.isTerminal else {
             return
         }
-        if oldJob.networkRecovery?.state == .paused {
-            if usingCurrentSettings {
-                cancelNetworkPausedJob(id)
-                enqueueValidatedJobs([(url: oldJob.sourceURL, sourceSlice: oldJob.sourceSlice)])
-            } else {
-                resumeNetworkPausedJob(id)
-            }
+        if oldJob.snapshot.backendType != .localQwen && !usingCurrentSettings {
+            resendCloudJob(id)
             return
         }
+        if oldJob.isCloudRecoveryPaused { cancelNetworkPausedJob(id) }
 
         if usingCurrentSettings {
             enqueueValidatedJobs([
@@ -1268,101 +1334,96 @@ final class AppViewModel: ObservableObject {
         )
     }
 
-    func resumeCloudJobFromCheckpoint(_ id: UUID) {
-        guard let index = jobs.firstIndex(where: { $0.id == id }) else {
-            return
-        }
-        let oldJob = jobs[index]
-        if oldJob.networkRecovery?.state == .paused {
-            resumeNetworkPausedJob(id)
-            return
-        }
-        guard canResumeCloudJob(oldJob),
-              let recoveryDirectory = oldJob.failure?.recoveryDirectory
-        else {
-            alert = UserFacingAlert(
-                title: "沒有可續跑的片段",
-                message: "這筆工作沒有通過基本檢查的雲端片段檢查點。"
-            )
-            return
-        }
-        guard fileManager.fileExists(atPath: oldJob.sourcePath) else {
-            alert = UserFacingAlert(
-                title: "來源錄音不存在",
-                message: "找不到原始錄音，無法重新建立尚未完成的音訊片段。"
-            )
-            return
-        }
+    func resumeCloudJobFromCheckpoint(_ id: UUID) { resendCloudJob(id) }
+    func resumeNetworkPausedJob(_ id: UUID) { resendCloudJob(id) }
 
-        var resumed = TranscriptionJob(
-            sourcePath: oldJob.sourcePath,
-            snapshot: oldJob.snapshot.withGoogleAIStudioAPIKey(nil),
-            sourceSlice: oldJob.sourceSlice,
-            resumeFromRecoveryDirectory: recoveryDirectory
-        )
-        resumed.logLines.append(
-            "重送未完成片段；已完成片段會先驗證並直接沿用，不會重新上傳或計費轉錄。"
-        )
-        jobs.insert(resumed, at: min(index + 1, jobs.count))
-        persistJobs()
-        manualDrainRequested = true
-        scheduleQueueIfNeeded()
+    func cloudResendStatus(_ requestedID: UUID) -> String? {
+        var id = requestedID
+        var visited = Set<UUID>()
+        while let parent = jobs.first(where: { $0.id == id }), visited.insert(id).inserted {
+            if parent.continuationCompleted == true { return "重送已完成" }
+            if continuationInFlight.contains(id) { return "正在保存重送…" }
+            guard let childID = parent.cloudContinuationID else { return nil }
+            guard let child = jobs.first(where: { $0.id == childID }) else { return "續作紀錄已移除，請先確認輸出" }
+            // A failed save or restart remains actionable and reuses this ID.
+            if child.stage == .queued && parent.continuationPending == true { return nil }
+            if child.stage == .queued { return "已排入重送" }
+            if !child.stage.isTerminal { return "正在重送" }
+            if child.stage == .completed && !child.hasPendingGapRecovery { return "重送已完成" }
+            id = childID
+        }
+        return nil
     }
 
-    /// Parent state and the one continuation identity are saved in the same
-    /// journal snapshot. The in-memory gate remains closed until flush succeeds.
-    func resumeNetworkPausedJob(_ id: UUID) {
-        guard !isTerminating, !networkContinuationInFlight.contains(id), activeJobID == nil,
-              let index = jobs.firstIndex(where: { $0.id == id }),
-              jobs[index].stage == .interrupted,
-              jobs[index].networkRecovery?.state == .paused else { return }
+    func resendCloudJob(_ requestedID: UUID) {
+        guard !isTerminating, cloudResendStatus(requestedID) == nil else { return }
+        var id = requestedID
+        var visited = Set<UUID>()
+        while let parent = jobs.first(where: { $0.id == id }), let childID = parent.cloudContinuationID,
+              let child = jobs.first(where: { $0.id == childID }) {
+            guard visited.insert(id).inserted else { return }
+            if child.stage == .queued && parent.continuationPending == true { break }
+            if !child.stage.isTerminal || (child.stage == .completed && !child.hasPendingGapRecovery) { return }
+            id = childID
+        }
+        guard !continuationInFlight.contains(id), let index = jobs.firstIndex(where: { $0.id == id }),
+              jobs[index].snapshot.backendType != .localQwen, jobs[index].stage.isTerminal else { return }
         let original = jobs[index]
-        guard fileManager.fileExists(atPath: original.sourcePath) else {
-            alert = UserFacingAlert(title: "來源錄音不存在", message: "找不到原始錄音，無法重新嘗試。")
+        let continuation: TranscriptionJob
+        do {
+            if let existing = original.cloudContinuationID,
+               let queued = jobs.first(where: { $0.id == existing && $0.stage == .queued }) { continuation = queued }
+            else { continuation = try CloudJobContinuation.make(from: original, paths: paths) }
+        } catch {
+            alert = UserFacingAlert(title: "無法重送這筆工作", message: error.localizedDescription)
             return
         }
-        networkContinuationInFlight.insert(id)
-        let continuationID: UUID
-        if let existing = original.networkContinuationJobID,
-           jobs.contains(where: { $0.id == existing && $0.stage == .queued }) {
-            continuationID = existing
-        } else {
-            var continuation = TranscriptionJob(sourcePath: original.sourcePath,
-                snapshot: original.snapshot.withGoogleAIStudioAPIKey(nil), sourceSlice: original.sourceSlice,
-                resumeFromRecoveryDirectory: canResumeCloudJob(original) ? original.failure?.recoveryDirectory : nil)
-            continuation.logLines.append("使用原工作快照重新嘗試；已完成片段會先驗證並沿用。")
-            continuationID = continuation.id
-            jobs[index].networkContinuationJobID = continuationID
+        continuationInFlight.insert(id)
+        jobs[index].continuationJobID = continuation.id
+        jobs[index].continuationCompleted = false
+        if original.networkRecovery != nil { jobs[index].networkContinuationJobID = continuation.id }
+        jobs[index].continuationPending = true
+        if !jobs.contains(where: { $0.id == continuation.id }) {
             jobs.insert(continuation, at: jobs.firstIndex(where: { $0.stage == .queued }) ?? jobs.count)
         }
-        if let parent = jobs.firstIndex(where: { $0.id == id }) { jobs[parent].networkRecovery?.state = .resolved }
         persistJobs()
         Task { [weak self] in
             guard let self else { return }
             do {
                 try await self.flushJobPersistence()
-                self.networkContinuationInFlight.remove(id)
-                guard !self.isTerminating, self.jobs.contains(where: { $0.id == continuationID && $0.stage == .queued }) else { return }
+                guard !self.isTerminating,
+                      self.jobs.contains(where: { $0.id == continuation.id && $0.stage == .queued }),
+                      self.jobs.contains(where: { $0.id == id && $0.cloudContinuationID == continuation.id })
+                else { self.continuationInFlight.remove(id); return }
+                if let parent = self.jobs.firstIndex(where: { $0.id == id }) {
+                    self.jobs[parent].continuationPending = false
+                    self.jobs[parent].networkRecovery?.state = .resolved
+                    self.jobs[parent].serviceRecovery?.state = .resolved
+                }
+                self.continuationInFlight.remove(id)
+                self.authorizedContinuations.insert(continuation.id)
+                self.persistJobs()
+                guard self.jobs.contains(where: { $0.id == continuation.id && $0.stage == .queued }) else { return }
                 self.manualDrainRequested = true
                 self.scheduleQueueIfNeeded()
             } catch {
-                if let parent = self.jobs.firstIndex(where: { $0.id == id }) { self.jobs[parent].networkRecovery?.state = .paused }
-                self.networkContinuationInFlight.remove(id)
+                self.continuationInFlight.remove(id)
                 self.manualDrainRequested = false
                 self.jobPersistenceError = error.localizedDescription
-                self.persistJobs()
             }
         }
     }
 
     func cancelNetworkPausedJob(_ id: UUID) {
-        guard !networkContinuationInFlight.contains(id),
-              let index = jobs.firstIndex(where: { $0.id == id }),
-              jobs[index].stage == .interrupted, jobs[index].networkRecovery != nil else { return }
+        queueSleep.cancelWork(id)
+        guard !continuationInFlight.contains(id), let index = jobs.firstIndex(where: { $0.id == id }),
+              jobs[index].isCloudRecoveryPaused else { return }
         manualDrainRequested = false
-        let continuationID = jobs[index].networkContinuationJobID
+        let continuationID = jobs[index].cloudContinuationID
         jobs[index].stage = .cancelled
         jobs[index].networkRecovery = nil
+        jobs[index].serviceRecovery = nil
+        jobs[index].continuationPending = false
         if let continuationID { jobs.removeAll { $0.id == continuationID && $0.stage == .queued } }
         persistJobs()
     }
@@ -1527,9 +1588,10 @@ final class AppViewModel: ObservableObject {
     }
 
     func stopAllForTermination() async {
+        setSleepAfterCompletion(false)
         isTerminating = true
         manualDrainRequested = false
-        let preserveNetworkQueue = queuePausedForNetwork || jobs.contains { $0.networkRecovery?.state == .waiting || $0.networkRecovery?.state == .retrying }
+        let preserveNetworkQueue = queuePausedForRecovery || jobs.contains { $0.networkRecovery?.state == .waiting || $0.networkRecovery?.state == .retrying || $0.serviceRecovery != nil }
         for index in jobs.indices where jobs[index].stage == .queued && !preserveNetworkQueue {
             jobs[index].stage = .cancelled
             jobs[index].completedAt = Date()
@@ -1842,10 +1904,10 @@ final class AppViewModel: ObservableObject {
     }
 
     private func scheduleQueueIfNeeded() {
-        guard !isTerminating, queueTask == nil, hasQueuedJobs else {
+        guard !isTerminating, queueTask == nil, nextRunnableJobID != nil else {
             return
         }
-        guard !queuePausedForEnvironment, !queuePausedForPromptConsent, !queuePausedForNetwork else {
+        guard !queuePausedForEnvironment, !queuePausedForPromptConsent else {
             return
         }
         // Always require an explicit start (manualDrainRequested).
@@ -1861,14 +1923,21 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    private var nextRunnableJobID: UUID? {
+        guard continuationInFlight.isEmpty else { return nil }
+        if queuePausedForRecovery {
+            return jobs.first { $0.stage == .queued && authorizedContinuations.contains($0.id) }?.id
+        }
+        return jobs.first { $0.stage == .queued }?.id
+    }
+
     private func drainQueue() async {
         while !Task.isCancelled,
               !isTerminating,
               manualDrainRequested,
               !queuePausedForEnvironment,
               !queuePausedForPromptConsent,
-              !queuePausedForNetwork,
-              let nextJobID = jobs.first(where: { $0.stage == .queued })?.id {
+              let nextJobID = nextRunnableJobID {
             if isGoogleAIStudioCredentialLoading {
                 queueTask = nil
                 return
@@ -1878,9 +1947,11 @@ final class AppViewModel: ObservableObject {
 
         manualDrainRequested = false
         queueTask = nil
+        refreshQueueSleep()
     }
 
     private func runJob(_ id: UUID) async {
+        authorizedContinuations.remove(id)
         guard let initialIndex = jobs.firstIndex(where: { $0.id == id }) else {
             return
         }
@@ -1897,6 +1968,9 @@ final class AppViewModel: ObservableObject {
             // A publication intent only recovers jobs already known to the journal.
             // Do not start paid work until its identity has been saved.
             try await flushJobPersistence()
+            // Cancel can arrive while the initial journal is saving, before
+            // activeExecutionTask exists to receive Task.cancel().
+            guard !cancellationRequested.contains(id), !Task.isCancelled else { throw CancellationError() }
             guard var currentJob = jobs.first(where: { $0.id == id }) else {
                 return
             }
@@ -1928,7 +2002,14 @@ final class AppViewModel: ObservableObject {
 
             let permitsMissingPrompt = allowMissingPrompt.contains(id)
             let executionTask = Task {
-                try await engine.run(
+                if let notBefore = currentJob.serviceRecovery?.serverNotBefore, notBefore > Date() {
+                    let activity = SleepPreventionService()
+                    activity.begin()
+                    defer { activity.end() }
+                    try await Task.sleep(for: .seconds(notBefore.timeIntervalSinceNow))
+                }
+                try Task.checkCancellation()
+                return try await engine.run(
                     job: currentJob,
                     offline: false,
                     allowMissingPrompt: permitsMissingPrompt,
@@ -1983,7 +2064,7 @@ final class AppViewModel: ObservableObject {
         activeJobID = nil
         pruneHistoryIfNeeded()
         persistJobs()
-        if queuePausedForNetwork {
+        if queuePausedForRecovery && nextRunnableJobID == nil {
             manualDrainRequested = false
             do { try await flushJobPersistence() }
             catch { jobPersistenceError = error.localizedDescription }
@@ -2058,6 +2139,15 @@ final class AppViewModel: ObservableObject {
                 }
 
                 let completedJob = jobs[index]
+                if completedJob.resolvedOutputCompleteness == .complete {
+                    var childID = id
+                    var visited = Set<UUID>()
+                    while let parent = jobs.firstIndex(where: { $0.cloudContinuationID == childID }),
+                          visited.insert(jobs[parent].id).inserted {
+                        jobs[parent].continuationCompleted = true
+                        childID = jobs[parent].id
+                    }
+                }
                 performCompletionActions(for: completedJob)
             }
         persistJobs()
@@ -2074,6 +2164,10 @@ final class AppViewModel: ObservableObject {
         }
 
         switch update {
+        case let .serviceRecovery(recovery):
+            let transition = jobs[index].serviceRecovery?.state != recovery?.state
+            jobs[index].serviceRecovery = recovery?.state == .resolved ? nil : recovery
+            persistJobs(urgency: transition ? .critical : .coalescible)
         case let .networkRecovery(recovery):
             let isTransition = jobs[index].networkRecovery?.state != recovery?.state
             jobs[index].networkRecovery = recovery?.state == .resolved ? nil : recovery
@@ -2160,7 +2254,10 @@ final class AppViewModel: ObservableObject {
             jobs[index].stage = .interrupted
             jobs[index].networkRecovery?.state = .paused
             jobs[index].networkRecovery?.stopReason = .appRestarted
+            jobs[index].serviceRecovery?.state = .paused
+            jobs[index].serviceRecovery?.stopReason = .appRestarted
         } else {
+            jobs[index].serviceRecovery = nil
             jobs[index].networkRecovery = nil
         }
         if recoveryFailure == nil {
@@ -2275,14 +2372,15 @@ final class AppViewModel: ObservableObject {
         }
 
         jobs[index].networkRecovery = pipelineError?.networkRecovery
-        jobs[index].stage = pipelineError?.networkRecovery == nil ? .failed : .interrupted
+        jobs[index].serviceRecovery = pipelineError?.serviceRecovery
+        jobs[index].stage = pipelineError?.networkRecovery == nil && pipelineError?.serviceRecovery == nil ? .failed : .interrupted
         jobs[index].progressCurrent = nil
         jobs[index].progressTotal = nil
         jobs[index].progressUnit = nil
         jobs[index].completedAt = Date()
         jobs[index].failure = JobFailure(
             stage: stage,
-            userMessage: pipelineError?.networkRecovery?.message ?? error.localizedDescription,
+            userMessage: pipelineError?.serviceRecovery?.message ?? pipelineError?.networkRecovery?.message ?? error.localizedDescription,
             technicalDetails: pipelineError?.failureDiagnostic?.debugSummary ?? String(reflecting: error),
             recoverable: true,
             recoveryDirectory: recoveryDirectory,
@@ -2740,8 +2838,10 @@ final class AppViewModel: ObservableObject {
                     }
                 }
                 self.persistenceSubmission = nil
+                self.refreshQueueSleep()
             }
         }
+        refreshQueueSleep()
         return !migrating
     }
 
@@ -2763,6 +2863,14 @@ final class AppViewModel: ObservableObject {
             await submission?.value
             try await coordinator.flush(throughRevision: target)
         }
+        applyPersistenceStatus(await coordinator.status)
+    }
+
+    private func applyPersistenceStatus(_ status: JobPersistenceCoordinator.Status) {
+        guard status.lastDurableRevision >= durablePersistenceRevision else { return }
+        durablePersistenceRevision = status.lastDurableRevision
+        jobPersistenceError = status.error
+        refreshQueueSleep()
     }
 
     func saveLatestJobsForTermination() async throws {

@@ -937,6 +937,13 @@ public struct TranscriptionJob: Codable, Equatable, Identifiable, Sendable {
     public var cloudSegmentMetadata: [CloudTranscriptionMetadata]?
     public var cloudDiagnostics: CloudJobDiagnostics?
     public var networkRecovery: CloudNetworkRecovery?
+    public var serviceRecovery: CloudServiceRecovery?
+    public var continuationJobID: UUID?
+    public var continuationParentJobID: UUID?
+    public var continuationPending: Bool?
+    /// A completed descendant may be pruned from history. Keep its receipt on
+    /// the original row so another click cannot restart paid work from scratch.
+    public var continuationCompleted: Bool?
     public var networkContinuationJobID: UUID?
     public var resumeFromRecoveryDirectory: String?
     /// Optional for compatibility with ledgers written before completeness existed.
@@ -1324,6 +1331,7 @@ public struct PipelineResult: Codable, Equatable, Sendable {
 
 public enum PipelineUpdate: Sendable {
     case networkRecovery(CloudNetworkRecovery?)
+    case serviceRecovery(CloudServiceRecovery?)
     case stage(TranscriptionStage)
     case progress(current: Double, total: Double, unit: String)
     case log(level: String, message: String)

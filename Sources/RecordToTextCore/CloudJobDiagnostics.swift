@@ -98,6 +98,8 @@ public struct CloudJobDiagnostics: Codable, Equatable, Sendable {
             lines += history.events.map {
                 "\($0.timestamp.ISO8601Format())；root=\($0.rootSegmentID?.uuidString ?? "unknown")；segment=\($0.segmentIndex ?? 0)；attempt=\($0.attempt)；path=\($0.path?.rawValue ?? "unknown")；wait=\($0.networkWaitSeconds ?? 0)；sessionReset=\($0.sessionWasReset ?? false)；resultUnknown=\($0.resultUnknown)；" + $0.failure.debugSummary
                     + ($0.recoveryStopReason.map { "；recoveryStopReason=\($0.rawValue)" } ?? "")
+                    + ($0.serviceStopReason.map { "；serviceStopReason=\($0.rawValue)" } ?? "")
+                    + ($0.serviceWaitSeconds.map { "；serviceWaitSeconds=\($0)" } ?? "")
             }
         }
         return lines.joined(separator: "\n")
@@ -114,6 +116,7 @@ final class CloudDiagnosticCollector: @unchecked Sendable {
     private var stageAttempts: [CloudDiagnosticStage: Int] = [:]
     private var lastFailure: CloudFailureDiagnostic?
     private var lastRecoveryStopReason: CloudNetworkRecovery.StopReason?
+    private var lastServiceStopReason: CloudServiceRecovery.StopReason?
     private let history: CloudFailureHistoryCollector?
     private let rootSegmentID: UUID?
     private let segmentIndex: Int?
@@ -142,6 +145,7 @@ final class CloudDiagnosticCollector: @unchecked Sendable {
             attempt = stageAttempts[stage, default: 0]
             lastFailure = nil
             lastRecoveryStopReason = nil
+            lastServiceStopReason = nil
             if stage == .generation { generationRequestCount += 1; history?.generationStarted() }
         }
     }
@@ -153,17 +157,22 @@ final class CloudDiagnosticCollector: @unchecked Sendable {
         }
         if let segment = error as? CloudSegmentExecutionError {
             return failure(segment.diagnostic, recoveryStopReason:
-                (segment.underlying as? CloudNetworkRecoveryExhausted)?.recovery.stopReason)
+                (segment.underlying as? CloudNetworkRecoveryExhausted)?.recovery.stopReason,
+                serviceStopReason: (segment.underlying as? CloudServiceRecoveryExhausted)?.recovery.stopReason)
         }
         return failure(CloudFailureDiagnostic.classify(error, stage: stage), recoveryStopReason:
-            (error as? CloudNetworkRecoveryExhausted)?.recovery.stopReason)
+            (error as? CloudNetworkRecoveryExhausted)?.recovery.stopReason,
+            serviceStopReason: (error as? CloudServiceRecoveryExhausted)?.recovery.stopReason)
     }
 
     @discardableResult
     func failure(_ diagnostic: CloudFailureDiagnostic,
-                 recoveryStopReason: CloudNetworkRecovery.StopReason? = nil) -> CloudFailureDiagnostic {
+                 recoveryStopReason: CloudNetworkRecovery.StopReason? = nil,
+                 serviceStopReason: CloudServiceRecovery.StopReason? = nil) -> CloudFailureDiagnostic {
         let context = network ?? CloudNetworkContext.current
         let stopReason = recoveryStopReason ?? context?.snapshot().stopReason
+        let service = context?.service.snapshot
+        let serviceStop = serviceStopReason ?? service?.stopReason
         // Read context before taking the collector lock: session replacement
         // can record a retry while holding the context lock.
         let path = context?.environment.path() ?? .unknown
@@ -174,9 +183,10 @@ final class CloudDiagnosticCollector: @unchecked Sendable {
             // Transport, retry loop and engine can observe the same failure.
             // Exhausting recovery is a separate terminal event, even if its
             // underlying network failure is unchanged.
-            guard lastFailure != diagnostic || lastRecoveryStopReason != stopReason else { return diagnostic }
+            guard lastFailure != diagnostic || lastRecoveryStopReason != stopReason || lastServiceStopReason != serviceStop else { return diagnostic }
             lastFailure = diagnostic
             lastRecoveryStopReason = stopReason
+            lastServiceStopReason = serviceStop
             history?.record(.init(timestamp: Date(), rootSegmentID: rootSegmentID,
                                   segmentIndex: segmentIndex, modelID: modelID, attempt: attempt,
                                   completedSegmentCount: completedSegmentCount,
@@ -185,7 +195,8 @@ final class CloudDiagnosticCollector: @unchecked Sendable {
                                   failure: diagnostic, path: path,
                                   networkWaitSeconds: waitedSeconds,
                                   sessionWasReset: sessionWasReset,
-                                  recoveryStopReason: stopReason))
+                                  recoveryStopReason: stopReason, serviceStopReason: serviceStop,
+                                  serviceWaitSeconds: service?.waitedSeconds))
             return diagnostic
         }
     }
@@ -224,6 +235,8 @@ public struct CloudFailureEvent: Codable, Equatable, Sendable {
     public var networkWaitSeconds: Double?
     public var sessionWasReset: Bool?
     public var recoveryStopReason: CloudNetworkRecovery.StopReason?
+    public var serviceStopReason: CloudServiceRecovery.StopReason?
+    public var serviceWaitSeconds: Double?
 }
 
 public struct CloudFailureHistory: Codable, Equatable, Sendable {
@@ -244,7 +257,14 @@ final class CloudFailureHistoryCollector: @unchecked Sendable {
     private var events: [CloudFailureEvent] = []
     private var totalEventCount = 0
     private var generationRequestCount = 0
-    init(jobID: UUID, backend: ASRBackendType) { self.jobID = jobID; self.backend = backend }
+    init(jobID: UUID, backend: ASRBackendType, inherited: CloudFailureHistory? = nil) {
+        self.jobID = jobID; self.backend = backend
+        if let inherited {
+            events = Array(inherited.events.suffix(100))
+            totalEventCount = inherited.totalEventCount
+            generationRequestCount = inherited.generationRequestCount
+        }
+    }
     func generationStarted() { lock.withLock { generationRequestCount += 1 } }
     func record(_ event: CloudFailureEvent) {
         lock.withLock {

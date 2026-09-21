@@ -35,6 +35,8 @@ enum GeminiGenerationRetry {
                   isRetryableServerFailure(error) else { throw error }
             let model = "gemini-3.6-flash"
             let reason = error.localizedDescription
+            CloudNetworkContext.current?.service.beginFallback()
+            try await CloudNetworkContext.current?.service.waitBeforeFallback()
             CloudDiagnosticContext.current?.retry(.modelFallback)
             logger?("warning", "Gemini 重試後仍不可用；依使用者設定改用 \(model)。原始原因：\(reason)")
             return try await attempts(modelID: model,
@@ -44,6 +46,9 @@ enum GeminiGenerationRetry {
     }
 
     static func isRetryableServerFailure(_ error: Error) -> Bool {
+        if let paused = error as? CloudServiceRecoveryExhausted {
+            return paused.recovery.stage == .generation && paused.recovery.stopReason == .attemptsExhausted
+        }
         guard let retry = retry(for: error) else { return false }
         return retry.reason == .rateLimited || retry.reason == .serverError
     }
@@ -73,7 +78,22 @@ enum GeminiGenerationRetry {
                         throw CancellationError()
                     }
                     CloudDiagnosticContext.current?.failure(error, stage: .generation)
-                    guard let retry = retry(for: error) else { throw error }
+                    let dailyQuota: Bool
+                    switch error {
+                    case VertexAIError.quotaExceeded, GoogleAIStudioError.quotaExceeded: dailyQuota = true
+                    default: dailyQuota = false
+                    }
+                    let retry = retry(for: error)
+                    if (dailyQuota || retry?.reason == .rateLimited), let network = CloudNetworkContext.current {
+                        let sends = max(attempt, quota.count)
+                        logger?("info", "Google 回報 HTTP 429；已發送 \(sends)／4 次，依服務冷卻政策等待。")
+                        try await network.service.rateLimited(after: sends, stage: .generation,
+                            serverDelay: retry?.retryAfterSeconds, dailyQuota: dailyQuota,
+                            resultUnknown: network.snapshot().resultUnknown)
+                        attempt += 1
+                        continue
+                    }
+                    guard let retry else { throw error }
                     guard attempt < policy.maximumAttempts, quota.count < policy.maximumAttempts else {
                         if retry.reason == .emptyResponse {
                             logger?("warning", "Vertex Gemini 連續嘗試後仍回傳 STOP 空內容，已達最多 \(policy.maximumAttempts) 次嘗試；停止自動重試並保留已完成片段。")

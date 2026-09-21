@@ -201,6 +201,16 @@ private final class CloudSilenceDetectorSpy: SilenceDetectionServicing, @uncheck
 
 final class CloudAdaptiveSegmentationTests: XCTestCase {
     func testThirdSegmentNetworkPauseResumesWithoutReuploadingFirstTwo() async throws {
+        try await assertCheckpointResume(service: false)
+    }
+
+    func testFourthSegmentServicePauseManuallyResumesWithoutReuploadingFirstThree() async throws {
+        try await assertCheckpointResume(service: true)
+    }
+
+    private func assertCheckpointResume(service: Bool) async throws {
+        let completedCount = service ? 3 : 2
+        let total = service ? 5 : 3
         let root = try TestSupport.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let paths = ApplicationPaths(root: root.appendingPathComponent("Support"))
@@ -208,7 +218,7 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
         let runtime = RuntimeEnvironment.candidate(paths: paths,
             settings: AppSettings.defaultValue(developerMode: true), bundledHelperURL: nil)
         let source = root.appendingPathComponent("fixture.wav")
-        try await makeSineAudioFixture(durationSeconds: 6, destinationURL: source, ffmpegURL: runtime.ffmpeg)
+        try await makeSineAudioFixture(durationSeconds: Double(total * 2), destinationURL: source, ffmpegURL: runtime.ffmpeg)
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MockAdaptiveCloudURLProtocol.self]
         let session = URLSession(configuration: configuration)
@@ -222,38 +232,52 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
             terms: [], prompt: "忠實轉錄", outputLocationMode: .fixedDirectory,
             outputDirectory: root.path, keepRawTranscript: false, backendType: .googleAIStudio,
             googleAIStudioAPIKey: "mock", silenceAwareCloudSegmentation: false)
-        let initial = MockAIStudioTransport(responses: [
-            .success(("STOP", "[00:00 - 00:02]\n講者 1：第一段。")),
-            .success(("STOP", "[00:02 - 00:04]\n講者 1：第二段。"))
-        ] + Array(repeating: .failure(URLError(.networkConnectionLost)), count: 4))
+        func transcript(_ index: Int) -> String { "[00:0\((index - 1) * 2) - 00:\(String(format: "%02d", index * 2))]\n講者 1：fixture segment \(index)。" }
+        let successes: [Result<(finishReason: String, text: String), Error>] = (1...completedCount).map { .success(("STOP", transcript($0))) }
+        let failure: Error = service ? GoogleAIStudioError.requestFailed(statusCode: 429, message: "Resource exhausted") : URLError(.networkConnectionLost)
+        let initial = MockAIStudioTransport(responses: successes + Array(repeating: .failure(failure), count: 4))
         MockAdaptiveCloudURLProtocol.handler = { try initial.handle(request: $0) }
         var recovery: URL?
+        var originalJob = TranscriptionJob(sourcePath: source.path, snapshot: snapshot)
         do {
-            _ = try await engine.run(job: .init(sourcePath: source.path, snapshot: snapshot)) { _ in }
+            _ = try await engine.run(job: originalJob) { _ in }
             XCTFail("Expected pause")
         } catch let error as PipelineExecutionError {
             recovery = error.recoveryDirectory
-            XCTAssertEqual(error.networkRecovery?.completedSegmentCount, 2)
-            XCTAssertEqual(error.networkRecovery?.state, .paused)
+            if service {
+                XCTAssertEqual(error.serviceRecovery?.completedSegmentCount, completedCount)
+                XCTAssertEqual(error.serviceRecovery?.state, .paused)
+                originalJob.serviceRecovery = error.serviceRecovery
+            } else {
+                XCTAssertEqual(error.networkRecovery?.completedSegmentCount, completedCount)
+                XCTAssertEqual(error.networkRecovery?.state, .paused)
+                originalJob.networkRecovery = error.networkRecovery
+            }
+            originalJob.stage = .interrupted
+            originalJob.failure = .init(stage: .transcribing, userMessage: "fixture", technicalDetails: "fixture",
+                recoverable: true, recoveryDirectory: error.recoveryDirectory?.path)
         }
         let directory = try XCTUnwrap(recovery)
         let manifest = try JSONDecoder().decode(AudioSegmentManifest.self,
             from: Data(contentsOf: directory.appendingPathComponent(RecoveryScanner.segmentManifestFileName)))
-        let completed = Array(manifest.segments.prefix(2))
+        let completed = Array(manifest.segments.prefix(completedCount))
         let original = try completed.map { try Data(contentsOf: URL(fileURLWithPath: $0.outputPath)) }
-        XCTAssertEqual(initial.createdFiles.count, 3)
-        XCTAssertEqual(initial.recordedGenerateRequests.count, 6)
-        let remaining = MockAIStudioTransport(responses: [.success(("STOP", "[00:04 - 00:06]\n講者 1：第三段。"))])
+        XCTAssertEqual(initial.createdFiles.count, completedCount + 1)
+        XCTAssertEqual(initial.recordedGenerateRequests.count, completedCount + 4)
+        let remaining = MockAIStudioTransport(responses: ((completedCount + 1)...total).map { .success(("STOP", transcript($0))) })
         MockAdaptiveCloudURLProtocol.handler = { try remaining.handle(request: $0) }
-        let resumed = TranscriptionJob(sourcePath: source.path, snapshot: snapshot, resumeFromRecoveryDirectory: directory.path)
+        var resumed = try CloudJobContinuation.make(from: originalJob, paths: paths)
+        XCTAssertNil(resumed.snapshot.googleAIStudioAPIKey)
+        resumed.snapshot = resumed.snapshot.withGoogleAIStudioAPIKey("mock") // execution-only credential
         let result = try await engine.run(job: resumed, persistCompletion: { _ in false }) { _ in }
-        XCTAssertEqual(remaining.createdFiles.count, 1)
-        XCTAssertEqual(remaining.recordedGenerateRequests.count, 1)
+        XCTAssertEqual(remaining.createdFiles.count, total - completedCount)
+        XCTAssertEqual(remaining.recordedGenerateRequests.count, total - completedCount)
         let diagnostics = try XCTUnwrap(result.cloudDiagnostics)
-        XCTAssertEqual(diagnostics.segments.map(\.reusedFromCheckpoint), [true, true, false])
+        XCTAssertEqual(diagnostics.segments.map(\.reusedFromCheckpoint), Array(repeating: true, count: completedCount) + Array(repeating: false, count: total - completedCount))
+        XCTAssertEqual(diagnostics.failureHistory?.generationRequestCount, total + 4)
         XCTAssertEqual(try completed.map { try Data(contentsOf: URL(fileURLWithPath: $0.outputPath)) }, original)
         let text = try String(contentsOf: result.outputURL, encoding: .utf8)
-        for content in ["第一段", "第二段", "第三段"] { XCTAssertTrue(text.contains(content)) }
+        for index in 1...total { XCTAssertTrue(text.contains("fixture segment \(index)")) }
         try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory
             .appendingPathComponent("record-to-text").appendingPathComponent(resumed.id.uuidString))
     }

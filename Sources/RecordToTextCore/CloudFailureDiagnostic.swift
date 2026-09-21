@@ -77,6 +77,7 @@ public struct CloudFailureDiagnostic: Codable, Equatable, Sendable {
     }
 
     public static func classify(_ error: Error, stage: CloudDiagnosticStage = .unknown) -> Self {
+        if let service = error as? CloudServiceRecoveryExhausted { return .http(429, stage: service.recovery.stage) }
         if let http = error as? CloudHTTPFailure { return .http(http.status, stage: http.stage) }
         if let exhausted = error as? CloudNetworkRecoveryExhausted {
             return exhausted.recovery.lastFailure ?? .init(category: .offline, stage: stage)
