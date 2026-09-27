@@ -32,6 +32,7 @@ public extension JobSnapshot {
             vertexAIIncludeSummary: settings.vertexAIIncludeSummary,
             geminiThinkingLevel: settings.geminiThinkingLevel,
             cloudFallbackPolicy: settings.cloudFallbackPolicy,
-            silenceAwareCloudSegmentation: settings.silenceAwareCloudSegmentation)
+            silenceAwareCloudSegmentation: settings.silenceAwareCloudSegmentation,
+            localSilenceAwareSegmentation: settings.localSilenceAwareSegmentation)
     }
 }

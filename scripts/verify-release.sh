@@ -79,7 +79,7 @@ if [[ -n "${FORBIDDEN}" ]]; then
 fi
 
 RESOURCE_BUNDLE="${APP_PATH}/Contents/Resources/record-to-text_RecordToTextApp.bundle"
-for helper in qwen_asr_chunking.py qwen_asr_mlx_runner.py qwen_asr_transformers_runner.py; do
+for helper in qwen_asr_chunking.py qwen_asr_local_checkpoint.py qwen_asr_mlx_runner.py qwen_asr_transformers_runner.py; do
   if [[ ! -f "${RESOURCE_BUNDLE}/${helper}" ]]; then
     print -u2 "Missing packaged helper resource: ${RESOURCE_BUNDLE}/${helper}"
     exit 1

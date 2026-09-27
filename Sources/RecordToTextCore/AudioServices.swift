@@ -125,7 +125,8 @@ public final class AudioProbeService {
         for metadata: AudioMetadata,
         temporaryDirectory: URL,
         outputDirectory: URL,
-        pcmWorkingCopies: Int = 1
+        pcmWorkingCopies: Int = 1,
+        extraTemporaryBytes: Int64 = 0
     ) throws {
         let copyCount = Int64(max(pcmWorkingCopies, 1))
         let multiplication = metadata.estimatedPCMBytes.multipliedReportingOverflow(
@@ -134,7 +135,9 @@ public final class AudioProbeService {
         let pcmBytes = multiplication.overflow
             ? Int64.max
             : multiplication.partialValue
-        let temporaryRequired = pcmBytes.addingReportingOverflow(
+        let withExtra = pcmBytes.addingReportingOverflow(max(extraTemporaryBytes, 0))
+        let pcmPlusExtra = withExtra.overflow ? Int64.max : withExtra.partialValue
+        let temporaryRequired = pcmPlusExtra.addingReportingOverflow(
             AudioProcessTimeouts.minimumTemporaryReserve
         )
         let requiredTemporary = temporaryRequired.overflow
@@ -190,6 +193,16 @@ public final class FFmpegService {
     public init(executableURL: URL, runner: ProcessRunner) {
         self.executableURL = executableURL
         self.runner = runner
+    }
+
+    /// Identity of the decoder that will actually run, captured from the same
+    /// executable and runner this service uses.
+    ///
+    /// The local v2 checkpoint freezes which ffmpeg produced the samples, so a
+    /// later decode that shifts every boundary is a hard stop rather than a
+    /// silent resume.
+    public func decoderIdentity() async throws -> LocalDecoderIdentity {
+        try await LocalDecoderIdentity.capture(ffmpegURL: executableURL, runner: runner)
     }
 
     public func normalize(

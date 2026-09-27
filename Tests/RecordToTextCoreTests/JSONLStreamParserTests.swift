@@ -3,6 +3,24 @@ import XCTest
 @testable import RecordToTextCore
 
 final class JSONLStreamParserTests: XCTestCase {
+    func testLocalTimestampOffsetSurvivesRequestCodingAndOldRequestsStillDecode() throws {
+        let request = ASRRequest(
+            jobID: "slice-segment", audioPath: "/tmp/audio.wav", outputPath: "/tmp/output.txt",
+            modelID: ASRModelDescriptor.appleSiliconDefault.id, language: "Chinese", prompt: "",
+            terms: [], modelCacheDirectory: "/tmp/models", offline: true,
+            timeOffsetSeconds: 2477
+        )
+        let data = try JSONEncoder().encode(request)
+        XCTAssertEqual(try JSONDecoder().decode(ASRRequest.self, from: data), request)
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        legacy.removeValue(forKey: "timeOffsetSeconds")
+        let decoded = try JSONDecoder().decode(
+            ASRRequest.self, from: JSONSerialization.data(withJSONObject: legacy)
+        )
+        XCTAssertNil(decoded.timeOffsetSeconds)
+        XCTAssertEqual(decoded.chunkDurationSeconds, 120)
+    }
+
     func testQwenHardTimeoutScalesWithModelAndChunkDuration() {
         let bf16 = ASRRequest(
             jobID: "job",

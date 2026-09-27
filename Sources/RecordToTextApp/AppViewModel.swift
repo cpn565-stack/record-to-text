@@ -72,6 +72,7 @@ final class AppViewModel: ObservableObject {
     private var persistenceRevision: UInt64 = 0
     private var durablePersistenceRevision: UInt64 = 0
     private var jobPersistenceLoadBlocked = false
+    private var jobPersistenceLoadFailure: String?
     private var jobPersistenceDeferred = false
     private var persistenceSubmission: Task<Void, Never>?
     private var pendingPersistenceSubmission: (PersistenceSnapshot, JobPersistenceCoordinator.Urgency)?
@@ -124,6 +125,7 @@ final class AppViewModel: ObservableObject {
     private var authorizedContinuations = Set<UUID>()
     private var terminatingForNetwork = Set<UUID>()
     private var isTerminating = false
+    private var terminationGeneration: UInt64 = 0
     var queuePausedForNetwork: Bool {
         jobs.contains { $0.stage == .interrupted && $0.networkRecovery != nil && $0.networkRecovery?.state != .resolved }
             || (!continuationInFlight.isEmpty && jobs.contains { $0.networkRecovery != nil })
@@ -191,6 +193,7 @@ final class AppViewModel: ObservableObject {
         } catch {
             recoveredJournal = nil
             jobPersistenceLoadBlocked = true
+            jobPersistenceLoadFailure = error.localizedDescription
             let message = "工作 journal 無法復原；已保留原始紀錄，停止覆寫：\(error.localizedDescription)"
             jobPersistenceError = message
             startupMessages.append(message)
@@ -562,7 +565,8 @@ final class AppViewModel: ObservableObject {
             \AppSettings.vertexAIProjectID, \AppSettings.vertexAILocation,
             \AppSettings.vertexAIGCSBucket, \AppSettings.vertexAIIncludeSummary,
             \AppSettings.geminiThinkingLevel, \AppSettings.cloudFallbackPolicy,
-            \AppSettings.silenceAwareCloudSegmentation]
+            \AppSettings.silenceAwareCloudSegmentation,
+            \AppSettings.localSilenceAwareSegmentation]
         if engineKeys.contains(keyPath) { synchronizeQueuedEngineSettings() }
         scheduleSettingsPersist()
     }
@@ -1387,11 +1391,13 @@ final class AppViewModel: ObservableObject {
             jobs.insert(continuation, at: jobs.firstIndex(where: { $0.stage == .queued }) ?? jobs.count)
         }
         persistJobs()
+        let requestedTerminationGeneration = terminationGeneration
         Task { [weak self] in
             guard let self else { return }
             do {
                 try await self.flushJobPersistence()
                 guard !self.isTerminating,
+                      self.terminationGeneration == requestedTerminationGeneration,
                       self.jobs.contains(where: { $0.id == continuation.id && $0.stage == .queued }),
                       self.jobs.contains(where: { $0.id == id && $0.cloudContinuationID == continuation.id })
                 else { self.continuationInFlight.remove(id); return }
@@ -1590,6 +1596,7 @@ final class AppViewModel: ObservableObject {
     func stopAllForTermination() async {
         setSleepAfterCompletion(false)
         isTerminating = true
+        terminationGeneration += 1
         manualDrainRequested = false
         let preserveNetworkQueue = queuePausedForRecovery || jobs.contains { $0.networkRecovery?.state == .waiting || $0.networkRecovery?.state == .retrying || $0.serviceRecovery != nil }
         for index in jobs.indices where jobs[index].stage == .queued && !preserveNetworkQueue {
@@ -1610,6 +1617,12 @@ final class AppViewModel: ObservableObject {
         activeEngine?.cancelCurrentJob()
         await runningTask?.value
         persistJobs()
+    }
+
+    func cancelTermination() {
+        isTerminating = false
+        manualDrainRequested = false
+        refreshQueueSleep()
     }
 
     // MARK: - Environment and onboarding
@@ -1883,7 +1896,9 @@ final class AppViewModel: ObservableObject {
                 geminiThinkingLevel: settings.geminiThinkingLevel,
                 cloudFallbackPolicy: settings.cloudFallbackPolicy,
                 silenceAwareCloudSegmentation:
-                    settings.silenceAwareCloudSegmentation
+                    settings.silenceAwareCloudSegmentation,
+                localSilenceAwareSegmentation:
+                    settings.localSilenceAwareSegmentation
             )
             var job = TranscriptionJob(
                 sourcePath: url.standardizedFileURL.path,
@@ -2802,7 +2817,7 @@ final class AppViewModel: ObservableObject {
 
     @discardableResult
     func persistJobs(urgency: JobPersistenceCoordinator.Urgency = .critical) -> Bool {
-        guard !isGoogleAIStudioCredentialLoading, !jobPersistenceLoadBlocked else {
+        guard !jobPersistenceLoadBlocked else {
             jobPersistenceDeferred = true
             return false
         }
@@ -2853,15 +2868,39 @@ final class AppViewModel: ObservableObject {
         return !legacyLedgerCredentialMigrationPending
     }
 
-    func flushJobPersistence() async throws {
-        guard !jobPersistenceLoadBlocked else { throw CocoaError(.fileReadCorruptFile) }
-        guard !jobPersistenceDeferred else { throw CocoaError(.fileWriteUnknown) }
+    func flushJobPersistence(timeout: Duration = .seconds(5)) async throws {
+        if jobPersistenceLoadBlocked {
+            let error = JobPersistenceError.unreadableJournal(jobPersistenceLoadFailure ?? "")
+            jobPersistenceError = error.localizedDescription
+            throw error
+        }
+        if jobPersistenceDeferred {
+            let error = isGoogleAIStudioCredentialLoading
+                ? JobPersistenceError.credentialLoading : .credentialMigration
+            jobPersistenceError = error.localizedDescription
+            throw error
+        }
         let submission = persistenceSubmission
         let target = persistenceRevision
         let coordinator = jobPersistence
-        try await CloudSegmentBudget(limit: .seconds(5)).withDeadline(stage: "persistence") {
-            await submission?.value
-            try await coordinator.flush(throughRevision: target)
+        do {
+            try await CloudSegmentBudget(limit: timeout).withDeadline(stage: "persistence") {
+                await submission?.value
+                try await coordinator.flush(throughRevision: target)
+            }
+        } catch {
+            let status = await coordinator.status
+            applyPersistenceStatus(status)
+            let failure: Error
+            if let detail = status.error {
+                failure = JobPersistenceError.writeFailed(detail)
+            } else if error is CloudSegmentDeadlineExceeded {
+                failure = JobPersistenceError.timedOut
+            } else {
+                failure = error
+            }
+            jobPersistenceError = failure.localizedDescription
+            throw failure
         }
         applyPersistenceStatus(await coordinator.status)
     }
@@ -2873,9 +2912,23 @@ final class AppViewModel: ObservableObject {
         refreshQueueSleep()
     }
 
-    func saveLatestJobsForTermination() async throws {
+    func saveLatestJobsForTermination(timeout: Duration = .seconds(5)) async throws {
+        let budget = CloudSegmentBudget(limit: timeout)
+        if legacyLedgerCredentialMigrationPending, isGoogleAIStudioCredentialLoading {
+            let loading = credentialLoadingTask
+            do {
+                try await budget.withDeadline(stage: "credential-loading") {
+                    await loading?.value
+                }
+            } catch {
+                let failure: Error = error is CloudSegmentDeadlineExceeded
+                    ? JobPersistenceError.credentialLoading : error
+                jobPersistenceError = failure.localizedDescription
+                throw failure
+            }
+        }
         persistJobs()
-        try await flushJobPersistence()
+        try await flushJobPersistence(timeout: budget.remaining())
     }
 
     func retryJobPersistence() async {

@@ -12,17 +12,16 @@ final class RecordToTextAppDelegate: NSObject, NSApplicationDelegate {
             return .terminateNow
         }
         if viewModel.hasActiveJob {
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "轉錄仍在進行"
-        alert.informativeText = "現在離開會停止目前工作。佇列中的其他工作也不會繼續執行。"
-        alert.addButton(withTitle: "繼續轉錄")
-        alert.addButton(withTitle: "停止工作並離開")
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "轉錄仍在進行"
+            alert.informativeText = "現在離開會停止目前工作。佇列中的其他工作也不會繼續執行。"
+            alert.addButton(withTitle: "繼續轉錄")
+            alert.addButton(withTitle: "停止工作並離開")
 
-        guard alert.runModal() == .alertSecondButtonReturn else {
-            return .terminateCancel
-        }
-
+            guard alert.runModal() == .alertSecondButtonReturn else {
+                return .terminateCancel
+            }
         }
         terminationPending = true
         Task { @MainActor in
@@ -34,14 +33,16 @@ final class RecordToTextAppDelegate: NSObject, NSApplicationDelegate {
                     return
                 } catch {
                     let alert = NSAlert()
+                    alert.alertStyle = .warning
                     alert.messageText = "工作紀錄尚未儲存"
-                    alert.informativeText = "儲存失敗或超過 5 秒。仍然退出可能遺失最新工作狀態。"
+                    alert.informativeText = "\(error.localizedDescription)\n\n仍然退出可能遺失最新工作狀態；已輸出的文字檔不會因此刪除。"
                     alert.addButton(withTitle: "重試儲存")
                     alert.addButton(withTitle: "取消退出")
                     alert.addButton(withTitle: "仍然退出")
                     switch alert.runModal() {
                     case .alertFirstButtonReturn: continue
                     case .alertSecondButtonReturn:
+                        viewModel.cancelTermination()
                         self.terminationPending = false
                         sender.reply(toApplicationShouldTerminate: false)
                     default: sender.reply(toApplicationShouldTerminate: true)

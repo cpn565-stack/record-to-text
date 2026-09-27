@@ -216,6 +216,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         case geminiThinkingLevel
         case cloudFallbackPolicy
         case silenceAwareCloudSegmentation
+        case localSilenceAwareSegmentation
         case customGCloudPath
     }
 
@@ -256,6 +257,9 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var geminiThinkingLevel: GeminiThinkingLevel
     public var cloudFallbackPolicy: CloudFallbackPolicy
     public var silenceAwareCloudSegmentation: Bool
+    /// Local Qwen only. Deliberately a separate field: §2 of the phase 1 spec
+    /// forbids reusing the cloud switch to change cloud behaviour.
+    public var localSilenceAwareSegmentation: Bool
     public var customGCloudPath: String?
 
     public init(
@@ -293,6 +297,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         geminiThinkingLevel: GeminiThinkingLevel = .high,
         cloudFallbackPolicy: CloudFallbackPolicy = .disabled,
         silenceAwareCloudSegmentation: Bool = true,
+        localSilenceAwareSegmentation: Bool = false,
         customGCloudPath: String? = nil
     ) {
         self.schemaVersion = schemaVersion
@@ -326,6 +331,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.geminiThinkingLevel = geminiThinkingLevel
         self.cloudFallbackPolicy = cloudFallbackPolicy
         self.silenceAwareCloudSegmentation = silenceAwareCloudSegmentation
+        self.localSilenceAwareSegmentation = localSilenceAwareSegmentation
         self.customGCloudPath = customGCloudPath
     }
 
@@ -375,6 +381,10 @@ public struct AppSettings: Codable, Equatable, Sendable {
             Bool.self,
             forKey: .silenceAwareCloudSegmentation
         ) ?? true
+        localSilenceAwareSegmentation = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .localSilenceAwareSegmentation
+        ) ?? false
         customGCloudPath = try container.decodeIfPresent(String.self, forKey: .customGCloudPath)
     }
 
@@ -413,6 +423,10 @@ public struct AppSettings: Codable, Equatable, Sendable {
         try container.encode(
             silenceAwareCloudSegmentation,
             forKey: .silenceAwareCloudSegmentation
+        )
+        try container.encode(
+            localSilenceAwareSegmentation,
+            forKey: .localSilenceAwareSegmentation
         )
         try container.encodeIfPresent(customGCloudPath, forKey: .customGCloudPath)
     }
@@ -573,6 +587,7 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
         case geminiThinkingLevel
         case cloudFallbackPolicy
         case silenceAwareCloudSegmentation
+        case localSilenceAwareSegmentation
         // Legacy runtime-selection keys are intentionally ignored. Runtime
         // paths and the Developer Runtime consent are live authorization, not
         // immutable transcription semantics.
@@ -608,6 +623,7 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
     public let geminiThinkingLevel: GeminiThinkingLevel
     public let cloudFallbackPolicy: CloudFallbackPolicy
     public let silenceAwareCloudSegmentation: Bool
+    public let localSilenceAwareSegmentation: Bool
 
     public init(
         modelID: String,
@@ -632,7 +648,8 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
         vertexAIIncludeSummary: Bool = false,
         geminiThinkingLevel: GeminiThinkingLevel = .high,
         cloudFallbackPolicy: CloudFallbackPolicy = .disabled,
-        silenceAwareCloudSegmentation: Bool = true
+        silenceAwareCloudSegmentation: Bool = true,
+        localSilenceAwareSegmentation: Bool = false
     ) {
         self.modelID = modelID
         self.modelRevision = modelRevision
@@ -663,6 +680,7 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
         self.geminiThinkingLevel = geminiThinkingLevel
         self.cloudFallbackPolicy = cloudFallbackPolicy
         self.silenceAwareCloudSegmentation = silenceAwareCloudSegmentation
+        self.localSilenceAwareSegmentation = localSilenceAwareSegmentation
     }
 
     public init(from decoder: Decoder) throws {
@@ -708,6 +726,13 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
             Bool.self,
             forKey: .silenceAwareCloudSegmentation
         ) ?? true
+        // §2: a queued snapshot written before this field existed keeps the
+        // fixed cut points it was queued with. Defaulting to `true` here would
+        // silently re-plan somebody else's already-accepted job.
+        localSilenceAwareSegmentation = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .localSilenceAwareSegmentation
+        ) ?? false
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -738,6 +763,10 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
             silenceAwareCloudSegmentation,
             forKey: .silenceAwareCloudSegmentation
         )
+        try container.encode(
+            localSilenceAwareSegmentation,
+            forKey: .localSilenceAwareSegmentation
+        )
     }
 
     /// Returns a copy suitable for transient execution. The credential remains
@@ -766,7 +795,8 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
             vertexAIIncludeSummary: vertexAIIncludeSummary,
             geminiThinkingLevel: geminiThinkingLevel,
             cloudFallbackPolicy: cloudFallbackPolicy,
-            silenceAwareCloudSegmentation: silenceAwareCloudSegmentation
+            silenceAwareCloudSegmentation: silenceAwareCloudSegmentation,
+            localSilenceAwareSegmentation: localSilenceAwareSegmentation
         )
     }
 }
@@ -790,6 +820,8 @@ public extension AppSettings {
         resolved.cloudFallbackPolicy = snapshot.cloudFallbackPolicy
         resolved.silenceAwareCloudSegmentation =
             snapshot.silenceAwareCloudSegmentation
+        resolved.localSilenceAwareSegmentation =
+            snapshot.localSilenceAwareSegmentation
         return resolved
     }
 }

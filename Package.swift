@@ -41,6 +41,7 @@ let package = Package(
             path: "Sources/RecordToTextApp",
             resources: [
                 .copy("Resources/qwen_asr_chunking.py"),
+                .copy("Resources/qwen_asr_local_checkpoint.py"),
                 .copy("Resources/qwen_asr_mlx_runner.py"),
                 .copy("Resources/qwen_asr_transformers_runner.py")
             ]

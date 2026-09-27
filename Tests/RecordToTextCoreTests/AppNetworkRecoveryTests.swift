@@ -151,6 +151,31 @@ final class AppNetworkRecoveryTests: XCTestCase {
         try await model.flushJobPersistence()
     }
 
+    func testCancelledTerminationDoesNotReviveAnEarlierResend() async throws {
+        let root = try TestSupport.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = ApplicationPaths(root: root)
+        let parent = paused(root)
+        try Data("not valid audio".utf8).write(to: parent.sourceURL)
+        try save([parent], paths: paths)
+        let model = AppViewModel(paths: paths, credentialStore: RecoveryCredentialStore())
+        await model.waitForCredentialLoading()
+        model.setNotificationPreference(false)
+        model.resumeNetworkPausedJob(parent.id)
+        await model.stopAllForTermination()
+        model.cancelTermination()
+        try await model.saveLatestJobsForTermination()
+        try await Task.sleep(for: .milliseconds(100))
+        let continuationID = try XCTUnwrap(model.jobs.first { $0.id == parent.id }?.networkContinuationJobID)
+        let continuation = try XCTUnwrap(model.jobs.first { $0.id == continuationID })
+        XCTAssertNil(continuation.startedAt)
+        XCTAssertEqual(continuation.stage, .queued)
+        XCTAssertTrue(model.jobs.first { $0.id == parent.id }?.continuationPending == true)
+        XCTAssertFalse(model.manualDrainRequested)
+        await model.stopAllForTermination()
+        try await model.saveLatestJobsForTermination()
+    }
+
     func testTerminationWhileContinuationFlushesCannotStartAndRestartReusesItsID() async throws {
         let root = try TestSupport.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

@@ -13,11 +13,14 @@ RESOURCE_DIRECTORY = Path(__file__).parents[1] / "Sources" / "RecordToTextApp" /
 sys.path.insert(0, str(RESOURCE_DIRECTORY))
 
 from qwen_asr_chunking import (  # noqa: E402
+    SilenceCandidateIndex,
+    SplitCounters,
     TokenLimitReached,
     TranscriptAccumulator,
     generate_span_with_token_guard,
     join_transcript_parts,
     remove_prompt_echo,
+    silence_choose_split,
 )
 
 
@@ -38,7 +41,15 @@ class FakeModel:
         return self.result_for(values)
 
 
-def run_guard(model, span, *, maximum_tokens: int = 10, **options):
+def run_guard(
+    model,
+    span,
+    *,
+    maximum_tokens: int = 10,
+    sample_rate: int = 10,
+    min_split_seconds: float = 30.0,
+    **options,
+):
     events: list[tuple[str, dict]] = []
 
     def emit(event_type: str, **payload) -> None:
@@ -48,12 +59,12 @@ def run_guard(model, span, *, maximum_tokens: int = 10, **options):
         model,
         span,
         generation_arguments={"max_tokens": maximum_tokens},
-        sample_rate=10,
+        sample_rate=sample_rate,
         maximum_tokens=maximum_tokens,
         label="測試塊",
         emit=emit,
         heartbeat_factory=lambda _message: nullcontext(),
-        min_split_seconds=30,
+        min_split_seconds=min_split_seconds,
         **options,
     )
     return result, events
@@ -315,6 +326,232 @@ class TranscriptJoinTests(unittest.TestCase):
         accumulator.record_completed_text("下半段的內容。")
 
         self.assertEqual(accumulator.text, "上半段的內容下半段的內容。")
+
+
+class SilenceCandidateIndexTests(unittest.TestCase):
+    """Phase 1 §4/§6: the helper selects from Swift's frozen list, so the two
+    sides have to agree on midpoint arithmetic and on what counts as covered."""
+
+    def test_midpoint_truncates_like_swift_int64_division(self) -> None:
+        # Swift is ``start + (end - start) / 2`` on Int64, which truncates.
+        self.assertEqual(SilenceCandidateIndex([(0, 3)]).candidates, (1,))
+        self.assertEqual(SilenceCandidateIndex([(1, 4)]).candidates, (2,))
+        self.assertEqual(SilenceCandidateIndex([(5, 6)]).candidates, (5,))
+
+    def test_touching_and_overlapping_intervals_merge_into_one_candidate(self) -> None:
+        index = SilenceCandidateIndex([(0, 50), (40, 100), (100, 150)])
+        self.assertEqual(index.intervals, ((0, 150),))
+        self.assertEqual(index.candidates, (75,))
+
+    def test_reversed_and_empty_intervals_are_dropped(self) -> None:
+        index = SilenceCandidateIndex([(10, 10), (30, 20), (0, 8)])
+        self.assertEqual(index.intervals, ((0, 8),))
+        self.assertEqual(index.candidates, (4,))
+
+    def test_from_plan_rejects_booleans_masquerading_as_samples(self) -> None:
+        # JSON ``true`` decodes to ``1``; a bool is an ``int`` subclass, so an
+        # unchecked read would silently shift every boundary after it.
+        index = SilenceCandidateIndex.from_plan(
+            [
+                {"startSample": True, "endSample": 100},
+                {"startSample": 0, "endSample": False},
+                {"startSample": 0.5, "endSample": 100},
+                {"startSample": 10, "endSample": 20},
+                "not-a-dict",
+            ]
+        )
+        self.assertEqual(index.intervals, ((10, 20),))
+
+    def test_from_plan_tolerates_a_missing_list(self) -> None:
+        self.assertFalse(SilenceCandidateIndex.from_plan(None))
+        self.assertEqual(SilenceCandidateIndex.from_plan(None).intervals, ())
+
+    def test_candidates_in_is_inclusive_and_ordered(self) -> None:
+        index = SilenceCandidateIndex([(0, 10), (100, 110), (200, 210)])
+        self.assertEqual(index.candidates, (5, 105, 205))
+        self.assertEqual(tuple(index.candidates_in(5, 105)), (5, 105))
+        self.assertEqual(tuple(index.candidates_in(6, 104)), ())
+        self.assertEqual(tuple(index.candidates_in(300, 100)), ())
+
+    def test_covers_demands_the_whole_span(self) -> None:
+        index = SilenceCandidateIndex([(0, 100)])
+        self.assertTrue(index.covers(0, 100))
+        self.assertTrue(index.covers(20, 80))
+        self.assertFalse(index.covers(0, 101))
+        self.assertFalse(index.covers(-1, 50))
+
+    def test_a_gap_between_pauses_is_not_coverage(self) -> None:
+        # §6: 90% silent is not evidence. Only merged, contiguous coverage
+        # counts, so a word sitting in the gap survives.
+        index = SilenceCandidateIndex([(0, 50), (60, 100)])
+        self.assertEqual(index.intervals, ((0, 50), (60, 100)))
+        self.assertFalse(index.covers(0, 100))
+        self.assertTrue(index.covers(0, 50))
+        self.assertTrue(index.covers(60, 100))
+
+    def test_an_empty_span_is_never_verified_silence(self) -> None:
+        index = SilenceCandidateIndex([(0, 100)])
+        self.assertFalse(index.covers(50, 50))
+        self.assertFalse(index.covers(80, 20))
+
+
+class SilenceChooseSplitTests(unittest.TestCase):
+    """§4 row 4: parent midpoint ±5 s, both children at least 30 s."""
+
+    rate = 16_000
+    search = 5 * 16_000
+    minimum = 30 * 16_000
+
+    def choose(self, intervals, counters=None):
+        return silence_choose_split(
+            SilenceCandidateIndex(intervals),
+            search_samples=self.search,
+            counters=counters,
+        )
+
+    def span_pair(self, start, length):
+        return (start, length, self.minimum, length // 2)
+
+    def test_a_pause_near_the_midpoint_moves_the_split(self) -> None:
+        parent_start, length = 0, 120 * self.rate
+        pause_midpoint = 63 * self.rate  # 3 s after the 60 s midpoint
+        choose = self.choose([(62 * self.rate, 64 * self.rate)])
+        self.assertEqual(
+            choose(*self.span_pair(parent_start, length)),
+            pause_midpoint - parent_start,
+        )
+
+    def test_a_pause_outside_the_window_is_ignored(self) -> None:
+        length = 120 * self.rate
+        counters = SplitCounters()
+        # 6 s after the midpoint, one second past the ±5 s window.
+        choose = self.choose([(65 * self.rate, 67 * self.rate)], counters)
+        self.assertEqual(choose(*self.span_pair(0, length)), length // 2)
+        self.assertEqual((counters.silence_cuts, counters.fallbacks), (0, 1))
+
+    def test_equidistant_pauses_resolve_to_the_earlier_one(self) -> None:
+        length = 120 * self.rate
+        choose = self.choose(
+            [(57 * self.rate, 59 * self.rate), (61 * self.rate, 63 * self.rate)]
+        )
+        # Both midpoints sit 2 s from the target; the same input must always
+        # plan the same way, so the earlier one wins.
+        self.assertEqual(choose(*self.span_pair(0, length)), 58 * self.rate)
+
+    def test_a_sixty_second_parent_only_admits_the_exact_midpoint(self) -> None:
+        # §8: at 60 s the legal window collapses to one point, so a nearby pause
+        # must not produce a 29 s child.
+        length = 60 * self.rate
+        counters = SplitCounters()
+        choose = self.choose([(28 * self.rate, 30 * self.rate)], counters)
+        self.assertEqual(choose(*self.span_pair(0, length)), length // 2)
+        self.assertEqual((counters.silence_cuts, counters.fallbacks), (0, 1))
+
+    def test_a_pause_inside_the_window_but_below_the_child_floor_is_rejected(
+        self,
+    ) -> None:
+        # 65 s parent: the ±5 s search window reaches 29 s and 36 s, but the
+        # 30 s child floor only admits [30 s, 35 s]. The floor has to win.
+        length = 65 * self.rate
+        choose = self.choose([(28 * self.rate, 30 * self.rate)])  # midpoint 29 s
+        self.assertEqual(choose(*self.span_pair(0, length)), length // 2)
+        choose = self.choose([(35 * self.rate, 37 * self.rate)])  # midpoint 36 s
+        self.assertEqual(choose(*self.span_pair(0, length)), length // 2)
+
+    def test_the_window_follows_a_non_zero_span_start(self) -> None:
+        parent_start = 1_920_000
+        length = 120 * self.rate
+        choose = self.choose([(parent_start + 63 * self.rate - self.rate,
+                               parent_start + 63 * self.rate + self.rate)])
+        self.assertEqual(
+            choose(*self.span_pair(parent_start, length)),
+            63 * self.rate,
+            "the chooser returns an offset, not an absolute sample",
+        )
+
+    def test_a_pause_exactly_on_the_midpoint_counts_as_a_fallback(self) -> None:
+        length = 120 * self.rate
+        counters = SplitCounters()
+        choose = self.choose([(59 * self.rate, 61 * self.rate)], counters)
+        self.assertEqual(choose(*self.span_pair(0, length)), length // 2)
+        self.assertEqual((counters.silence_cuts, counters.fallbacks), (0, 1))
+
+    def test_an_empty_index_always_returns_the_midpoint(self) -> None:
+        length = 120 * self.rate
+        counters = SplitCounters()
+        choose = self.choose([], counters)
+        self.assertEqual(choose(*self.span_pair(0, length)), length // 2)
+        self.assertEqual(counters.silence_cuts, 0)
+        self.assertEqual(counters.fallbacks, 1)
+
+
+class SilenceAwareRecursionTests(unittest.TestCase):
+    """The guard plus a silence chooser, end to end and Metal-free."""
+
+    rate = 16_000
+
+    def test_a_capped_leaf_splits_on_the_pause_and_reports_absolute_spans(
+        self,
+    ) -> None:
+        length = 120 * self.rate
+        span_start = 1_000_000
+        pause = span_start + 63 * self.rate
+        model = FakeModel(
+            lambda values: FakeResult(
+                "滿" if len(values) == length else f"葉@{len(values)}",
+                generation_tokens=10 if len(values) == length else 3,
+            )
+        )
+        leaves: list = []
+        splits: list = []
+        counters = SplitCounters()
+        run_guard(
+            model,
+            tuple(range(length)),
+            maximum_tokens=10,
+            sample_rate=self.rate,
+            on_leaf_result=leaves.append,
+            on_span_split=lambda start, split, end: splits.append((start, split, end)),
+            choose_split=silence_choose_split(
+                SilenceCandidateIndex([(pause - self.rate, pause + self.rate)]),
+                search_samples=5 * self.rate,
+                counters=counters,
+            ),
+            span_start=span_start,
+        )
+        self.assertEqual(splits, [(span_start, pause, span_start + length)])
+        self.assertEqual(
+            [(leaf.start_sample, leaf.end_sample) for leaf in leaves],
+            [(span_start, pause), (pause, span_start + length)],
+        )
+        self.assertEqual(counters.silence_cuts, 1)
+        self.assertEqual(counters.fallbacks, 0)
+
+    def test_a_short_tail_is_never_split_into_two_sub_minimum_children(self) -> None:
+        # §8: 45 s at the cap has no legal split, so the established termination
+        # policy applies even though a pause sits right where a cut would go.
+        length = 45 * self.rate
+        model = FakeModel(lambda values: FakeResult("滿", generation_tokens=10))
+        gaps: list = []
+        splits: list = []
+        run_guard(
+            model,
+            tuple(range(length)),
+            maximum_tokens=10,
+            sample_rate=self.rate,
+            on_leaf_gap=lambda gap: gaps.append(gap) or "【缺口】",
+            on_span_split=lambda start, split, end: splits.append((start, split, end)),
+            choose_split=silence_choose_split(
+                SilenceCandidateIndex([(22 * self.rate, 23 * self.rate)]),
+                search_samples=5 * self.rate,
+            ),
+            span_start=0,
+            min_split_seconds=30.0,
+        )
+        self.assertEqual(splits, [])
+        self.assertEqual(len(gaps), 1)
+        self.assertEqual((gaps[0].start_sample, gaps[0].end_sample), (0, length))
+        self.assertEqual(model.calls and len(model.calls), 1, "no retry after the cap")
 
 
 if __name__ == "__main__":

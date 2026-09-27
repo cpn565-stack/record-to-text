@@ -358,6 +358,14 @@ Vertex 的 project、location、bucket 是工作設定；短期 access token 不
 
 主要來源：[TranscriptTimestampValidator.swift](../Sources/RecordToTextCore/TranscriptTimestampValidator.swift)、[時間標記與診斷實作紀錄](timestamp-diagnostics-spec-2026-09-11.md)。
 
+### 12.3 本機 Qwen MLX 十分鐘時間區間（2026-09-27）
+
+- TXT 每十分鐘標記一個 `[HH:mm:ss - HH:mm:ss]` 區間；不足十分鐘的尾段標到實際音訊終點。
+- 內部仍以 120 秒推論，每五塊合成一個文字區間，不增加模型推論或改變 token 超限重切機制。
+- 時間由音訊 sample 位置計算，加上手動切片與外層分段的起點，對回原始錄音；切片從自己的實際起點每十分鐘分組。
+- checkpoint 保留原有純文字格式，續跑時重建時間標記，避免重複推論；未完成草稿只標到最後完成的塊。
+- 時間區間用於定位錄音，並非逐句或逐字對齊；不新增講者辨識。Intel Experimental helper 不在此次變更範圍。
+
 ## 13. 輸出完整性與已知缺口
 
 | 值／情況 | 顯示及意義 |

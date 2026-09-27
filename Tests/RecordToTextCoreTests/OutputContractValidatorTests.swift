@@ -2,6 +2,20 @@ import XCTest
 @testable import RecordToTextCore
 
 final class OutputContractValidatorTests: XCTestCase {
+    func testTimeHeadingsDoNotHidePromptEchoOrChangeValidTranscript() throws {
+        let prompt = "請忠實轉錄音訊內容，不要摘要、改寫、刪除或補充。"
+        let heading = "[00:20:00 - 00:30:00]\n\n"
+        XCTAssertThrowsError(try OutputContractValidator.validate(
+            text: heading + prompt + "\n實際內容。", path: "timed.txt", prompt: prompt
+        )) { error in
+            XCTAssertEqual(error as? OutputContractValidationError, .promptEcho("timed.txt"))
+        }
+        let valid = heading + "實際內容。"
+        XCTAssertEqual(try OutputContractValidator.validate(
+            text: valid, path: "timed.txt", prompt: prompt
+        ), valid)
+    }
+
     func testRejectsLeadingCompleteGlossaryEcho() throws {
         let prompt = """
         這是一段中文會議錄音。請忠實轉錄音訊內容，不要摘要、改寫、刪除或補充。

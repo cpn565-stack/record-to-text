@@ -16,6 +16,7 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 "${PROJECT_DIR}/scripts/repo-hygiene.sh"
 
 "${PYTHON_BIN}" -B Tests/qwen_asr_chunking_test.py
+"${PYTHON_BIN}" -B Tests/qwen_asr_local_checkpoint_test.py
 "${PYTHON_BIN}" -B Tests/qwen_asr_mlx_runner_test.py
 
 SWIFT_ARGS=(

@@ -25,6 +25,27 @@ public struct SilenceAnalysisMetrics: Equatable, Sendable {
     }
 }
 
+/// Phase 1 §3.4: content-level identity for a scan.
+///
+/// Path, size and mtime say where a file is, not which samples were analysed.
+/// The local path already computes these digests in phase 0, so binding them
+/// here means a cache entry can only be reused for the audio it describes.
+public struct SilenceAnalysisContentIdentity: Equatable, Hashable, Sendable {
+    public let sourceSHA256: String
+    public let pcmSHA256: String
+    public let normalizationProfile: String
+
+    public init(
+        sourceSHA256: String,
+        pcmSHA256: String,
+        normalizationProfile: String
+    ) {
+        self.sourceSHA256 = sourceSHA256
+        self.pcmSHA256 = pcmSHA256
+        self.normalizationProfile = normalizationProfile
+    }
+}
+
 public struct SilenceAnalysisSourceIdentity: Equatable, Hashable, Sendable {
     public let canonicalPath: String
     public let resourceIdentifier: String?
@@ -32,6 +53,7 @@ public struct SilenceAnalysisSourceIdentity: Equatable, Hashable, Sendable {
     public let contentModificationDate: Date
     public let noiseProfile: String
     public let minimumSilenceDuration: Double
+    public let content: SilenceAnalysisContentIdentity?
 
     public init(
         canonicalPath: String,
@@ -39,7 +61,8 @@ public struct SilenceAnalysisSourceIdentity: Equatable, Hashable, Sendable {
         fileSize: Int64,
         contentModificationDate: Date,
         noiseProfile: String,
-        minimumSilenceDuration: Double
+        minimumSilenceDuration: Double,
+        content: SilenceAnalysisContentIdentity? = nil
     ) {
         self.canonicalPath = canonicalPath
         self.resourceIdentifier = resourceIdentifier
@@ -47,6 +70,7 @@ public struct SilenceAnalysisSourceIdentity: Equatable, Hashable, Sendable {
         self.contentModificationDate = contentModificationDate
         self.noiseProfile = noiseProfile
         self.minimumSilenceDuration = minimumSilenceDuration
+        self.content = content
     }
 }
 
@@ -71,6 +95,7 @@ public final class JobSilenceAnalysisCache {
     private let configuredNoiseProfile: String
     private let configuredMinimumSilenceDuration: TimeInterval
     private let maximumIntervalCount: Int
+    private let contentIdentity: SilenceAnalysisContentIdentity?
     private let initialIdentity: SilenceAnalysisSourceIdentity?
     private var entries: [Entry] = []
     private var identityInvalidated = false
@@ -83,18 +108,21 @@ public final class JobSilenceAnalysisCache {
         noiseProfile: String = JobSilenceAnalysisCache.defaultNoiseProfile,
         minimumSilenceDuration: TimeInterval =
             JobSilenceAnalysisCache.defaultMinimumSilenceDuration,
-        maximumIntervalCount: Int = JobSilenceAnalysisCache.defaultMaximumIntervalCount
+        maximumIntervalCount: Int = JobSilenceAnalysisCache.defaultMaximumIntervalCount,
+        contentIdentity: SilenceAnalysisContentIdentity? = nil
     ) {
         self.fileManager = fileManager
         self.sourceURL = sourceURL
         self.configuredNoiseProfile = noiseProfile
         self.configuredMinimumSilenceDuration = minimumSilenceDuration
         self.maximumIntervalCount = max(maximumIntervalCount, 0)
+        self.contentIdentity = contentIdentity
         self.initialIdentity = Self.makeIdentity(
             sourceURL: sourceURL,
             fileManager: fileManager,
             noiseProfile: noiseProfile,
-            minimumSilenceDuration: minimumSilenceDuration
+            minimumSilenceDuration: minimumSilenceDuration,
+            content: contentIdentity
         )
     }
 
@@ -277,7 +305,8 @@ public final class JobSilenceAnalysisCache {
                   sourceURL: sourceURL,
                   fileManager: fileManager,
                   noiseProfile: configuredNoiseProfile,
-                  minimumSilenceDuration: configuredMinimumSilenceDuration
+                  minimumSilenceDuration: configuredMinimumSilenceDuration,
+                  content: contentIdentity
               )
         else {
             return false
@@ -330,7 +359,8 @@ public final class JobSilenceAnalysisCache {
         sourceURL: URL,
         fileManager: FileManager,
         noiseProfile: String,
-        minimumSilenceDuration: TimeInterval
+        minimumSilenceDuration: TimeInterval,
+        content: SilenceAnalysisContentIdentity?
     ) -> SilenceAnalysisSourceIdentity? {
         let canonicalURL = sourceURL.standardizedFileURL
             .resolvingSymlinksInPath()
@@ -353,7 +383,8 @@ public final class JobSilenceAnalysisCache {
             fileSize: Int64(fileSize),
             contentModificationDate: modificationDate,
             noiseProfile: noiseProfile,
-            minimumSilenceDuration: minimumSilenceDuration
+            minimumSilenceDuration: minimumSilenceDuration,
+            content: content
         )
     }
 }

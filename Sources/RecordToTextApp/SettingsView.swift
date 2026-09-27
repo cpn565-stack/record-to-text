@@ -650,6 +650,16 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
+            Divider()
+
+            Toggle(
+                "實驗性：本機切塊優先尋找靜音切點",
+                isOn: setting(\.localSilenceAwareSegmentation)
+            )
+            Text("開啟後會在 20 分鐘外層上限、120 秒內層上限與 token 遞迴中點附近找至少 0.35 秒的停頓，嘗試減少切斷字詞；找不到時退回原本的固定切點。只影響新加入佇列的工作，已凍結的計畫不會被重算。此功能預設關閉，可主動開啟測試；切點效果尚未通過真實模型 A/B 與人工核對。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
             if CPUArchitecture.current == .x86_64 {
                 Label(
                     "Intel CPU backend 尚未完成實機驗證，目前為 Experimental。",

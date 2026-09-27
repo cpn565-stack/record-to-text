@@ -150,6 +150,15 @@ public enum SilenceAwareSegmentPlanner {
 }
 
 public protocol SilenceDetectionServicing {
+    /// The `-35dB`-style threshold the detector actually runs with.
+    ///
+    /// Phase 1 §3.2 persists the thresholds a plan was built from, and a
+    /// recorded number that differs from the filter ffmpeg received would be
+    /// false provenance. Defaults keep existing mocks honest without forcing
+    /// every conformer to restate them.
+    var noiseProfile: String { get }
+    var minimumSilenceDuration: TimeInterval { get }
+
     func detect(
         sourceURL: URL,
         startSeconds: Double,
@@ -157,13 +166,30 @@ public protocol SilenceDetectionServicing {
     ) async throws -> [DetectedSilence]
 }
 
+public extension SilenceDetectionServicing {
+    var noiseProfile: String { JobSilenceAnalysisCache.defaultNoiseProfile }
+    var minimumSilenceDuration: TimeInterval {
+        JobSilenceAnalysisCache.defaultMinimumSilenceDuration
+    }
+}
+
 public final class SilenceDetectionService: SilenceDetectionServicing {
     private let executableURL: URL
     private let runner: ProcessRunner
+    public let noiseProfile: String
+    public let minimumSilenceDuration: TimeInterval
 
-    public init(executableURL: URL, runner: ProcessRunner) {
+    public init(
+        executableURL: URL,
+        runner: ProcessRunner,
+        noiseProfile: String = JobSilenceAnalysisCache.defaultNoiseProfile,
+        minimumSilenceDuration: TimeInterval =
+            JobSilenceAnalysisCache.defaultMinimumSilenceDuration
+    ) {
         self.executableURL = executableURL
         self.runner = runner
+        self.noiseProfile = noiseProfile
+        self.minimumSilenceDuration = minimumSilenceDuration
     }
 
     public func detect(
@@ -181,7 +207,7 @@ public final class SilenceDetectionService: SilenceDetectionServicing {
         }
         arguments += [
             "-vn",
-            "-af", "silencedetect=noise=-35dB:d=0.35",
+            "-af", "silencedetect=noise=\(noiseProfile):d=\(Self.seconds(minimumSilenceDuration))",
             "-f", "null",
             "-"
         ]

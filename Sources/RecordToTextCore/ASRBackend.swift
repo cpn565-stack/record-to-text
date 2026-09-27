@@ -20,6 +20,12 @@ public enum HelperInactivityPolicy {
 }
 
 public struct ASRRequest: Codable, Equatable, Sendable {
+    /// Internal MLX generate() window inside each coordinator segment. Dense
+    /// meetings can fill 16k tokens in a few minutes; the helper also
+    /// auto-splits further when a chunk hits the token cap.
+    public static let defaultChunkDurationSeconds: Double = 120
+    public static let defaultMaximumTokens = 16_384
+
     public let jobID: String
     public let audioPath: String
     public let outputPath: String
@@ -36,6 +42,12 @@ public struct ASRRequest: Codable, Equatable, Sendable {
     public let segmentIndex: Int
     public let segmentCount: Int
     public let chunkCheckpointDirectory: String?
+    /// Start of this segment in the original recording (optional for older requests).
+    public let timeOffsetSeconds: Double?
+    /// v2 checkpoint coordinates. A single optional block keeps the contract
+    /// all-or-nothing: a helper either gets every coordinate or none, so it can
+    /// never half-adopt v2 and fall back to guessing.
+    public let checkpointV2: ASRCheckpointV2?
 
     public init(
         jobID: String,
@@ -49,14 +61,13 @@ public struct ASRRequest: Codable, Equatable, Sendable {
         modelCacheDirectory: String,
         offline: Bool,
         allowMissingPrompt: Bool = false,
-        maximumTokens: Int = 16_384,
-        /// Internal MLX generate() window inside each coordinator segment.
-        /// Dense meetings can fill 16k tokens in a few minutes; helper also
-        /// auto-splits further when a chunk hits the token cap.
-        chunkDurationSeconds: Double = 120,
+        maximumTokens: Int = ASRRequest.defaultMaximumTokens,
+        chunkDurationSeconds: Double = ASRRequest.defaultChunkDurationSeconds,
         segmentIndex: Int = 1,
         segmentCount: Int = 1,
-        chunkCheckpointDirectory: String? = nil
+        chunkCheckpointDirectory: String? = nil,
+        timeOffsetSeconds: Double? = nil,
+        checkpointV2: ASRCheckpointV2? = nil
     ) {
         self.jobID = jobID
         self.audioPath = audioPath
@@ -74,7 +85,121 @@ public struct ASRRequest: Codable, Equatable, Sendable {
         self.segmentIndex = segmentIndex
         self.segmentCount = segmentCount
         self.chunkCheckpointDirectory = chunkCheckpointDirectory
+        self.timeOffsetSeconds = timeOffsetSeconds
+        self.checkpointV2 = checkpointV2
     }
+}
+
+/// Coordinates binding one helper invocation to a frozen v2 checkpoint plan.
+///
+/// All sample values are absolute indices in *original recording* space at
+/// `sampleRate`, so a display timestamp is simply `sample / sampleRate` with no
+/// offset — `timeOffsetSeconds` must never be used for that, since it also
+/// carries the per-segment offset. The helper converts to array indices with
+/// `absoluteSample - audioStartSample` and never re-derives boundaries from
+/// `segmentIndex`.
+public struct ASRCheckpointV2: Codable, Equatable, Sendable {
+    public let directory: String
+    public let rootID: String
+    public let planID: String
+    public let identityDigest: String
+    public let sampleRate: Int64
+    public let audioStartSample: Int64
+    public let workStartSample: Int64
+    public let workEndSample: Int64
+    /// The channel the frozen identity says the prompt travelled in. The helper
+    /// recomputes it from the loaded model and refuses to run on a mismatch, so
+    /// glossary and no-glossary results are never mixed in one checkpoint.
+    public let promptChannel: String
+
+    public init(
+        directory: String,
+        rootID: String,
+        planID: String,
+        identityDigest: String,
+        sampleRate: Int64,
+        audioStartSample: Int64,
+        workStartSample: Int64,
+        workEndSample: Int64,
+        promptChannel: String
+    ) {
+        self.directory = directory
+        self.rootID = rootID
+        self.planID = planID
+        self.identityDigest = identityDigest
+        self.sampleRate = sampleRate
+        self.audioStartSample = audioStartSample
+        self.workStartSample = workStartSample
+        self.workEndSample = workEndSample
+        self.promptChannel = promptChannel
+    }
+}
+
+/// Prompt-channel names shared with the helper's `ALLOWED_PROMPT_CHANNELS`.
+public enum LocalPromptChannel {
+    public static let systemPrompt = "system_prompt"
+    public static let context = "context"
+    public static let none = "none"
+
+    /// Mirrors `resolve_prompt_channel` in the helper, so the value Swift freezes
+    /// is the one the helper will independently confirm.
+    public static func resolve(
+        prompt: String,
+        capability: ASRCapability
+    ) -> String {
+        if !prompt.isEmpty, capability.supportsSystemPrompt {
+            return systemPrompt
+        }
+        if !prompt.isEmpty, capability.supportsContext {
+            return context
+        }
+        return none
+    }
+}
+
+/// What the helper reports about the interpreter it is about to run in.
+///
+/// These fields are part of the frozen inference identity and cannot be derived
+/// on the Swift side: the prompt channels come from reading the installed model
+/// source, and the versions from the helper's own package metadata.
+public struct ASRRuntimeReport: Equatable, Sendable {
+    public let asrContractVersion: String
+    public let supportsSystemPrompt: Bool
+    public let supportsContext: Bool
+    public let mlxVersion: String?
+    public let mlxAudioVersion: String?
+
+    public init(
+        asrContractVersion: String,
+        supportsSystemPrompt: Bool,
+        supportsContext: Bool,
+        mlxVersion: String?,
+        mlxAudioVersion: String?
+    ) {
+        self.asrContractVersion = asrContractVersion
+        self.supportsSystemPrompt = supportsSystemPrompt
+        self.supportsContext = supportsContext
+        self.mlxVersion = mlxVersion
+        self.mlxAudioVersion = mlxAudioVersion
+    }
+
+    public var capability: ASRCapability {
+        ASRCapability(
+            supportsSystemPrompt: supportsSystemPrompt,
+            supportsContext: supportsContext
+        )
+    }
+}
+
+private struct ASRRuntimeEventPayload: Decodable {
+    let type: String
+    let asrContractVersion: String?
+    let supportsSystemPrompt: Bool?
+    let supportsContext: Bool?
+    let mlxVersion: String?
+    let mlxAudioVersion: String?
+    let message: String?
+    let code: String?
 }
 
 public struct ASRCapability: Equatable, Sendable {
@@ -103,6 +228,8 @@ public enum ASRBackendError: LocalizedError {
     case outputInvalidUTF8(String)
     case glossaryPromptUnsupported
     case helperTimedOut(timeout: TimeInterval)
+    case runtimeReportFailed(String)
+    case runtimeContractMismatch(expected: String, actual: String)
 
     public var errorDescription: String? {
         switch self {
@@ -129,6 +256,10 @@ public enum ASRBackendError: LocalizedError {
             return "目前後端不支援專有名詞提示。"
         case let .helperTimedOut(timeout):
             return "ASR Helper 已超過 \(String(format: "%.0f 分鐘", timeout / 60)) 沒有回報活動，已停止以避免工作無限卡住。"
+        case let .runtimeReportFailed(underlying):
+            return "無法取得本機 ASR runtime 身分，已停止（不建立 v2 checkpoint）：\(underlying)"
+        case let .runtimeContractMismatch(expected, actual):
+            return "本機 ASR Helper 的協定版本為 \(actual)，App 預期 \(expected)；請更新其中之一後再試。"
         }
     }
 }
@@ -513,6 +644,9 @@ private final class PersistentASRHelperSession: @unchecked Sendable {
 }
 
 public final class HelperASRBackend {
+    /// The v2 checkpoint store emits one `checkpointCommitted` per durable leaf
+    /// write, so it is part of the shipped contract, not an unknown event.
+    /// It is neither `completed` nor `error`, so it never terminates the stream.
     private static let allowedEventTypes: Set<String> = [
         "capability",
         "stage",
@@ -520,6 +654,7 @@ public final class HelperASRBackend {
         "log",
         "warning",
         "heartbeat",
+        "checkpointCommitted",
         "completed",
         "error"
     ]
@@ -751,7 +886,11 @@ public final class HelperASRBackend {
             )
         }
         do {
-            try TextFileValidator.readNonEmptyUTF8(at: expectedURL)
+            if let checkpoint = request.checkpointV2 {
+                try OutputContractValidator.readLocalTranscript(at: expectedURL, checkpoint: checkpoint, prompt: request.prompt)
+            } else {
+                try TextFileValidator.readNonEmptyUTF8(at: expectedURL)
+            }
         } catch TextFileValidationError.missing {
             throw ASRBackendError.outputMissing(expectedURL.path)
         } catch TextFileValidationError.empty {
@@ -781,7 +920,97 @@ public final class HelperASRBackend {
         runner.cancelCurrent()
     }
 
+    /// Ask the helper what it will actually run with, before any identity freezes.
+    ///
+    /// Always a fresh one-shot process. The persistent session exists to keep a
+    /// loaded model warm, so probing through it would either disturb that model
+    /// or report the environment of a job that is already running.
+    public func reportRuntime(
+        modelCacheDirectory: String,
+        offline: Bool
+    ) async throws -> ASRRuntimeReport {
+        let result = try await runner.run(
+            executableURL: runtime.python,
+            arguments: [
+                runtime.helper.path,
+                "--report-runtime",
+                "--events-jsonl", "-"
+            ],
+            environment: helperEnvironment(
+                modelCacheDirectory: modelCacheDirectory,
+                offline: offline
+            ),
+            requireSuccess: false,
+            timeout: 120,
+            inactivityTimeout: 60
+        )
+
+        var report: ASRRuntimeReport?
+        var failure: String?
+        for line in result.standardOutputText.split(separator: "\n") {
+            guard
+                let data = String(line).data(using: .utf8),
+                let payload = try? decoder.decode(ASRRuntimeEventPayload.self, from: data)
+            else {
+                continue
+            }
+            switch payload.type {
+            case "runtime":
+                guard
+                    let version = payload.asrContractVersion,
+                    let systemPrompt = payload.supportsSystemPrompt,
+                    let context = payload.supportsContext
+                else {
+                    failure = "runtime 事件缺少 asrContractVersion 或 capability 欄位。"
+                    continue
+                }
+                report = ASRRuntimeReport(
+                    asrContractVersion: version,
+                    supportsSystemPrompt: systemPrompt,
+                    supportsContext: context,
+                    mlxVersion: payload.mlxVersion,
+                    mlxAudioVersion: payload.mlxAudioVersion
+                )
+            case "error":
+                failure = payload.message
+                    ?? "ASR Helper 回報錯誤（\(payload.code ?? "unknown")）。"
+            default:
+                continue
+            }
+        }
+
+        if let failure {
+            throw ASRBackendError.runtimeReportFailed(failure)
+        }
+        guard result.terminationStatus == 0 else {
+            throw ASRBackendError.runtimeReportFailed(
+                "ASR Helper 以結束碼 \(result.terminationStatus) 結束："
+                    + result.standardErrorText.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        }
+        guard let report else {
+            throw ASRBackendError.runtimeReportFailed("ASR Helper 未回報 runtime 事件。")
+        }
+        guard report.asrContractVersion == LocalCheckpointSchema.asrContractVersion else {
+            throw ASRBackendError.runtimeContractMismatch(
+                expected: LocalCheckpointSchema.asrContractVersion,
+                actual: report.asrContractVersion
+            )
+        }
+        return report
+    }
+
     private func helperEnvironment(request: ASRRequest) -> [String: String] {
+        helperEnvironment(
+            modelCacheDirectory: request.modelCacheDirectory,
+            offline: request.offline
+        )
+    }
+
+    private func helperEnvironment(
+        modelCacheDirectory: String,
+        offline: Bool
+    ) -> [String: String] {
         let inherited = ProcessInfo.processInfo.environment
         var environment: [String: String] = [:]
         for key in [
@@ -805,9 +1034,9 @@ public final class HelperASRBackend {
             "/usr/sbin",
             "/sbin"
         ].joined(separator: ":")
-        environment["HF_HOME"] = request.modelCacheDirectory
+        environment["HF_HOME"] = modelCacheDirectory
         environment["HF_HUB_CACHE"] = URL(
-            fileURLWithPath: request.modelCacheDirectory,
+            fileURLWithPath: modelCacheDirectory,
             isDirectory: true
         ).appendingPathComponent("hub", isDirectory: true).path
         // Bundled imports must not add .pyc files to the signed App resources.
@@ -817,7 +1046,7 @@ public final class HelperASRBackend {
         environment["PYTHONUTF8"] = "1"
         environment["TOKENIZERS_PARALLELISM"] = "false"
         environment["HF_HUB_DISABLE_TELEMETRY"] = "1"
-        if request.offline {
+        if offline {
             environment["HF_HUB_OFFLINE"] = "1"
             environment["TRANSFORMERS_OFFLINE"] = "1"
         } else {

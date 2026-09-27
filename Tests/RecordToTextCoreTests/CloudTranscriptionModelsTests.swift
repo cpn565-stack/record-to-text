@@ -57,6 +57,7 @@ final class CloudTranscriptionModelsTests: XCTestCase {
         XCTAssertEqual(settings.geminiThinkingLevel, .high)
         XCTAssertEqual(settings.cloudFallbackPolicy, .disabled)
         XCTAssertTrue(settings.silenceAwareCloudSegmentation)
+        XCTAssertFalse(settings.localSilenceAwareSegmentation)
 
         let snapshotData = Data(
             #"{"modelID":"local/model","language":"Chinese","glossaryID":null,"glossaryName":null,"terms":[],"prompt":"prompt","outputLocationMode":"fixedDirectory","outputDirectory":"/tmp/output","keepRawTranscript":false,"backendType":"googleAIStudio","googleAIStudioModelID":"gemini-3.7-flash"}"#.utf8
@@ -65,7 +66,49 @@ final class CloudTranscriptionModelsTests: XCTestCase {
         XCTAssertEqual(snapshot.geminiThinkingLevel, .high)
         XCTAssertEqual(snapshot.cloudFallbackPolicy, .disabled)
         XCTAssertTrue(snapshot.silenceAwareCloudSegmentation)
+        XCTAssertFalse(snapshot.localSilenceAwareSegmentation)
         XCTAssertEqual(snapshot.requestedModelID, "gemini-3.7-flash")
+    }
+
+    /// Phase 1.1 H5: silence-aware local cut points have not passed the real
+    /// model A/B, so they stay opt-in. A fresh install and a freshly built
+    /// snapshot are off; a value the user explicitly saved survives a round trip
+    /// and is what the engine reads, and turning it off again is honoured too.
+    func testLocalSilenceSegmentationStaysOptInUntilTheABReleaseGatePasses() throws {
+        XCTAssertFalse(AppSettings(defaultOutputDirectory: "/tmp/output").localSilenceAwareSegmentation)
+        XCTAssertFalse(JobSnapshot(
+            modelID: "local/model", glossaryID: nil, glossaryName: nil, terms: [],
+            prompt: "prompt", outputLocationMode: .fixedDirectory,
+            outputDirectory: "/tmp/output", keepRawTranscript: false,
+            backendType: .localQwen
+        ).localSilenceAwareSegmentation)
+
+        for enabled in [true, false] {
+            var settings = AppSettings(defaultOutputDirectory: "/tmp/output")
+            settings.localSilenceAwareSegmentation = enabled
+            let decodedSettings = try JSONDecoder().decode(
+                AppSettings.self, from: JSONEncoder().encode(settings)
+            )
+            XCTAssertEqual(decodedSettings.localSilenceAwareSegmentation, enabled)
+
+            let snapshot = JobSnapshot(
+                modelID: "local/model", glossaryID: nil, glossaryName: nil, terms: [],
+                prompt: "prompt", outputLocationMode: .fixedDirectory,
+                outputDirectory: "/tmp/output", keepRawTranscript: false,
+                backendType: .localQwen,
+                localSilenceAwareSegmentation: enabled
+            )
+            let decodedSnapshot = try JSONDecoder().decode(
+                JobSnapshot.self, from: JSONEncoder().encode(snapshot)
+            )
+            XCTAssertEqual(decodedSnapshot.localSilenceAwareSegmentation, enabled)
+            // A queued job is re-synced from live settings before it starts, so
+            // the switch has to survive that path unchanged in both directions.
+            XCTAssertEqual(
+                decodedSnapshot.withEngineSettings(settings).localSilenceAwareSegmentation,
+                enabled
+            )
+        }
     }
 
     func testRecentSummaryUsesCloudRequestedAndEffectiveModels() {

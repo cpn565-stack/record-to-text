@@ -6,7 +6,9 @@ policy here makes the safety boundary testable on machines without Metal.
 
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from contextlib import AbstractContextManager, nullcontext
+from dataclasses import dataclass
 import re
 from typing import Any, Callable, Sequence
 
@@ -39,6 +41,190 @@ class TokenLimitReached(RuntimeError):
 
 
 OnLeafSkipped = Callable[[TokenLimitReached], str]
+
+
+@dataclass(frozen=True)
+class LeafSpan:
+    """A finished span with its position in *original recording* samples.
+
+    Positions are absolute, so the caller never has to reconstruct them from a
+    chunk index. ``depth`` records how many token-limit splits produced it.
+    """
+
+    text: str
+    start_sample: int
+    end_sample: int
+    generation_tokens: int | None
+    maximum_tokens: int
+    reached_token_limit: bool
+    finish_reason: str
+    span_seconds: float
+    depth: int
+
+
+@dataclass(frozen=True)
+class GapSpan:
+    """An irreducible span that hit the token cap and was recorded as a gap."""
+
+    error: TokenLimitReached
+    start_sample: int
+    end_sample: int
+    span_seconds: float
+    depth: int
+
+
+OnLeafResult = Callable[[LeafSpan], None]
+OnLeafGap = Callable[[GapSpan], str]
+#: ``(parent_start_sample, split_sample, parent_end_sample)`` in absolute
+#: coordinates. Emitted before either child is generated so the caller can
+#: commit the parent's ``split`` state and both pending children at once.
+OnSpanSplit = Callable[[int, int, int], None]
+#: ``(span_start, span_length, min_split_samples, midpoint)`` → the offset to
+#: split at, measured from ``span_start``. Phase 1 replaces the arithmetic
+#: midpoint with a nearby silence boundary; phase 0 keeps the midpoint.
+ChooseSplit = Callable[[int, int, int, int], int]
+
+
+@dataclass
+class SplitCounters:
+    """§7: recursive silence-cut and fallback counts, tracked per root.
+
+    Kept separate from the Swift-side outer/inner tallies because the helper
+    cannot add an RPC this phase; these travel out through the ``log`` stream.
+    """
+
+    silence_cuts: int = 0
+    fallbacks: int = 0
+
+
+class SilenceCandidateIndex:
+    """The pauses Swift froze, as absolute-sample interval and midpoint lists.
+
+    Mirrors Swift ``LocalSilenceCandidateIndex``. The helper only ever *selects*
+    from what was persisted, so both sides have to agree on midpoint arithmetic:
+    Swift uses ``start + (end - start) / 2`` on ``Int64``, which truncates
+    exactly like Python ``//`` on the non-negative coordinates this holds.
+    """
+
+    __slots__ = ("intervals", "candidates")
+
+    def __init__(self, intervals: Sequence[tuple[int, int]]) -> None:
+        merged = self._merge(intervals)
+        self.intervals: tuple[tuple[int, int], ...] = tuple(merged)
+        self.candidates: tuple[int, ...] = tuple(
+            sorted({start + (end - start) // 2 for start, end in merged})
+        )
+
+    @classmethod
+    def from_plan(cls, intervals: Sequence[Any] | None) -> "SilenceCandidateIndex":
+        """Build from the ``intervals`` array of a frozen ``silence-plan.json``."""
+
+        pairs: list[tuple[int, int]] = []
+        for entry in intervals or []:
+            if not isinstance(entry, dict):
+                continue
+            start = entry.get("startSample")
+            end = entry.get("endSample")
+            # ``bool`` subclasses ``int``; a JSON ``true`` must not become
+            # sample 1 and silently shift every boundary after it.
+            if isinstance(start, bool) or not isinstance(start, int):
+                continue
+            if isinstance(end, bool) or not isinstance(end, int):
+                continue
+            if end > start >= 0:
+                pairs.append((start, end))
+        return cls(pairs)
+
+    @staticmethod
+    def _merge(intervals: Sequence[tuple[int, int]]) -> list[tuple[int, int]]:
+        result: list[tuple[int, int]] = []
+        for start, end in sorted(intervals):
+            if end <= start:
+                continue
+            if result and start <= result[-1][1]:
+                result[-1] = (result[-1][0], max(result[-1][1], end))
+            else:
+                result.append((start, end))
+        return result
+
+    def __bool__(self) -> bool:
+        return bool(self.candidates)
+
+    def candidates_in(self, lower: int, upper: int) -> Sequence[int]:
+        """Candidates inside ``[lower, upper]``, in ascending order."""
+
+        if lower > upper or not self.candidates:
+            return ()
+        first = bisect_left(self.candidates, lower)
+        last = bisect_right(self.candidates, upper)
+        return self.candidates[first:last]
+
+    def covers(self, start_sample: int, end_sample: int) -> bool:
+        """§6: does *every* sample of ``[start, end)`` lie inside one pause?
+
+        Only a whole-leaf answer may turn an empty transcription into
+        ``verifiedSilence``. Intervals arrive merged, so contiguous coverage can
+        only come from a single one — a 90%-silent leaf is not evidence, and
+        deleting the remaining 10% is exactly what §1 forbids.
+        """
+
+        if end_sample <= start_sample:
+            return False
+        return any(
+            start <= start_sample and end >= end_sample
+            for start, end in self.intervals
+        )
+
+
+def silence_choose_split(
+    index: SilenceCandidateIndex,
+    *,
+    search_samples: int,
+    counters: SplitCounters | None = None,
+) -> ChooseSplit:
+    """§4 row 4: the token-recursion split point.
+
+    Candidates are pause midpoints within ``search_samples`` of the parent's
+    arithmetic midpoint, and only ones that leave *both* children at or above
+    ``min_split_samples`` qualify. Ties go to the earlier candidate so the same
+    audio always plans the same way. With no qualifying candidate the legal
+    midpoint is used — the caller's own termination policy decides whether that
+    is still worth splitting.
+    """
+
+    window = max(int(search_samples), 0)
+
+    def choose(
+        span_start: int,
+        span_length: int,
+        min_split_samples: int,
+        midpoint: int,
+    ) -> int:
+        parent_end = span_start + span_length
+        target = span_start + midpoint
+        best: int | None = None
+        best_distance = -1
+        for candidate in index.candidates_in(span_start, parent_end):
+            distance = abs(candidate - target)
+            if distance > window:
+                continue
+            if candidate - span_start < min_split_samples:
+                continue
+            if parent_end - candidate < min_split_samples:
+                continue
+            # Strict ``<`` keeps the first, i.e. earliest, of an equidistant pair.
+            if best is None or distance < best_distance:
+                best = candidate
+                best_distance = distance
+        if best is None or best == target:
+            if counters is not None:
+                counters.fallbacks += 1
+            return midpoint
+        if counters is not None:
+            counters.silence_cuts += 1
+        return best - span_start
+
+    return choose
 
 
 def _flexible_fragment(value: str) -> str:
@@ -294,6 +480,11 @@ def generate_span_with_token_guard(
     generate: Generate | None = None,
     on_leaf_complete: OnLeafComplete | None = None,
     on_leaf_skipped: OnLeafSkipped | None = None,
+    on_leaf_result: OnLeafResult | None = None,
+    on_leaf_gap: OnLeafGap | None = None,
+    on_span_split: OnSpanSplit | None = None,
+    choose_split: ChooseSplit | None = None,
+    span_start: int = 0,
     min_split_seconds: float = 30.0,
     max_depth: int = 6,
     depth: int = 0,
@@ -305,6 +496,12 @@ def generate_span_with_token_guard(
     callback can replace that irreducible span with an explicit gap marker so
     the caller can continue processing later audio without treating truncated
     text as valid.
+
+    ``span_start`` is this span's first sample in *original recording*
+    coordinates. It is threaded through every recursion so leaf and gap callbacks
+    report absolute positions; callers must never rebuild them from a chunk
+    index. A missing ``generation_tokens`` is reported as ``None`` rather than
+    coerced to zero, so the caller can refuse to treat it as a proven completion.
     """
 
     with heartbeat_factory(label):
@@ -317,11 +514,33 @@ def generate_span_with_token_guard(
     if not isinstance(text, str):
         raise RuntimeError("MLX-Audio did not return a text transcript")
 
-    generation_tokens = int(getattr(result, "generation_tokens", 0) or 0)
+    raw_tokens = getattr(result, "generation_tokens", None)
+    generation_tokens: int | None
+    if isinstance(raw_tokens, bool) or not isinstance(raw_tokens, int):
+        generation_tokens = None
+    else:
+        generation_tokens = int(raw_tokens)
     span_seconds = len(span) / float(sample_rate)
-    if generation_tokens < maximum_tokens:
+    span_end = span_start + len(span)
+    capped = generation_tokens is not None and generation_tokens >= maximum_tokens
+
+    if not capped:
         if on_leaf_complete is not None:
             on_leaf_complete(text)
+        if on_leaf_result is not None:
+            on_leaf_result(
+                LeafSpan(
+                    text=text,
+                    start_sample=span_start,
+                    end_sample=span_end,
+                    generation_tokens=generation_tokens,
+                    maximum_tokens=maximum_tokens,
+                    reached_token_limit=False,
+                    finish_reason="stop" if generation_tokens is not None else "unknown",
+                    span_seconds=span_seconds,
+                    depth=depth,
+                )
+            )
         return text
 
     min_split_samples = max(int(min_split_seconds * sample_rate), sample_rate)
@@ -336,9 +555,26 @@ def generate_span_with_token_guard(
             ),
         )
         midpoint = len(span) // 2
+        if choose_split is None:
+            split_at = midpoint
+        else:
+            # Clamp so a silence-aware chooser can never yield an empty or
+            # below-minimum half, which would recurse forever.
+            lower = min_split_samples
+            upper = len(span) - min_split_samples
+            split_at = max(
+                lower,
+                min(
+                    upper,
+                    int(choose_split(span_start, len(span), min_split_samples, midpoint)),
+                ),
+            )
+        absolute_split = span_start + split_at
+        if on_span_split is not None:
+            on_span_split(span_start, absolute_split, span_end)
         left = generate_span_with_token_guard(
             model,
-            span[:midpoint],
+            span[:split_at],
             generation_arguments=generation_arguments,
             sample_rate=sample_rate,
             maximum_tokens=maximum_tokens,
@@ -348,13 +584,18 @@ def generate_span_with_token_guard(
             generate=generate,
             on_leaf_complete=on_leaf_complete,
             on_leaf_skipped=on_leaf_skipped,
+            on_leaf_result=on_leaf_result,
+            on_leaf_gap=on_leaf_gap,
+            on_span_split=on_span_split,
+            choose_split=choose_split,
+            span_start=span_start,
             min_split_seconds=min_split_seconds,
             max_depth=max_depth,
             depth=depth + 1,
         )
         right = generate_span_with_token_guard(
             model,
-            span[midpoint:],
+            span[split_at:],
             generation_arguments=generation_arguments,
             sample_rate=sample_rate,
             maximum_tokens=maximum_tokens,
@@ -364,6 +605,11 @@ def generate_span_with_token_guard(
             generate=generate,
             on_leaf_complete=on_leaf_complete,
             on_leaf_skipped=on_leaf_skipped,
+            on_leaf_result=on_leaf_result,
+            on_leaf_gap=on_leaf_gap,
+            on_span_split=on_span_split,
+            choose_split=choose_split,
+            span_start=absolute_split,
             min_split_seconds=min_split_seconds,
             max_depth=max_depth,
             depth=depth + 1,
@@ -373,9 +619,19 @@ def generate_span_with_token_guard(
     error = TokenLimitReached(
         label=label,
         span_seconds=span_seconds,
-        generation_tokens=generation_tokens,
+        generation_tokens=int(generation_tokens or 0),
         maximum_tokens=maximum_tokens,
     )
+    if on_leaf_gap is not None:
+        return on_leaf_gap(
+            GapSpan(
+                error=error,
+                start_sample=span_start,
+                end_sample=span_end,
+                span_seconds=span_seconds,
+                depth=depth,
+            )
+        )
     if on_leaf_skipped is not None:
         return on_leaf_skipped(error)
     raise error

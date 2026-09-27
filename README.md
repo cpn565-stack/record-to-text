@@ -147,6 +147,7 @@ open /path/to/record-to-text.app
 - [產品與技術決策](docs/product-decisions.md)
 - [需求追蹤](docs/product-spec.md)
 - [下一次接續](docs/NEXT_STEPS.md)
+- [Qwen 地端強化規格：身分與區間 → 靜音切點 → 續跑 → 補缺口](docs/qwen-local-roadmap-spec-2026-09-27.md)
 - [測試版交付與安裝](docs/development-delivery.md)
 - [交班單](HANDOFF.md)
 

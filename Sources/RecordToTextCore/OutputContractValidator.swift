@@ -46,6 +46,12 @@ public enum OutputContractValidator {
     }
 
     private static func hasPromptEcho(text: String, prompt: String) -> Bool {
+        // App-generated time headings must not hide a leading prompt/glossary echo.
+        let text = text.replacingOccurrences(
+            of: #"(?m)^\[\d{2,}:\d{2}:\d{2} - \d{2,}:\d{2}:\d{2}\][\t ]*$"#,
+            with: "",
+            options: .regularExpression
+        )
         let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedPrompt.isEmpty else {
             return false

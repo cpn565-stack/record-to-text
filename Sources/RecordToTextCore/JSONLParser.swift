@@ -15,6 +15,9 @@ public struct HelperEvent: Codable, Equatable, Sendable {
     public let containsSkippedAudio: Bool?
     public let supportsSystemPrompt: Bool?
     public let supportsContext: Bool?
+    public let rootID: String?
+    public let revision: Int?
+    public let nodeID: String?
 
     public init(
         type: String,
@@ -30,7 +33,10 @@ public struct HelperEvent: Codable, Equatable, Sendable {
         durationSeconds: Double? = nil,
         containsSkippedAudio: Bool? = nil,
         supportsSystemPrompt: Bool? = nil,
-        supportsContext: Bool? = nil
+        supportsContext: Bool? = nil,
+        rootID: String? = nil,
+        revision: Int? = nil,
+        nodeID: String? = nil
     ) {
         self.type = type
         self.value = value
@@ -46,6 +52,9 @@ public struct HelperEvent: Codable, Equatable, Sendable {
         self.containsSkippedAudio = containsSkippedAudio
         self.supportsSystemPrompt = supportsSystemPrompt
         self.supportsContext = supportsContext
+        self.rootID = rootID
+        self.revision = revision
+        self.nodeID = nodeID
     }
 }
 

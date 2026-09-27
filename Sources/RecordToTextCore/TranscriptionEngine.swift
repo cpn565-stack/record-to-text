@@ -374,22 +374,52 @@ public final class TranscriptionEngine {
                 sampleRate: sourceMetadata.sampleRate,
                 channels: sourceMetadata.channels
             )
-            let segmentPlan = try AudioSegmentPlanner.makePlan(
-                sourceDuration: metadata.duration,
-                maximumSegmentDuration: maximumASRSegmentDuration
-            )
-            update(
-                .log(
-                    level: "info",
-                    message: String(
-                        format: "分段計畫：來源 %.1f 分鐘，每段最長 %.0f 分鐘（%.0f 秒），共 %d 段。",
-                        metadata.duration / 60.0,
-                        maximumASRSegmentDuration / 60.0,
-                        maximumASRSegmentDuration,
-                        segmentPlan.expectedSegmentCount
+            // §2: a job that already froze a v2 plan continues on that plan.
+            // Re-deriving the outer boundaries would let a changed setting or a
+            // differently-behaving detector move them, and then the committed
+            // root states would sit next to audio they were never made from.
+            let frozenLocalManifest: LocalCheckpointManifest?
+            if job.snapshot.backendType == .localQwen {
+                frozenLocalManifest = try LocalCheckpointPlanner.loadFrozenManifest(
+                    layout: LocalCheckpointLayout(
+                        recoveryDirectory: localRecoveryDirectory
+                    ),
+                    fileManager: fileManager
+                )
+            } else {
+                frozenLocalManifest = nil
+            }
+
+            var segmentPlan: AudioSegmentationPlan
+            if let frozenLocalManifest {
+                segmentPlan = try LocalCheckpointPlanner.segmentPlan(
+                    from: frozenLocalManifest,
+                    maximumSegmentDuration: maximumASRSegmentDuration
+                )
+                update(
+                    .log(
+                        level: "info",
+                        message: "本次 silence_scan_count=0；沿用已凍結的 v2 分段計畫（\(frozenLocalManifest.plannerVersion)，共 \(segmentPlan.expectedSegmentCount) 段）；切點設定變更只影響新工作。"
                     )
                 )
-            )
+            } else {
+                segmentPlan = try AudioSegmentPlanner.makePlan(
+                    sourceDuration: metadata.duration,
+                    maximumSegmentDuration: maximumASRSegmentDuration
+                )
+                update(
+                    .log(
+                        level: "info",
+                        message: String(
+                            format: "分段計畫：來源 %.1f 分鐘，每段最長 %.0f 分鐘（%.0f 秒），共 %d 段。",
+                            metadata.duration / 60.0,
+                            maximumASRSegmentDuration / 60.0,
+                            maximumASRSegmentDuration,
+                            segmentPlan.expectedSegmentCount
+                        )
+                    )
+                )
+            }
             let outputDirectory = try resolvedOutputDirectory(
                 for: sourceURL,
                 snapshot: job.snapshot
@@ -450,19 +480,44 @@ public final class TranscriptionEngine {
                 )
             }
 
+            // §2.1: the v2 path copies the source into App-private storage and
+            // works from that snapshot, so the reservation has to cover one more
+            // source-sized file. Only local jobs can take that path.
+            let localV2Eligible = job.snapshot.backendType == .localQwen
+            let snapshotReservation: Int64 = localV2Eligible
+                ? (try? fileManager.attributesOfItem(atPath: sourceURL.path)[.size] as? Int64) ?? 0
+                : 0
+
             try probeService.validateDiskSpace(
                 for: metadata,
                 temporaryDirectory: workingDirectory,
                 outputDirectory: outputDirectory,
-                pcmWorkingCopies: segmentPlan.requiresSplitting ? 2 : 1
+                pcmWorkingCopies: segmentPlan.requiresSplitting ? 2 : 1,
+                extraTemporaryBytes: snapshotReservation
             )
+
+            let localPreparation: LocalV2Preparation?
+            if localV2Eligible {
+                localPreparation = try await prepareLocalCheckpointV2(
+                    job: job,
+                    offline: offline,
+                    sourceURL: sourceURL,
+                    workingDirectory: workingDirectory,
+                    update: update
+                )
+            } else {
+                localPreparation = nil
+            }
 
             try Task.checkCancellation()
             currentStage.set(.convertingAudio)
             update(.stage(.convertingAudio))
+            // Once the snapshot is verified, every decode reads from it. Mixing
+            // the original in again would let a mid-run edit reach the pipeline.
+            let decodeSourceURL = localPreparation?.snapshotURL ?? sourceURL
             if let sourceSlice = job.sourceSlice {
                 try await ffmpegService.extractSegment(
-                    sourceURL: sourceURL,
+                    sourceURL: decodeSourceURL,
                     destinationURL: normalizedAudioURL,
                     startSeconds: sourceSlice.startSeconds,
                     durationSeconds: sourceSlice.durationSeconds
@@ -470,7 +525,7 @@ public final class TranscriptionEngine {
                 update(.progress(current: 5, total: 100, unit: "percent"))
             } else {
                 try await ffmpegService.normalize(
-                    sourceURL: sourceURL,
+                    sourceURL: decodeSourceURL,
                     destinationURL: normalizedAudioURL,
                     duration: metadata.duration
                 ) { current, total in
@@ -484,6 +539,53 @@ public final class TranscriptionEngine {
                         )
                     )
                 }
+            }
+
+            // §3: the container duration is an estimate. Once the normalized WAV
+            // exists, the plan is rebuilt from the samples the model will really
+            // see, so no root is planned past the end of the audio.
+            let normalizedMeasurement: LocalRootMeasurement?
+            let localSilenceScan: LocalSilenceScan?
+            if let localPreparation {
+                let measurement = try await LocalRootMeasurer.measure(
+                    wavURL: normalizedAudioURL,
+                    expectedSeconds: metadata.duration
+                )
+                normalizedMeasurement = measurement
+                if frozenLocalManifest == nil {
+                    let scan = try await planLocalSilenceBoundaries(
+                        job: job,
+                        preparation: localPreparation,
+                        measurement: measurement,
+                        normalizedAudioURL: normalizedAudioURL,
+                        update: update
+                    )
+                    localSilenceScan = scan
+                    if let scan {
+                        segmentPlan = scan.outerPlan
+                    } else if abs(measurement.seconds - metadata.duration) > 0.001 {
+                        segmentPlan = try AudioSegmentPlanner.makePlan(
+                            sourceDuration: measurement.seconds,
+                            maximumSegmentDuration: maximumASRSegmentDuration
+                        )
+                        update(
+                            .log(
+                                level: "info",
+                                message: String(
+                                    format: "以實際解碼 sample 數重算分段計畫：%.3f 秒（容器估計 %.3f 秒），共 %d 段。",
+                                    measurement.seconds,
+                                    metadata.duration,
+                                    segmentPlan.expectedSegmentCount
+                                )
+                            )
+                        )
+                    }
+                } else {
+                    localSilenceScan = nil
+                }
+            } else {
+                normalizedMeasurement = nil
+                localSilenceScan = nil
             }
 
             if segmentPlan.requiresSplitting {
@@ -527,6 +629,8 @@ public final class TranscriptionEngine {
             )
             try writeSegmentManifest(segmentManifest, to: segmentManifestURL)
 
+            var rootSources: [LocalRootSource] = []
+            var rootMeasurementSeconds: TimeInterval = 0
             if segmentPlan.requiresSplitting {
                 update(
                     .log(
@@ -552,20 +656,44 @@ public final class TranscriptionEngine {
                                 message: "正在準備第 \(segment.index)／\(segmentPlan.expectedSegmentCount) 段音訊。"
                             )
                         )
+                        let segmentAudioURL = URL(fileURLWithPath: record.audioPath)
                         try await ffmpegService.extractSegment(
                             sourceURL: normalizedAudioURL,
-                            destinationURL: URL(fileURLWithPath: record.audioPath),
+                            destinationURL: segmentAudioURL,
                             startSeconds: segment.startSeconds,
                             durationSeconds: segment.durationSeconds
                         )
-                        let preparedMetadata = try await probeService.probe(
-                            URL(fileURLWithPath: record.audioPath)
-                        )
-                        if preparedMetadata.duration
+                        // With v2 the decoded sample count replaces the probe as
+                        // the authority on what this segment contains, so the
+                        // too-long guard and the root evidence come from one
+                        // measurement instead of two that could disagree.
+                        var preparedDuration: Double
+                        if localPreparation != nil {
+                            let measureStarted = Date()
+                            let measurement = try await LocalRootMeasurer.measure(
+                                wavURL: segmentAudioURL,
+                                expectedSeconds: segment.durationSeconds
+                            )
+                            rootMeasurementSeconds += Date().timeIntervalSince(measureStarted)
+                            preparedDuration = measurement.seconds
+                            rootSources.append(
+                                LocalRootSource(
+                                    order: segment.index - 1,
+                                    audioURL: segmentAudioURL,
+                                    sampleCount: measurement.sampleCount,
+                                    pcmSHA256: measurement.pcmSHA256
+                                )
+                            )
+                        } else {
+                            preparedDuration = try await probeService.probe(
+                                segmentAudioURL
+                            ).duration
+                        }
+                        if preparedDuration
                             > maximumASRSegmentDuration + 0.01 {
                             throw AudioSegmentationError.segmentOutputTooLong(
                                 index: segment.index,
-                                duration: preparedMetadata.duration,
+                                duration: preparedDuration,
                                 maximum: maximumASRSegmentDuration
                             )
                         }
@@ -591,6 +719,16 @@ public final class TranscriptionEngine {
                     }
                 }
             } else {
+                if let normalizedMeasurement {
+                    rootSources.append(
+                        LocalRootSource(
+                            order: 0,
+                            audioURL: normalizedAudioURL,
+                            sampleCount: normalizedMeasurement.sampleCount,
+                            pcmSHA256: normalizedMeasurement.pcmSHA256
+                        )
+                    )
+                }
                 try segmentManifest.mark(segmentIndex: 1, status: .prepared)
                 try writeSegmentManifest(segmentManifest, to: segmentManifestURL)
             }
@@ -599,6 +737,40 @@ public final class TranscriptionEngine {
                 in: localRecoveryDirectory,
                 fileManager: fileManager
             )
+
+            // Frozen before the first inference call, so every leaf the helper
+            // commits is interpretable against this exact plan.
+            let v2Plan: LocalV2Plan?
+            if let localPreparation, let normalizedMeasurement {
+                update(
+                    .log(
+                        level: "info",
+                        message: String(
+                            format: "§9.10 量測：root PCM hash 合計 %.2f 秒（%d 個 root）。",
+                            rootMeasurementSeconds,
+                            rootSources.count
+                        )
+                    )
+                )
+                v2Plan = try freezeLocalCheckpointV2(
+                    preparation: localPreparation,
+                    job: job,
+                    allowMissingPrompt: allowMissingPrompt,
+                    recoveryDirectory: localRecoveryDirectory,
+                    workStartSample: try LocalAudioCoordinates.quantize(
+                        seconds: job.sourceSlice?.startSeconds ?? 0
+                    ),
+                    normalizedSampleCount: normalizedMeasurement.sampleCount,
+                    normalizedPCMSHA256: normalizedMeasurement.pcmSHA256,
+                    rootSources: rootSources,
+                    silenceScan: localSilenceScan,
+                    outputLocatorHint: outputDirectory.path,
+                    createdAt: startedAt,
+                    update: update
+                )
+            } else {
+                v2Plan = nil
+            }
 
             var segmentTexts: [Int: String] = [:]
             for segment in segmentPlan.segments {
@@ -658,7 +830,12 @@ public final class TranscriptionEngine {
                     segmentIndex: segment.index,
                     segmentCount: segmentPlan.expectedSegmentCount,
                     chunkCheckpointDirectory:
-                        localChunkCheckpointDirectory.path
+                        localChunkCheckpointDirectory.path,
+                    timeOffsetSeconds:
+                        (job.sourceSlice?.startSeconds ?? 0) + segment.startSeconds,
+                    checkpointV2: v2Plan.map {
+                        localCheckpointV2Block(plan: $0, rootOrder: segment.index - 1)
+                    }
                 )
 
                 let livenessMonitor = HelperLivenessMonitor()
@@ -749,11 +926,26 @@ public final class TranscriptionEngine {
                     }
                     livenessTask.cancel()
 
-                    let segmentText = try OutputContractValidator.readTranscript(
-                        at: URL(fileURLWithPath: record.outputPath),
-                        prompt: job.snapshot.prompt
-                    ).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let outputURL = URL(fileURLWithPath: record.outputPath)
+                    let segmentText: String
+                    if let block = request.checkpointV2 {
+                        segmentText = try OutputContractValidator.readLocalTranscript(
+                            at: outputURL, checkpoint: block, prompt: job.snapshot.prompt
+                        )
+                    } else {
+                        segmentText = try OutputContractValidator.readTranscript(at: outputURL, prompt: job.snapshot.prompt)
+                    }
                     segmentTexts[segment.index] = segmentText
+                    // The helper's `completed` event is a claim about a file it
+                    // wrote; the committed root state is the evidence. Verifying
+                    // here turns a silent hole into a failure for this segment
+                    // instead of a transcript missing ten minutes of audio.
+                    if let v2Plan {
+                        _ = try verifyLocalCheckpointV2Root(
+                            plan: v2Plan,
+                            rootOrder: segment.index - 1
+                        )
+                    }
                     try segmentManifest.mark(
                         segmentIndex: segment.index,
                         status: transcriptionResult.containsSkippedAudio
@@ -800,14 +992,38 @@ public final class TranscriptionEngine {
 
             let completedSegments = try segmentManifest
                 .validatedCompletedSegments()
-            let mergedRawText = try completedSegments.map { segment in
-                guard let text = segmentTexts[segment.segmentIndex] else {
-                    throw AudioSegmentationError.segmentTranscriptMissing(
-                        segment.segmentIndex
+            // §6: with a v2 plan the published text is rendered from committed
+            // leaf ranges in absolute coordinates. Concatenating the helper's
+            // per-root files instead would double-count a display group that
+            // straddles a root boundary.
+            let v2Merged: LocalMergedTranscript?
+            let mergedRawText: String
+            if let v2Plan {
+                let merged = try mergeLocalCheckpointV2(plan: v2Plan)
+                v2Merged = merged
+                mergedRawText = merged.text
+                if merged.containsGaps {
+                    update(
+                        .warning(
+                            code: "local_gap_retained",
+                            message: String(
+                                format: "已保留 %.1f 秒無法推論的缺口，缺稿位置以時間標記指出，未以鄰近文字填補。",
+                                merged.gapSeconds
+                            )
+                        )
                     )
                 }
-                return text
-            }.joined(separator: "\n")
+            } else {
+                v2Merged = nil
+                mergedRawText = try completedSegments.map { segment in
+                    guard let text = segmentTexts[segment.segmentIndex] else {
+                        throw AudioSegmentationError.segmentTranscriptMissing(
+                            segment.segmentIndex
+                        )
+                    }
+                    return text
+                }.joined(separator: "\n")
+            }
             let validatedMergedRawText = try OutputContractValidator.validate(
                 text: mergedRawText,
                 path: rawTranscriptURL.path,
@@ -831,6 +1047,15 @@ public final class TranscriptionEngine {
             try Task.checkCancellation()
             currentStage.set(.writingOutput)
             update(.stage(.writingOutput))
+            // §2.1 step 3: the transcript is only published as belonging to this
+            // source if the source still has the bytes it had at job start. An
+            // edited recording must not inherit a transcript made from the old one.
+            if let localPreparation {
+                _ = try await LocalSourceVerification.confirmUnchanged(
+                    sourceURL: sourceURL,
+                    expectedSHA256: localPreparation.sourceFacts.sha256
+                )
+            }
             let convertedText = try OutputContractValidator.readTranscript(
                 at: convertedTranscriptURL
             )
@@ -843,7 +1068,7 @@ public final class TranscriptionEngine {
                     sourceSlice: job.sourceSlice
                 ),
                 publicationJob: job,
-                publicationResult: { .init(outputURL: $0, rawOutputURL: nil, duration: Date().timeIntervalSince(startedAt), containsSkippedAudio: segmentManifest.segments.contains { $0.status == .completedWithGaps }) }
+                publicationResult: { .init(outputURL: $0, rawOutputURL: nil, duration: Date().timeIntervalSince(startedAt), containsSkippedAudio: (v2Merged?.containsGaps ?? false) || segmentManifest.segments.contains { $0.status == .completedWithGaps }) }
             )
             update(.progress(current: 100, total: 100, unit: "percent"))
 
@@ -2674,5 +2899,564 @@ extension TranscriptionEngine {
                 return (try? TextFileValidator.readNonEmptyUTF8(at: url)) != nil
             }
         }
+    }
+}
+
+// MARK: - Local v2 checkpoint integration
+
+/// Identity facts gathered before any audio is decoded.
+///
+/// A `nil` return from `prepareLocalCheckpointV2` means the run stays on the v1
+/// path. That is not a way around verification: no v2 checkpoint is written at
+/// all, so there is nothing that a later run could mistakenly resume from.
+struct LocalV2Preparation {
+    let sourceFacts: LocalSourceFacts
+    let snapshotURL: URL
+    let decoder: LocalDecoderIdentity
+    let runtime: ASRRuntimeReport
+    let modelManifestDigest: String
+    let modelRevision: String?
+}
+
+/// A frozen plan plus the coordinates every helper invocation needs.
+struct LocalV2Plan {
+    let layout: LocalCheckpointLayout
+    let identity: LocalIdentityDocument
+    let manifest: LocalCheckpointManifest
+    let roots: [LocalRootPlan]
+}
+
+/// One whole-work-range silence scan (§3.2) and everything the freeze needs to
+/// turn it into a persisted plan.
+///
+/// The scan runs before extraction because the outer boundaries decide where
+/// ffmpeg cuts; the display grid and the 120 s chunks are planned later, from
+/// the roots' real decoded sample counts, which is why the inner tallies are
+/// filled in by `silencePlan(inner:)` rather than here.
+struct LocalSilenceScan {
+    let outerPlan: AudioSegmentationPlan
+    let candidates: LocalSilenceCandidateIndex
+    let intervals: [LocalSilenceInterval]
+    let truncated: Bool
+    let thresholds: LocalSilenceThresholds
+    let metrics: SilenceAnalysisMetrics
+    let scanPCMSHA256: String
+    let normalizationDigest: String
+    let sourceSHA256: String
+    let coveredStartSample: Int64
+    let coveredEndSample: Int64
+    let outerSilenceCuts: Int
+    let outerFallbacks: Int
+
+    func silencePlan(inner: LocalPlannerCutTally) -> LocalSilencePlan {
+        LocalSilencePlan(
+            thresholds: thresholds,
+            coveredStartSample: coveredStartSample,
+            coveredEndSample: coveredEndSample,
+            scanPCMSHA256: scanPCMSHA256,
+            normalizationDigest: normalizationDigest,
+            sourceSHA256: sourceSHA256,
+            truncated: truncated,
+            // §3.7: past the cap the cut plan survives but the list does not, so
+            // the helper finds no candidates and takes a legal midpoint instead.
+            intervals: truncated ? [] : intervals,
+            scanCount: metrics.scanCount,
+            scannedAudioSeconds: metrics.scannedAudioSeconds,
+            scanElapsedMilliseconds: metrics.scanElapsedMilliseconds,
+            cacheHitCount: metrics.cacheHitCount,
+            outerSilenceCuts: outerSilenceCuts,
+            outerFallbacks: outerFallbacks,
+            innerSilenceCuts: inner.innerSilenceCuts,
+            innerFallbacks: inner.innerFallbacks
+        )
+    }
+}
+
+extension TranscriptionEngine {
+    /// Swift sends no sampler overrides: the helper calls `generate()` with only
+    /// `language` and `max_tokens`, which are separate identity fields. The
+    /// digest describes that absence, so adding an override later changes the
+    /// identity instead of slipping through unnoticed.
+    static let localDefaultSamplerDigest = LocalDigest.sha256(
+        CanonicalJSONEncoder.encode(.object(["overrides": .object([:])]))
+    )
+
+    static let localOpenCCConfiguration = "s2twp.json"
+
+    /// §2.1 steps 1–2 and §4: snapshot the source, then collect every fact the
+    /// frozen identity needs.
+    ///
+    /// An unstable source or an unverifiable snapshot is a hard stop, not a
+    /// downgrade — §7 forbids a silent fallback that skips identity checks. Only
+    /// "this model has no verifiable content manifest" degrades to v1, because
+    /// there the correct answer is to refuse cross-run reuse, which is exactly
+    /// what running without a v2 checkpoint does.
+    func prepareLocalCheckpointV2(
+        job: TranscriptionJob,
+        offline: Bool,
+        sourceURL: URL,
+        workingDirectory: URL,
+        update: (PipelineUpdate) -> Void
+    ) async throws -> LocalV2Preparation? {
+        guard runtime.helper.lastPathComponent == "qwen_asr_mlx_runner.py" else {
+            update(
+                .log(
+                    level: "info",
+                    message: "目前使用的 ASR helper 不支援 v2 音訊身分契約；本次不建立 local-checkpoint-v2，跨次續跑不可用。"
+                )
+            )
+            return nil
+        }
+
+        let modelManifest: LocalModelManifest
+        do {
+            modelManifest = try await LocalModelManifestStore.compute(
+                modelID: job.snapshot.modelID,
+                revision: job.snapshot.modelRevision,
+                cacheDirectory: paths.models
+            )
+        } catch {
+            update(
+                .log(
+                    level: "info",
+                    message: "模型內容 manifest 不可驗證（\(error.localizedDescription)）；本次不建立 local-checkpoint-v2，跨次續跑不可用。"
+                )
+            )
+            return nil
+        }
+        update(
+            .log(
+                level: "info",
+                message: "模型內容 manifest：\(modelManifest.fileCount) 個檔案，共 \(modelManifest.totalByteCount / 1_048_576) MB。"
+            )
+        )
+
+        // Fixed name so RecoveryScanner's allowlist can recognize it. ffmpeg
+        // detects the container by content, so dropping the source extension
+        // costs nothing and keeps the temp directory free of "unknown" entries.
+        let snapshotURL = workingDirectory.appendingPathComponent(
+            LocalSourceVerification.snapshotFileName
+        )
+        let sourceFacts: LocalSourceFacts
+        let snapshotStarted = Date()
+        sourceFacts = try await LocalSourceVerification.snapshotAndVerify(
+            sourceURL: sourceURL,
+            snapshotURL: snapshotURL
+        )
+        // §9.10: these numbers are the measurement the spec asks for. They are
+        // reported, never asserted, because the honest cost depends on the
+        // volume and the recording, not on the code.
+        let snapshotSeconds = Date().timeIntervalSince(snapshotStarted)
+        update(
+            .log(
+                level: "info",
+                message: String(
+                    format: "來源 snapshot＋全內容 hash 完成：%.1f MB，耗時 %.2f 秒（%.1f MB/s）。後續處理改用 App 私有 snapshot。",
+                    Double(sourceFacts.byteCount) / 1_048_576,
+                    snapshotSeconds,
+                    snapshotSeconds > 0
+                        ? Double(sourceFacts.byteCount) / 1_048_576 / snapshotSeconds
+                        : 0
+                )
+            )
+        )
+
+        let decoder = try await ffmpegService.decoderIdentity()
+        let helperRuntime = try await backend.reportRuntime(
+            modelCacheDirectory: paths.models.path,
+            offline: offline
+        )
+        update(
+            .log(
+                level: "info",
+                message: "本機 runtime：mlx \(helperRuntime.mlxVersion ?? "未知")、mlx-audio \(helperRuntime.mlxAudioVersion ?? "未知")。"
+            )
+        )
+
+        return LocalV2Preparation(
+            sourceFacts: sourceFacts,
+            snapshotURL: snapshotURL,
+            decoder: decoder,
+            runtime: helperRuntime,
+            modelManifestDigest: modelManifest.digest,
+            modelRevision: modelManifest.revision
+        )
+    }
+
+    /// The thresholds §4's table is evaluated with, taken from the services this
+    /// engine was actually built with rather than from the recorded defaults.
+    func localSilenceThresholds() -> LocalSilenceThresholds {
+        LocalSilenceThresholds.current.resolving(
+            maximumRootSeconds: maximumASRSegmentDuration,
+            noiseProfile: silenceDetectionService.noiseProfile,
+            minimumSilenceDurationSeconds: silenceDetectionService.minimumSilenceDuration
+        )
+    }
+
+    /// §3.1–§3.7: scan the whole work range once, over the PCM the model will
+    /// really see, and turn it into the outer segmentation plan.
+    ///
+    /// `nil` means the run keeps the fixed cut points — either because the
+    /// setting is off (§2) or because the scan failed (§3.6). Cancellation and
+    /// checkpoint errors are rethrown instead: swallowing them as "no silence
+    /// found" would let a stopped or mis-identified job continue as if it had
+    /// merely found nothing.
+    func planLocalSilenceBoundaries(
+        job: TranscriptionJob,
+        preparation: LocalV2Preparation,
+        measurement: LocalRootMeasurement,
+        normalizedAudioURL: URL,
+        update: (PipelineUpdate) -> Void
+    ) async throws -> LocalSilenceScan? {
+        guard job.snapshot.localSilenceAwareSegmentation else {
+            update(
+                .log(
+                    level: "info",
+                    message: "本機靜音切點已於進階設定關閉，使用固定切點。"
+                )
+            )
+            return nil
+        }
+        let thresholds = localSilenceThresholds()
+        let workStartSample = try LocalAudioCoordinates.quantize(
+            seconds: job.sourceSlice?.startSeconds ?? 0
+        )
+        let workEndSample = workStartSample + measurement.sampleCount
+        let measuredSeconds = measurement.seconds
+
+        // §3.4: keyed on the digests phase 0 already computed, not on the
+        // normalized file's path or mtime.
+        let cache = JobSilenceAnalysisCache(
+            sourceURL: normalizedAudioURL,
+            noiseProfile: thresholds.noiseProfile,
+            minimumSilenceDuration: thresholds.minimumSilenceDurationSeconds,
+            maximumIntervalCount: thresholds.maximumIntervalCount,
+            contentIdentity: SilenceAnalysisContentIdentity(
+                sourceSHA256: preparation.sourceFacts.sha256,
+                pcmSHA256: measurement.pcmSHA256,
+                normalizationProfile: LocalNormalizationProfile.current.version
+            )
+        )
+
+        let detected: [DetectedSilence]
+        do {
+            detected = try await cache.cachedOrDetect(
+                startSeconds: 0,
+                durationSeconds: measuredSeconds,
+                detector: silenceDetectionService
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as LocalSourceIdentityError {
+            throw error
+        } catch let error as LocalCheckpointError {
+            throw error
+        } catch let error as LocalPlannerError {
+            throw error
+        } catch {
+            cache.recordFallback()
+            update(.log(level: "info", message: "本次靜音掃描失敗：\(cache.metricsSummary)；fallback_reason=detector_error"))
+            update(.warning(code: "local_silence_scan_failed", message: "靜音分析失敗，本次改用固定切點：\(error.localizedDescription)"))
+            return nil
+        }
+
+        // §3.3: detector output is scan-relative seconds. Nothing downstream may
+        // treat those numbers as samples or as original-recording offsets.
+        let intervals = LocalSilenceScanner.absoluteIntervals(
+            detected: detected,
+            scanStartSample: workStartSample,
+            scanEndSample: workEndSample
+        )
+        let candidates = LocalSilenceCandidateIndex(intervals: intervals)
+        let truncated = intervals.count > thresholds.maximumIntervalCount
+
+        let outerPlan = try LocalSilenceScanner.makeOuterPlan(
+            workStartSample: workStartSample,
+            sampleCount: measurement.sampleCount,
+            candidates: candidates,
+            thresholds: thresholds
+        )
+        let outer = LocalSilenceScanner.countOuterCuts(
+            plan: outerPlan,
+            maximumSegmentDuration: maximumASRSegmentDuration
+        )
+        // §7: scan cost is logged here, separately from inference time.
+        update(
+            .log(
+                level: "info",
+                message: String(
+                    format: "靜音切點：以實際解碼 %.3f 秒掃描完整工作範圍，%d 段靜音、%d 個候選切點；外層 %d 段，其中 %d 個切點移到停頓、%d 個維持上限。%@",
+                    measuredSeconds,
+                    detected.count,
+                    candidates.candidates.count,
+                    outerPlan.expectedSegmentCount,
+                    outer.silenceCuts,
+                    outer.fallbacks,
+                    truncated ? "（靜音區間超過保存上限，僅保留切點方案）" : ""
+                )
+            )
+        )
+        return LocalSilenceScan(
+            outerPlan: outerPlan,
+            candidates: candidates,
+            intervals: intervals,
+            truncated: truncated,
+            thresholds: thresholds,
+            metrics: cache.metrics,
+            scanPCMSHA256: measurement.pcmSHA256,
+            normalizationDigest: LocalDigest.sha256(
+                LocalNormalizationProfile.current
+            ),
+            sourceSHA256: preparation.sourceFacts.sha256,
+            coveredStartSample: workStartSample,
+            coveredEndSample: workEndSample,
+            outerSilenceCuts: outer.silenceCuts,
+            outerFallbacks: outer.fallbacks
+        )
+    }
+
+    /// Turn measured roots into the frozen plan (§3, §5).
+    ///
+    /// `workEndSample` comes from the roots' own decoded sample counts, so a cut
+    /// that lands a few samples off a round number is recorded as it actually is
+    /// rather than being assumed away. A disagreement with the normalized decode
+    /// beyond the coordinate tolerance means audio was lost or duplicated by
+    /// segmentation, which is a defect to report rather than a tail to invent.
+    func freezeLocalCheckpointV2(
+        preparation: LocalV2Preparation,
+        job: TranscriptionJob,
+        allowMissingPrompt: Bool,
+        recoveryDirectory: URL,
+        workStartSample: Int64,
+        normalizedSampleCount: Int64,
+        normalizedPCMSHA256: String? = nil,
+        rootSources: [LocalRootSource],
+        silenceScan: LocalSilenceScan? = nil,
+        outputLocatorHint: String?,
+        createdAt: Date,
+        update: (PipelineUpdate) -> Void
+    ) throws -> LocalV2Plan {
+        let coveredSamples = rootSources.reduce(Int64(0)) { $0 + $1.sampleCount }
+        if coveredSamples != normalizedSampleCount {
+            let delta = abs(coveredSamples - normalizedSampleCount)
+            guard delta <= LocalAudioCoordinates.sampleRate / 10 else {
+                throw LocalCoordinateError.durationMismatch(
+                    containerSeconds: LocalAudioCoordinates.seconds(
+                        forSamples: normalizedSampleCount
+                    ),
+                    decodedSeconds: LocalAudioCoordinates.seconds(forSamples: coveredSamples)
+                )
+            }
+            update(
+                .log(
+                    level: "info",
+                    message: "分段解碼合計與整檔解碼相差 \(delta) 個 sample（約 \(String(format: "%.1f", Double(delta) / 16_000 * 1_000)) 毫秒），以實際分段解碼結果為工作終點。"
+                )
+            )
+        }
+        let workEndSample = workStartSample + coveredSamples
+
+        // §4's mandated order: root spans, then the ten-minute display grid
+        // snapped to a nearby root boundary, then the ≤120 s chunks that may
+        // cross neither. Deriving the grid a second time inside `makeRootPlans`
+        // would let the chunks and the headings disagree about where a group
+        // starts, so the one grid computed here is handed to both.
+        let thresholds = localSilenceThresholds()
+        let spans = try LocalCheckpointPlanner.makeRootSpans(
+            workStartSample: workStartSample,
+            sources: rootSources
+        )
+        let candidates = silenceScan?.candidates ?? .empty
+        var tally: LocalPlannerCutTally? = LocalPlannerCutTally()
+        let displayGroups = try LocalCheckpointPlanner.makeDisplayGroups(
+            workStartSample: workStartSample,
+            workEndSample: workEndSample,
+            rootBoundaries: spans.dropFirst().map(\.startSample),
+            candidates: candidates,
+            thresholds: thresholds,
+            tally: &tally
+        )
+        let rootPlans = try LocalCheckpointPlanner.makeRootPlans(
+            workStartSample: workStartSample,
+            sources: rootSources,
+            chunkSeconds: ASRRequest.defaultChunkDurationSeconds,
+            displayGroups: displayGroups,
+            candidates: candidates,
+            thresholds: thresholds,
+            tally: &tally
+        )
+        let silencePlan = silenceScan?.silencePlan(inner: tally ?? LocalPlannerCutTally())
+
+        let inference = LocalInferenceIdentity(
+            runtimeKind: "mlx-audio",
+            modelID: job.snapshot.modelID,
+            modelRevision: preparation.modelRevision,
+            modelManifestDigest: preparation.modelManifestDigest,
+            language: job.snapshot.language,
+            promptDigest: LocalDigest.sha256(job.snapshot.prompt),
+            termsDigest: LocalDigest.sha256(
+                CanonicalJSONEncoder.encode(
+                    .array(job.snapshot.terms.map { .string($0) })
+                )
+            ),
+            promptChannel: LocalPromptChannel.resolve(
+                prompt: job.snapshot.prompt,
+                capability: preparation.runtime.capability
+            ),
+            allowMissingPrompt: allowMissingPrompt,
+            maximumTokens: ASRRequest.defaultMaximumTokens,
+            samplerDigest: Self.localDefaultSamplerDigest,
+            mlxVersion: preparation.runtime.mlxVersion,
+            mlxAudioVersion: preparation.runtime.mlxAudioVersion
+        )
+        let identity = LocalIdentityDocument(
+            jobID: job.id.uuidString,
+            source: LocalSourceIdentity(
+                sourceSHA256: preparation.sourceFacts.sha256,
+                sourceByteCount: preparation.sourceFacts.byteCount,
+                sourceLocator: job.sourcePath,
+                normalizationProfile: .current,
+                decoder: preparation.decoder,
+                sliceStartSeconds: job.sourceSlice?.startSeconds,
+                workStartSample: workStartSample,
+                workEndSample: workEndSample
+            ),
+            normalizationProfile: .current,
+            inference: inference,
+            presentation: LocalPresentationOptions(
+                openCCConfiguration: Self.localOpenCCConfiguration,
+                outputLocatorHint: outputLocatorHint,
+                jobUUID: job.id.uuidString
+            )
+        )
+
+        let layout = LocalCheckpointLayout(recoveryDirectory: recoveryDirectory)
+        let formatter = ISO8601DateFormatter()
+        let freezeStarted = Date()
+        let (manifest, loadedExisting) = try LocalCheckpointPlanner.openOrFreeze(
+            layout: layout,
+            identity: identity,
+            roots: rootPlans,
+            createdAt: formatter.string(from: createdAt),
+            plannerVersion: silencePlan == nil
+                ? LocalPlannerStrategy.fixed
+                : LocalPlannerStrategy.silence,
+            displayGroups: displayGroups,
+            silencePlan: silencePlan,
+            normalizedPCMSHA256: normalizedPCMSHA256
+        )
+        // A resume adopts the persisted plan wholesale. Keeping this run's
+        // recomputed roots would let freshly measured boundaries describe audio
+        // the committed root states were never made from.
+        let effectiveRoots = loadedExisting ? manifest.roots : rootPlans
+        let freezeSeconds = Date().timeIntervalSince(freezeStarted)
+        let chunkCount = effectiveRoots.reduce(0) { $0 + $1.initialChunks.count }
+        let identityBytes = (try? Data(contentsOf: layout.identityURL))?.count ?? 0
+        let manifestBytes = (try? Data(contentsOf: layout.manifestURL))?.count ?? 0
+        let silencePlanBytes = (try? Data(contentsOf: layout.silencePlanURL))?.count ?? 0
+        let planBytes = identityBytes + manifestBytes + silencePlanBytes
+        update(
+            .log(
+                level: "info",
+                message: String(
+                    format: "v2 checkpoint：%@ 個 root、%@ 個初始 chunk，工作範圍 %@–%@；凍結耗時 %.3f 秒，計畫檔 %.1f KB（%@）。",
+                    "\(effectiveRoots.count)",
+                    "\(chunkCount)",
+                    LocalAudioCoordinates.formatTimestamp(samples: workStartSample),
+                    LocalAudioCoordinates.formatTimestamp(samples: workEndSample),
+                    freezeSeconds,
+                    Double(planBytes) / 1_024,
+                    loadedExisting ? "沿用既有計畫" : manifest.plannerVersion
+                )
+            )
+        )
+        // §7: scan cost is reported on its own line so it is never mistaken for
+        // model inference time.
+        if let silencePlan {
+            update(
+                .log(
+                    level: "info",
+                    message: "靜音切點統計：\(silencePlan.metricsSummary())"
+                )
+            )
+        }
+        return LocalV2Plan(
+            layout: layout,
+            identity: identity,
+            manifest: manifest,
+            roots: effectiveRoots
+        )
+    }
+
+    /// Coordinates for one helper invocation. `audioStartSample` is the root's
+    /// own absolute start, so the helper converts to array indices by
+    /// subtraction and never re-derives a boundary from `segmentIndex`.
+    func localCheckpointV2Block(plan: LocalV2Plan, rootOrder: Int) -> ASRCheckpointV2 {
+        let root = plan.roots[rootOrder]
+        return ASRCheckpointV2(
+            directory: plan.layout.root.path,
+            rootID: root.rootID,
+            planID: plan.manifest.planID,
+            identityDigest: plan.manifest.identityDigest,
+            sampleRate: plan.manifest.sampleRate,
+            audioStartSample: root.startSample,
+            workStartSample: plan.manifest.workStartSample,
+            workEndSample: plan.manifest.workEndSample,
+            promptChannel: plan.identity.inference.promptChannel
+        )
+    }
+
+    /// A helper `completed` event is a claim; the committed root state is the
+    /// evidence (§5.1). Coverage that is not complete means the segment is not
+    /// done, whatever the event said.
+    func verifyLocalCheckpointV2Root(
+        plan: LocalV2Plan,
+        rootOrder: Int
+    ) throws -> LocalRootOutcome {
+        let root = plan.roots[rootOrder]
+        let state = try LocalCheckpointValidator.loadRootState(
+            at: plan.layout.stateURL(rootID: root.rootID)
+        )
+        let outcome = try LocalCheckpointValidator.validate(
+            rootState: state,
+            plan: root,
+            manifest: plan.manifest,
+            silence: try LocalSilenceValidation.load(layout: plan.layout, manifest: plan.manifest, identity: plan.identity)
+        )
+        guard outcome != .incomplete else {
+            throw LocalCheckpointError.coverageFailure(
+                reason: "第 \(rootOrder + 1) 段回報完成，但已提交的 leaf 未精確覆蓋 "
+                    + "\(LocalAudioCoordinates.formatTimestamp(samples: root.startSample))–"
+                    + "\(LocalAudioCoordinates.formatTimestamp(samples: root.endSample))。"
+            )
+        }
+        return outcome
+    }
+
+    /// Reassemble the transcript from absolute leaf ranges (§6).
+    ///
+    /// Positions come from the committed tree, never from `index * 120` or
+    /// `segmentIndex * 1200`, and a transcript with no recognized speech fails
+    /// here instead of passing on the strength of its own time headings.
+    func mergeLocalCheckpointV2(plan: LocalV2Plan) throws -> LocalMergedTranscript {
+        var states: [LocalRootState] = []
+        states.reserveCapacity(plan.roots.count)
+        for root in plan.roots {
+            states.append(
+                try LocalCheckpointValidator.loadRootState(
+                    at: plan.layout.stateURL(rootID: root.rootID)
+                )
+            )
+        }
+        let leaves = try LocalTranscriptMerger.collectLeaves(
+            from: states,
+            manifest: plan.manifest,
+            silence: try LocalSilenceValidation.load(layout: plan.layout, manifest: plan.manifest, identity: plan.identity)
+        )
+        return try LocalTranscriptMerger.render(
+            leaves: leaves,
+            displayGroups: plan.manifest.displayGroups,
+            workSpan: plan.manifest.workSpan
+        )
     }
 }

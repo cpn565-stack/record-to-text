@@ -124,7 +124,8 @@ public enum RecoveryScanner {
         "traditional.txt",
         "request.json",
         segmentManifestFileName,
-        partialTranscriptFileName
+        partialTranscriptFileName,
+        LocalSourceVerification.snapshotFileName
     ]
 
     public static let knownRecoveryFileNames: Set<String> = [
@@ -133,7 +134,8 @@ public enum RecoveryScanner {
         segmentManifestFileName,
         segmentsDirectoryName,
         partialTranscriptFileName,
-        LocalChunkCheckpoint.directoryName
+        LocalChunkCheckpoint.directoryName,
+        LocalCheckpointSchema.directoryName
     ]
 
     public struct RecoveryMetadata: Codable, Equatable, Sendable {

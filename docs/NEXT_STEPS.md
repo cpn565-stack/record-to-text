@@ -1,5 +1,32 @@
 # 下一次接續
 
+## 2026-09-27：build 9 退出儲存修正
+
+已修正 Keychain 載入阻擋一般工作紀錄儲存，以及取消退出後無法再啟動佇列的問題；取消退出也不會使之前等待儲存的雲端重送自動復活。保留舊憑證遷移與損壞 journal 的防覆寫保護，退出錯誤改為顯示實際原因。驗證紀錄見[修正與發佈界線](quit-persistence-fix-2026-09-27.md)。
+
+完整驗證通過 Swift 514／Python 134 tests。本機 App 已更新為 0.2.1／build 9，已產出 `dist/record-to-text-0.2.1-build9-development.dmg` 與核對碼；build 8 保留於 `.noindex` 備份資料夾，使用者 journal 未更動。本機缺少 Developer ID Application 憑證，這是未公證測試包，不宣稱完成 Stable 發佈。Qwen 階段 2／3 與真實模型 A/B 仍未完成。
+
+## 2026-09-27：Qwen 地端新規格
+
+最新本機強化規劃見 [四階段規格入口](qwen-local-roadmap-spec-2026-09-27.md)。依序為「音訊身分驗證＋實際切塊起訖紀錄」→「靜音感知切點」→「段級續跑」→「token 缺口保留與補稿」。
+
+**功能進度：階段 0／1／1.1 已實作。以下是 build 8 的驗證與安裝紀錄；後續 build 9 退出修正見上一節。**
+`SKIP_APP_BUNDLE=1 ./scripts/run-checks.sh` 全綠：Swift 506 tests／0 failures／0 skipped，Python 134 tests。階段 1 審查列出的 F1–F5 已修正，另修掉兩個審查未列出的 P1（非零切片的 `identity.json` 自己讀不回來、`checkpointCommitted` 被當成 `invalid_jsonl` 而使任何走真實 backend 的 v2 執行中止）。證據見[階段 1.1 交付說明](qwen-local-01-hardening-delivery-2026-09-27.md)。
+
+獨立審查後已補上持久化整數的跨語言驗證：Swift 拒絕整數欄位中的浮點／指數表示，Python 拒絕 Int64 溢位；新增一個 XCTest，讓兩邊 production loader 讀取同一批 113 份檔案並比對判定與錯誤碼。詳見交付說明 §1.4。
+
+本機安裝使用 release 設定建置 arm64 App；dist 與 `/Applications/record-to-text.app` 的執行檔 SHA-256 一致，封裝內容、體積與 ad-hoc 簽章已驗證。原 build 7 保留於 `dist/install-backups/before-qwen-phase1-build8-20260927/`。本機 Python runtime 可載入 `mlx_audio`，但尚未執行真實模型 A/B。安裝紀錄見交付說明 §6。
+
+**下一步有兩條彼此獨立的路：**
+
+1. **階段 2（段級續跑與前處理跳過）**：規格已備，可直接重用階段 1.1 的
+   `VerifiedLocalSilence.validate` 與「續跑絕不重算已凍結邊界」前提。
+2. **階段 1 的真實模型 A/B 與預設放行**：本機 `mlx_audio` 已可載入；仍需已授權素材與
+   人工核對每個被移動切點前後 ±5 秒。在此之前功能維持「進階設定可主動開啟、
+   新工作預設關閉」，**不可**改成預設開啟，也不可宣稱切點品質已改善。
+
+以下保留 2026-08-30 的歷史接續清單與當時驗證紀錄，不代表新四階段已完成。
+
 更新日期：2026-08-30
 基準 commit：`9c21834`（`codex/record-to-text-reliability-v2`）
 目前 checkpoint：**0.2.0 / Reliability v2 自動化收尾完成** — 仍不是可交付一般使用者的 Stable DMG。
