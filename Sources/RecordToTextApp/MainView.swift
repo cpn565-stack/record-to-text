@@ -32,6 +32,30 @@ struct MainView: View {
             .frame(maxWidth: .infinity)
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .contentShape(Rectangle())
+        // Keep one file-drop destination on the entire viewport, including
+        // the queue and empty margins. Finder supplies `public.file-url`;
+        // preserve the explicit provider decoding used by the import flow.
+        .onDrop(of: [UTType.fileURL], isTargeted: $isDropTargeted) { providers in
+            handleFileDrop(providers)
+        }
+        .overlay {
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(Color.accentColor, lineWidth: 2)
+                    .padding(4)
+                    .overlay(alignment: .top) {
+                        Label("放開以加入錄音佇列", systemImage: "arrow.down.doc.fill")
+                            .font(.callout.weight(.semibold))
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
+                            .background(.regularMaterial, in: Capsule())
+                            .padding(.top, 12)
+                    }
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+        }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
@@ -329,13 +353,6 @@ struct MainView: View {
                     compact: !viewModel.jobs.isEmpty,
                     chooseFiles: { viewModel.chooseAudioFiles() }
                 )
-                // Finder supplies dropped files as `public.file-url` item
-                // providers. Resolve that representation explicitly instead
-                // of relying on SwiftUI's URL Transferable conversion, which
-                // can return an empty URL array on macOS.
-                .onDrop(of: [UTType.fileURL], isTargeted: $isDropTargeted) { providers in
-                    handleFileDrop(providers)
-                }
 
                 if viewModel.hasQueuedJobs {
                     HStack(spacing: 10) {
@@ -610,7 +627,7 @@ private struct DropZoneView: View {
         .animation(.easeOut(duration: 0.15), value: isTargeted)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("錄音檔拖放區")
-        .accessibilityHint("拖入支援的錄音檔，或按下按鈕選擇檔案")
+        .accessibilityHint("可將錄音檔拖到主視窗文字輸入框以外的位置，或按下按鈕選擇檔案")
     }
 
     private var expandedContent: some View {
@@ -621,7 +638,7 @@ private struct DropZoneView: View {
                 .foregroundStyle(isTargeted ? Color.accentColor : .secondary)
 
             VStack(spacing: 4) {
-                Text(isTargeted ? "放開以加入佇列" : "將錄音拖到這裡")
+                Text(isTargeted ? "放開以加入佇列" : "將錄音拖入視窗")
                     .font(.title3.weight(.semibold))
                 Text("M4A、MP3、WAV、AAC、FLAC")
                     .font(.caption)
@@ -642,7 +659,7 @@ private struct DropZoneView: View {
                 .foregroundStyle(isTargeted ? Color.accentColor : .secondary)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(isTargeted ? "放開以加入佇列" : "將錄音拖到這裡")
+                Text(isTargeted ? "放開以加入佇列" : "將錄音拖入視窗")
                     .font(.subheadline.weight(.semibold))
                 Text("M4A、MP3、WAV、AAC、FLAC")
                     .font(.caption)
