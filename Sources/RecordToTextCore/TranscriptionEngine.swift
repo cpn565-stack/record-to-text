@@ -2334,7 +2334,7 @@ public final class TranscriptionEngine {
         update(
             .log(
                 level: "info",
-                message: "正在以 OpenCC s2twp 統一轉為台灣繁體。"
+                message: "正在以 OpenCC s2tw 統一轉為繁體字形（保留原始用詞）。"
             )
         )
         try await openCCService.convert(
@@ -3020,7 +3020,7 @@ extension TranscriptionEngine {
         CanonicalJSONEncoder.encode(.object(["overrides": .object([:])]))
     )
 
-    static let localOpenCCConfiguration = "s2twp.json"
+    static let localOpenCCConfiguration = "s2tw.json"
 
     /// §2.1 steps 1–2 and §4: snapshot the source, then collect every fact the
     /// frozen identity needs.

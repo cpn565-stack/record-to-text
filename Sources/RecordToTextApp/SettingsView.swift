@@ -468,7 +468,7 @@ struct SettingsView: View {
                         Text("\(GeminiGenerationConfig.transcriptionOutputTokens(modelID: viewModel.settings.backendType == .vertexAI ? viewModel.settings.vertexAIModelID : viewModel.settings.googleAIStudioModelID).formatted()) tokens")
                             .foregroundStyle(.secondary)
                     }
-                    Text("Cloud 最終稿會在本機經 OpenCC s2twp 統一成台灣繁體，因此環境檢查會要求 OpenCC。")
+                    Text("Cloud 最終稿會在本機經 OpenCC s2tw 統一成繁體字形（保留原始用詞），因此環境檢查會要求 OpenCC。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

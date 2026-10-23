@@ -427,7 +427,7 @@ public final class OpenCCService {
             arguments: [
                 "-i", sourceURL.path,
                 "-o", destinationURL.path,
-                "-c", "s2twp.json"
+                "-c", "s2tw.json"
             ],
             timeout: AudioProcessTimeouts.openCC
         )
