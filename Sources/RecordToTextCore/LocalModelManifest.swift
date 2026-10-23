@@ -75,6 +75,7 @@ public enum LocalModelManifestError: LocalizedError, Equatable {
     case snapshotMissing(modelID: String, path: String)
     case revisionRequired(modelID: String)
     case emptySnapshot(path: String)
+    case unreadableSymbolicLink(path: String)
 
     public var errorDescription: String? {
         switch self {
@@ -84,6 +85,8 @@ public enum LocalModelManifestError: LocalizedError, Equatable {
             return "模型 \(modelID) 沒有 pinned revision，無法建立可驗證的內容 manifest。"
         case let .emptySnapshot(path):
             return "模型 snapshot 內沒有可讀取的檔案：\(path)。"
+        case let .unreadableSymbolicLink(path):
+            return "模型檔案連結無法讀取：\(path)。請修復或重新下載模型。"
         }
     }
 }
@@ -146,14 +149,24 @@ public enum LocalModelManifestStore {
             // HF snapshots are flat; anything nested is not part of the weights.
             if values.isDirectory == true { continue }
 
-            let attributes = try fileManager.attributesOfItem(atPath: entry.path)
+            // attributesOfItem uses lstat semantics: querying the snapshot link
+            // reports typeSymbolicLink, not the regular blob the runtime reads.
+            // Resolve it before checking type/size; a dangling link must throw
+            // instead of producing an identity that silently omits the weights.
+            let contentURL = entry.resolvingSymlinksInPath()
+            let attributes = try fileManager.attributesOfItem(atPath: contentURL.path)
             let type = attributes[.type] as? FileAttributeType
+            // Foundation can leave a dangling/cyclic link unresolved. Never
+            // silently skip it and claim the remaining metadata is the model.
+            if type == .typeSymbolicLink {
+                throw LocalModelManifestError.unreadableSymbolicLink(path: entry.path)
+            }
             guard type == .typeRegular else { continue }
 
             let byteCount = (attributes[.size] as? NSNumber)?.int64Value ?? 0
             // The digest follows the link to the blob, describing the bytes the
             // runtime actually loads rather than the link itself.
-            let sha256 = try await LocalContentHasher.sha256(of: entry, fileManager: fileManager)
+            let sha256 = try await LocalContentHasher.sha256(of: contentURL, fileManager: fileManager)
             files.append(
                 LocalModelFileEntry(
                     relativePath: entry.lastPathComponent,

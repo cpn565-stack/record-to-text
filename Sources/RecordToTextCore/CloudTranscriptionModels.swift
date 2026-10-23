@@ -252,6 +252,10 @@ public extension RecentJobSummary {
 public extension CloudUsageMetadata {
     /// 依據 Google 官方定價（美元 / 1M Tokens）估算任務成本
     func estimatedCostUSD(modelID: String) -> Double? {
+        // Argon has a dated introductory tariff and different thinking/cache
+        // pricing. Keep actual token usage, but never apply the Flash fallback
+        // rate to it. Accurate billing needs provider/date-aware per-request data.
+        guard modelID != "gemini-4-argon" else { return nil }
         guard let total = totalTokenCount, total > 0 else {
             return nil
         }

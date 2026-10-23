@@ -158,6 +158,11 @@ public struct GeminiModelDescriptor: Identifiable, Hashable, Sendable {
 
     public static let presetModels: [GeminiModelDescriptor] = [
         GeminiModelDescriptor(
+            id: "gemini-4-argon",
+            displayName: "Gemini 4 Argon",
+            note: "支援音訊轉錄與低／中／高思考強度，需要付費 API 使用權限；建議先用中等強度。費用請以 Google 帳單為準。"
+        ),
+        GeminiModelDescriptor(
             id: "gemini-3.8-flash",
             displayName: "Gemini 3.8 Flash",
             note: "最新 Flash 模型，極速轉錄、中文語音理解力頂級（推薦）"

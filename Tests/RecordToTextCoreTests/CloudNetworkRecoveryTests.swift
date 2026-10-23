@@ -31,6 +31,87 @@ final class RecoveryURLProtocol: URLProtocol {
 }
 
 final class CloudNetworkRecoveryTests: XCTestCase {
+    func testImmediateRetryWakesCurrentWaitOnceWithoutLeakingToNextWait() async throws {
+        let waiting = expectation(description: "retry countdown")
+        waiting.assertForOverFulfill = false
+        let context = CloudNetworkRecoveryContext(budget: CloudSegmentBudget(), environment: .init(path: { .satisfied }))
+        context.configure(segment: 1, total: 1, completed: 0,
+            observer: { if $0.state == .waiting { waiting.fulfill() } })
+        XCTAssertFalse(context.retryImmediately())
+        let task = Task { try await context.retry(after: 3, error: URLError(.networkConnectionLost), generation: true) }
+        await fulfillment(of: [waiting], timeout: 1)
+        let start = ContinuousClock.now
+        XCTAssertTrue(context.retryImmediately())
+        XCTAssertFalse(context.retryImmediately())
+        try await task.value
+        XCTAssertLessThan(start.duration(to: .now), .milliseconds(500))
+        XCTAssertFalse(context.canRetryImmediately)
+        try await context.wait() // Consume the one preflight bypass.
+
+        let nextWaiting = expectation(description: "new countdown")
+        nextWaiting.assertForOverFulfill = false
+        context.configure(segment: 1, total: 1, completed: 0,
+            observer: { if $0.state == .waiting { nextWaiting.fulfill() } })
+        let next = Task { try await context.retry(after: 2, error: URLError(.networkConnectionLost), generation: true) }
+        await fulfillment(of: [nextWaiting], timeout: 1)
+        XCTAssertTrue(context.canRetryImmediately)
+        next.cancel()
+        _ = context.retryImmediately() // A simultaneous click cannot override cancellation.
+        do { try await next.value; XCTFail("Cancelled wait resumed") } catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertFalse(context.retryImmediately())
+    }
+
+    func testImmediateRetriesPreserveFourSendLimit() async throws {
+        let clock = RecoveryClock(), session = session()
+        defer { session.invalidateAndCancel(); RecoveryURLProtocol.handler = nil }
+        let budget = CloudSegmentBudget(now: { clock.now })
+        let context = CloudNetworkRecoveryContext(budget: budget, environment: clock.environment())
+        let clicks = RecoveryValue(0)
+        context.configure(segment: 1, total: 1, completed: 0, observer: { [weak context] state in
+            if state.state == .waiting, context?.retryImmediately() == true { clicks.value += 1 }
+        })
+        let sends = RecoveryValue(0)
+        RecoveryURLProtocol.handler = { _ in sends.value += 1; throw URLError(.networkConnectionLost) }
+        let backend = GoogleAIStudioBackend(urlSession: session,
+            configuration: .init(apiKey: "fixture", useFilesAPI: false))
+        do {
+            _ = try await CloudBudgetContext.$current.withValue(budget) {
+                try await CloudNetworkContext.$current.withValue(context) {
+                    try await backend.transcribe(audioData: Data())
+                }
+            }
+            XCTFail("Exceeded request quota")
+        } catch let error as CloudNetworkRecoveryExhausted {
+            XCTAssertEqual(error.recovery.stopReason, .attemptsExhausted)
+        }
+        XCTAssertEqual(sends.value, 4)
+        XCTAssertEqual(clicks.value, 3)
+        XCTAssertLessThan(clock.seconds, 20)
+        XCTAssertFalse(context.retryImmediately())
+    }
+
+    func testImmediateRetrySkipsOfflineHintForOnlyOnePreflight() async throws {
+        let context = CloudNetworkRecoveryContext(budget: CloudSegmentBudget(), environment: .init(path: { .unsatisfied }))
+        let waiting = expectation(description: "offline wait")
+        waiting.assertForOverFulfill = false
+        context.configure(segment: 1, total: 1, completed: 0,
+            observer: { if $0.state == .waiting { waiting.fulfill() } })
+        let task = Task { try await context.retry(after: 1, error: URLError(.networkConnectionLost), generation: true) }
+        await fulfillment(of: [waiting], timeout: 1)
+        XCTAssertTrue(context.retryImmediately())
+        try await task.value
+        try await context.wait()
+
+        let nextWaiting = expectation(description: "later offline wait is not skipped")
+        nextWaiting.assertForOverFulfill = false
+        context.configure(segment: 1, total: 1, completed: 0,
+            observer: { if $0.state == .waiting { nextWaiting.fulfill() } })
+        let next = Task { try await context.wait() }
+        await fulfillment(of: [nextWaiting], timeout: 1)
+        next.cancel()
+        do { try await next.value; XCTFail("Offline preflight leaked a bypass") } catch { XCTAssertTrue(error is CancellationError) }
+    }
+
     private let success = Data(#"{"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":"完整逐字稿"}]}}]}"#.utf8)
     private func session() -> URLSession {
         let config = URLSessionConfiguration.ephemeral
@@ -64,16 +145,17 @@ final class CloudNetworkRecoveryTests: XCTestCase {
         var times: [Double] = []
         let resets = RecoveryValue(0)
         var env = clock.environment()
+        env.jitter = { 1 } // Network retry is fixed even at maximum jitter.
         env.session = { protocols in resets.value += 1; return GeminiTransportHelper.makeEphemeralRetrySession(protocolClasses: protocols) }
         RecoveryURLProtocol.handler = { _ in
             times.append(clock.seconds)
-            if clock.seconds < 120 { throw URLError(.networkConnectionLost) }
+            if clock.seconds < 60 { throw URLError(.networkConnectionLost) }
             return (200, self.success)
         }
         let backend = GoogleAIStudioBackend(networkEnvironment: env, urlSession: session,
             configuration: .init(apiKey: "fixture", useFilesAPI: false, fallbackPolicy: .flashOnly))
         let result = try await backend.transcribeDetailed(audioData: Data("fixture".utf8))
-        XCTAssertEqual(times, [0, 15, 60, 180])
+        XCTAssertEqual(times, [0, 20, 40, 60])
         XCTAssertEqual(resets.value, 1)
         XCTAssertEqual(result.metadata.retryCount, 3)
     }
@@ -93,7 +175,7 @@ final class CloudNetworkRecoveryTests: XCTestCase {
             XCTAssertTrue(error.recovery.resultUnknown)
         }
         XCTAssertEqual(sends, 4)
-        XCTAssertEqual(clock.seconds, 180)
+        XCTAssertEqual(clock.seconds, 60)
     }
 
     func testFlappingWaitIsBoundedAndOverlappingWaitCountsOnce() async throws {
@@ -111,7 +193,7 @@ final class CloudNetworkRecoveryTests: XCTestCase {
         XCTAssertEqual(budget.remaining(), .seconds(600))
     }
 
-    func testRootTwentySecondsStopsBefore45SecondRetry() async throws {
+    func testRootTwentySecondsStopsBeforeRetrySend() async throws {
         let clock = RecoveryClock()
         let budget = CloudSegmentBudget(limit: .seconds(20), now: { clock.now })
         let context = CloudNetworkRecoveryContext(budget: budget, environment: clock.environment())
@@ -184,7 +266,7 @@ final class CloudNetworkRecoveryTests: XCTestCase {
         context.requestSucceeded()
         clock.advance(.seconds(85))
         XCTAssertThrowsError(try context.check()) { XCTAssertTrue($0 is CloudSegmentDeadlineExceeded) }
-        XCTAssertEqual(context.waitedSeconds, 15)
+        XCTAssertEqual(context.waitedSeconds, 20)
     }
 
     func testConnectivityDelegateEndsWaitAtBodyProgressAndIgnoresLateWaitCallback() throws {
@@ -194,6 +276,8 @@ final class CloudNetworkRecoveryTests: XCTestCase {
         let delegate = CloudConnectivityDelegate(context: context) { _ in XCTFail("Unexpected exhaustion") }
         let task = session.dataTask(with: URL(string: "https://fixture.invalid/")!)
         delegate.urlSession(session, taskIsWaitingForConnectivity: task)
+        XCTAssertFalse(context.canRetryImmediately, "An in-flight URLSession task cannot be duplicated")
+        XCTAssertFalse(context.retryImmediately())
         clock.advance(.seconds(120))
         delegate.urlSession(session, task: task, didSendBodyData: 1, totalBytesSent: 1, totalBytesExpectedToSend: 1)
         clock.advance(.seconds(60))

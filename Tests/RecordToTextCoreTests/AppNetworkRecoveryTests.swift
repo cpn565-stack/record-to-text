@@ -4,6 +4,70 @@ import XCTest
 
 @MainActor
 final class AppNetworkRecoveryTests: XCTestCase {
+    func testRetryNowContinuesSameJobOnceWithoutCreatingAnotherJob() async throws {
+        let root = try TestSupport.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = ApplicationPaths(root: root.appendingPathComponent("Support"))
+        let runtime = RuntimeEnvironment.candidate(paths: paths,
+            settings: AppSettings.defaultValue(developerMode: true), bundledHelperURL: nil)
+        let source = root.appendingPathComponent("fixture.wav")
+        _ = try await ProcessRunner().run(executableURL: runtime.ffmpeg,
+            arguments: ["-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-y", source.path])
+        let original = TranscriptionJob(sourcePath: source.path, snapshot: snapshot(root))
+        try save([original], paths: paths)
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [RecoveryURLProtocol.self]
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel(); RecoveryURLProtocol.handler = nil }
+        let sends = RecoveryValue(0)
+        RecoveryURLProtocol.handler = { request in
+            guard request.url!.absoluteString.contains(":generateContent") else { return (404, Data()) }
+            sends.value += 1
+            if sends.value == 1 { throw URLError(.networkConnectionLost) }
+            return (200, Data(#"{"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":"[00:00 - 00:02]\n講者 1：測試內容。"}]}}]}"#.utf8))
+        }
+        let environment = CloudNetworkEnvironment(path: { .satisfied })
+        let backend = GoogleAIStudioBackend(networkEnvironment: environment, urlSession: session,
+            configuration: .init(apiKey: "fixture-key", useFilesAPI: false))
+        let model = AppViewModel(paths: paths, credentialStore: RecoveryCredentialStore(), engineFactory: { runtime in
+            TranscriptionEngine(cloudNetworkEnvironment: environment, runtime: runtime, paths: paths,
+                googleAIStudioBackend: backend)
+        })
+        defer { model.cancelCurrentJob() }
+        await model.waitForCredentialLoading()
+        model.setNotificationPreference(false)
+        XCTAssertFalse(model.canRetryNetworkImmediately(original.id))
+        model.startQueuedJobs()
+        for _ in 0..<300 {
+            if model.canRetryNetworkImmediately(original.id) { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(model.canRetryNetworkImmediately(original.id))
+        XCTAssertEqual(sends.value, 1)
+        let unrelated = UUID()
+        XCTAssertFalse(model.canRetryNetworkImmediately(unrelated))
+        model.retryNetworkImmediately(unrelated)
+        let start = ContinuousClock.now
+        model.retryNetworkImmediately(original.id)
+        model.retryNetworkImmediately(original.id)
+        for _ in 0..<300 {
+            if model.activeJobID == nil { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertLessThan(start.duration(to: .now), .seconds(3))
+        XCTAssertEqual(sends.value, 2)
+        XCTAssertEqual(model.jobs.count, 1, "Immediate retry must not create a second job")
+        XCTAssertEqual(model.jobs.first?.id, original.id)
+        XCTAssertEqual(model.jobs.first?.stage, .completed)
+        XCTAssertEqual(model.jobs.first?.snapshot, original.snapshot)
+        XCTAssertEqual(model.jobs.first?.logLines.filter { $0.contains("已跳過重試倒數") }.count, 1)
+        XCTAssertFalse(model.canRetryNetworkImmediately(original.id))
+        model.retryNetworkImmediately(original.id)
+        XCTAssertEqual(sends.value, 2)
+        await model.stopAllForTermination()
+        try await model.flushJobPersistence()
+    }
+
     private func snapshot(_ root: URL) -> JobSnapshot {
         .init(modelID: "fixture-model", glossaryID: nil, glossaryName: nil, terms: ["fixture-term"],
               prompt: "fixture-prompt", outputLocationMode: .fixedDirectory, outputDirectory: root.path,

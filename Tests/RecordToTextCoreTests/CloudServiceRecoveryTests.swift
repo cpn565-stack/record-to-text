@@ -3,6 +3,7 @@ import XCTest
 
 final class CloudServiceRecoveryTests: XCTestCase {
     private let success = Data(#"{"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":"完整測試逐字稿"}]}}]}"#.utf8)
+    private let vertexSuccess = Data("data: {\"candidates\":[{\"finishReason\":\"STOP\",\"content\":{\"parts\":[{\"text\":\"完整測試逐字稿\"}]}}]}\n\n".utf8)
     private let busy = Data(#"{"error":{"code":429,"message":"Resource exhausted"}}"#.utf8)
     private func session() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
@@ -34,7 +35,7 @@ final class CloudServiceRecoveryTests: XCTestCase {
             let sends = RecoveryValue<[Double]>([])
             RecoveryURLProtocol.handler = { _ in
                 sends.value.append(clock.seconds)
-                return sends.value.count < 3 ? (429, self.busy) : (200, self.success)
+                return sends.value.count < 3 ? (429, self.busy) : (200, type == .vertexAI ? self.vertexSuccess : self.success)
             }
             let result = try await transcribe(type, clock: clock, session: session)
             XCTAssertEqual(sends.value, [0, 30, 90])
@@ -89,7 +90,7 @@ final class CloudServiceRecoveryTests: XCTestCase {
                 XCTAssertEqual(history.snapshot().events.last?.serviceStopReason, .attemptsExhausted)
             }
             XCTAssertEqual(sends.value, 4)
-            XCTAssertEqual(context.waitedSeconds, failures == 2 ? 60 : 180)
+            XCTAssertEqual(context.waitedSeconds, Double(failures * 20))
             XCTAssertEqual(context.service.snapshot.waitedSeconds, failures == 2 ? 120 : 0)
             XCTAssertTrue(history.snapshot().events.contains { $0.failure.category == .connectionLost })
             XCTAssertTrue(history.snapshot().events.contains { $0.failure.httpStatus == 429 })

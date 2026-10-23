@@ -10,12 +10,9 @@ public enum CloudNetworkPath: String, Codable, Sendable {
 
 public struct CloudNetworkRecoveryPolicy: Sendable {
     public var maximumWaitSeconds: Double = 300
-    public var retryDelays: [Double] = [15, 45, 120]
+    public var retryDelaySeconds: Double = 20
     public var stabilitySeconds: Double = 3
     public init() {}
-    func delay(after attempt: Int, jitter: Double) -> Double {
-        retryDelays[min(max(0, attempt - 1), retryDelays.count - 1)] * (1 + 0.2 * min(1, max(0, jitter)))
-    }
 }
 
 public struct CloudNetworkRecovery: Codable, Equatable, Sendable {
@@ -59,7 +56,7 @@ public struct CloudNetworkRecovery: Codable, Equatable, Sendable {
         case .waiting:
             return "連到 Google 的連線暫時不穩，正在等待恢復。已完成 \(completedSegmentCount)／\(segmentCount) 段。"
         case .retrying:
-            return "將重新嘗試第 \(segmentIndex)／\(segmentCount) 段；已完成的片段不會重做。"
+            return "正在重新嘗試第 \(segmentIndex)／\(segmentCount) 段；已完成的片段不會重做。"
         case .resolved: return "連線請求已完成。"
         }
     }
@@ -118,6 +115,13 @@ public final class CloudNetworkRecoveryContext: @unchecked Sendable {
     private var didReset = false
     private var status: CloudNetworkRecovery
     private var observer: (@Sendable (CloudNetworkRecovery) -> Void)?
+    // Only our explicit wait loop can be interrupted. A URLSession task that
+    // is already in flight must never be duplicated by the UI button.
+    private var explicitWaitActive = false
+    private var receivingResponse = false
+    private var immediateRetryRequested = false
+    private var skipNextPathWait = false
+    private var retrySleeper: Task<Void, Error>?
 
     public init(budget: CloudSegmentBudget, policy: CloudNetworkRecoveryPolicy = .init(),
                 environment: CloudNetworkEnvironment = .init(), waitForCleanup: Bool = true) {
@@ -134,6 +138,25 @@ public final class CloudNetworkRecoveryContext: @unchecked Sendable {
     var sessionWasReset: Bool { lock.withLock { didReset } }
     var lastFailure: CloudFailureDiagnostic? { lock.withLock { status.lastFailure } }
     var isWaiting: Bool { lock.withLock { !waits.isEmpty } }
+    var isReceivingResponse: Bool { lock.withLock { receivingResponse } }
+    func setReceivingResponse(_ value: Bool) { lock.withLock { receivingResponse = value } }
+    public var canRetryImmediately: Bool {
+        lock.withLock {
+            explicitWaitActive && !receivingResponse && status.state == .waiting && !immediateRetryRequested
+                && budget.remaining() > .zero && waitedSeconds < policy.maximumWaitSeconds
+        }
+    }
+
+    @discardableResult
+    public func retryImmediately() -> Bool {
+        let accepted: (Bool, Task<Void, Error>?) = lock.withLock {
+            guard canRetryImmediately else { return (false, nil) }
+            immediateRetryRequested = true
+            return (true, retrySleeper)
+        }
+        accepted.1?.cancel() // Wakes the wait; does not cancel any HTTP request.
+        return accepted.0
+    }
     func configure(segment: Int, total: Int, completed: Int,
                    observer: (@Sendable (CloudNetworkRecovery) -> Void)? = nil) {
         lock.withLock {
@@ -156,11 +179,12 @@ public final class CloudNetworkRecoveryContext: @unchecked Sendable {
         callback?(snapshot())
     }
     func requestSucceeded() {
-        lock.withLock { status.lastFailure = nil; status.stopReason = nil }
+        lock.withLock { receivingResponse = false; status.lastFailure = nil; status.stopReason = nil }
         publish(.resolved)
     }
     func noteFailure(_ failure: CloudFailureDiagnostic, generation: Bool) {
         lock.withLock {
+            receivingResponse = false
             status.lastFailure = failure
             if generation { status.resultUnknown = true }
         }
@@ -198,13 +222,28 @@ public final class CloudNetworkRecoveryContext: @unchecked Sendable {
     }
     func wait(minimumSeconds: Double = 0) async throws {
         try check()
+        if minimumSeconds == 0, lock.withLock({
+            let skip = skipNextPathWait
+            skipNextPathWait = false
+            return skip
+        }) { return }
         guard minimumSeconds > 0 || environment.path() == .unsatisfied else { return }
         let id = beginWait()
-        defer { endWait(id) }
+        lock.withLock { explicitWaitActive = true; immediateRetryRequested = false }
+        defer {
+            lock.withLock { explicitWaitActive = false; immediateRetryRequested = false; retrySleeper = nil }
+            endWait(id)
+        }
         let start = environment.now()
         var stableSince: ContinuousClock.Instant? = environment.path() == .unsatisfied ? nil : start
         while true {
             try check()
+            if lock.withLock({ immediateRetryRequested }) {
+                // retry() is followed by send()'s preflight wait. Skip that one
+                // path hint as well, so one click makes exactly one real attempt.
+                lock.withLock { skipNextPathWait = minimumSeconds > 0 }
+                break
+            }
             let now = environment.now()
             let path = environment.path()
             if path == .unsatisfied { stableSince = nil }
@@ -212,9 +251,10 @@ public final class CloudNetworkRecoveryContext: @unchecked Sendable {
             let elapsed = start.duration(to: now).secondsValue
             let stable = stableSince.map { $0.duration(to: now).secondsValue >= policy.stabilitySeconds } ?? false
             if elapsed >= minimumSeconds && path != .unsatisfied && stable { break }
-            publish(.waiting, nextRetryAt: Date().addingTimeInterval(max(0, minimumSeconds - elapsed)))
+            let retryAt = elapsed < minimumSeconds ? Date().addingTimeInterval(minimumSeconds - elapsed) : nil
+            publish(.waiting, nextRetryAt: retryAt)
             let remaining = min(1, policy.maximumWaitSeconds - waitedSeconds, budget.remaining().secondsValue)
-            try await environment.sleep(.seconds(max(0, remaining)))
+            try await sleepUntilRetryOrClick(.seconds(max(0, remaining)))
         }
         publish(.retrying)
     }
@@ -223,7 +263,25 @@ public final class CloudNetworkRecoveryContext: @unchecked Sendable {
         CloudDiagnosticContext.current?.retry(.network)
         let start = waitedSeconds
         defer { CloudDiagnosticContext.current?.record(stage: .backoff, seconds: max(0, waitedSeconds - start)) }
-        try await wait(minimumSeconds: policy.delay(after: attempt, jitter: environment.jitter()))
+        try await wait(minimumSeconds: policy.retryDelaySeconds)
+    }
+
+    private func sleepUntilRetryOrClick(_ duration: Duration) async throws {
+        let sleeper = Task { try await environment.sleep(duration) }
+        let alreadyRequested = lock.withLock {
+            retrySleeper = sleeper
+            return immediateRetryRequested
+        }
+        if alreadyRequested { sleeper.cancel() }
+        defer { lock.withLock { retrySleeper = nil } }
+        do {
+            try await withTaskCancellationHandler {
+                try await sleeper.value
+            } onCancel: { sleeper.cancel() }
+        } catch {
+            try Task.checkCancellation()
+            guard error is CancellationError, lock.withLock({ immediateRetryRequested }) else { throw error }
+        }
     }
     func session(using original: URLSession, resetFor error: Error? = nil) -> URLSession {
         lock.withLock {

@@ -117,13 +117,14 @@ public final class TranscriptionEngine {
     private let backend: HelperASRBackend
     private let googleAIStudioBackend: GoogleAIStudioBackend
     private let vertexAIBackend: VertexAIGeminiBackend
-    private let cloudSegmentBudgetLimit: Duration
+    private let cloudSegmentBudgetLimit: Duration?
     private let cloudNetworkEnvironment: CloudNetworkEnvironment
     private let sleepPrevention: SleepPreventionService
     private let maximumASRSegmentDuration: TimeInterval
     private let cloudAdaptiveMinimumChildDuration: TimeInterval
     private let cancellationLock = NSLock()
     private var cancellationRequested = false
+    private var activeCloudNetwork: (jobID: UUID, context: CloudNetworkRecoveryContext)?
 
     static func resolvedVertexLocation(_ rawValue: String) -> String {
         let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -244,7 +245,7 @@ public final class TranscriptionEngine {
         cloudAdaptiveMinimumChildDuration: TimeInterval =
             CloudAdaptiveSegmentPlanner.productionMinimumChildDuration,
         silenceDetectionService: (any SilenceDetectionServicing)? = nil,
-        cloudSegmentBudgetLimit: Duration = .seconds(900)
+        cloudSegmentBudgetLimit: Duration? = nil
     ) {
         self.cloudSegmentBudgetLimit = cloudSegmentBudgetLimit
         self.cloudNetworkEnvironment = cloudNetworkEnvironment
@@ -273,7 +274,9 @@ public final class TranscriptionEngine {
     ) async throws -> PipelineResult {
         cancellationLock.withLock {
             cancellationRequested = false
+            activeCloudNetwork = nil
         }
+        defer { cancellationLock.withLock { activeCloudNetwork = nil } }
         let startedAt = Date()
         let sourceURL = job.sourceURL.standardizedFileURL
         let workingDirectory = FileManager.default.temporaryDirectory
@@ -1234,6 +1237,21 @@ public final class TranscriptionEngine {
         }
     }
 
+    public func canRetryNetworkImmediately(jobID: UUID) -> Bool {
+        let context = cancellationLock.withLock {
+            !cancellationRequested && activeCloudNetwork?.jobID == jobID ? activeCloudNetwork?.context : nil
+        }
+        return context?.canRetryImmediately == true
+    }
+
+    @discardableResult
+    public func retryNetworkImmediately(jobID: UUID) -> Bool {
+        let context = cancellationLock.withLock {
+            !cancellationRequested && activeCloudNetwork?.jobID == jobID ? activeCloudNetwork?.context : nil
+        }
+        return context?.retryImmediately() == true
+    }
+
     public func cancelCurrentJob() {
         cancellationLock.withLock {
             cancellationRequested = true
@@ -1492,11 +1510,28 @@ public final class TranscriptionEngine {
                     return
                 }
                 let elapsedSeconds = Int(statusStart.duration(to: .now).secondsValue)
-                let activity = CloudBudgetContext.current?.stage == "backoff" ? "等待重試" : "仍在處理中"
+                let network = CloudNetworkContext.current?.snapshot()
+                let service = CloudNetworkContext.current?.service.snapshot
+                let activity: String
+                if network?.state == .waiting {
+                    if let retryAt = network?.nextRetryAt {
+                        activity = "等待網路重試，約 \(max(0, Int(ceil(retryAt.timeIntervalSinceNow)))) 秒後再嘗試"
+                    } else {
+                        activity = "等待網路連線恢復"
+                    }
+                } else if service?.state == .coolingDown {
+                    activity = "等待 Google 服務重試"
+                } else if CloudNetworkContext.current?.isReceivingResponse == true {
+                    activity = "正在接收 Google 回應"
+                } else if network?.state == .retrying {
+                    activity = "正在重新嘗試，等待 Google 回應"
+                } else {
+                    activity = CloudBudgetContext.current?.stage == "backoff" ? "等待重試" : "等待 Google 回應"
+                }
                 update(
                     .log(
                         level: "info",
-                        message: "\(modelDisplay) \(activity)（已耗時 \(elapsedSeconds) 秒；Google 未提供實際完成百分比）。"
+                        message: "\(modelDisplay) \(activity)（已耗時 \(elapsedSeconds) 秒）。"
                     )
                 )
             }
@@ -1881,14 +1916,18 @@ public final class TranscriptionEngine {
             let budget: CloudSegmentBudget
             if let existing = budgets[rootID] { budget = existing }
             else {
-                budget = CloudSegmentBudget(rootSegmentID: rootID, limit: cloudSegmentBudgetLimit,
+                let limit = cloudSegmentBudgetLimit
+                    ?? GeminiGenerationConfig.segmentBudget(modelID: job.snapshot.requestedModelID)
+                budget = CloudSegmentBudget(rootSegmentID: rootID, limit: limit,
                     now: cloudNetworkEnvironment.now, event: { update(.log(level: "info", message: $0)) })
                 budgets[rootID] = budget
-                update(.log(level: "info", message: "budget created root=\(rootID) limit=\(cloudSegmentBudgetLimit.secondsValue) resumed=\(resumeCheckpoint != nil)；續跑重新計時。"))
+                update(.log(level: "info", message: "budget created root=\(rootID) limit=\(limit.secondsValue) resumed=\(resumeCheckpoint != nil)；續跑重新計時。"))
             }
             budget.setSegment(index: segmentIndex, depth: record.splitDepth ?? 0)
             let network = networkContexts[rootID] ?? CloudNetworkRecoveryContext(budget: budget, environment: cloudNetworkEnvironment, waitForCleanup: false)
             networkContexts[rootID] = network
+            cancellationLock.withLock { activeCloudNetwork = (job.id, network) }
+            defer { cancellationLock.withLock { activeCloudNetwork = nil } }
             network.configure(segment: segmentIndex, total: totalSegments,
                 completed: segmentManifest.segments.filter { $0.completedEventCount == 1 }.count,
                 observer: { update(.networkRecovery($0)) })
@@ -3013,8 +3052,10 @@ extension TranscriptionEngine {
             modelManifest = try await LocalModelManifestStore.compute(
                 modelID: job.snapshot.modelID,
                 revision: job.snapshot.modelRevision,
-                cacheDirectory: paths.models
+                cacheDirectory: ModelCache.hubRoot(modelsDirectory: paths.models)
             )
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             update(
                 .log(

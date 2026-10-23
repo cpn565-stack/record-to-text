@@ -200,6 +200,97 @@ private final class CloudSilenceDetectorSpy: SilenceDetectionServicing, @uncheck
 }
 
 final class CloudAdaptiveSegmentationTests: XCTestCase {
+    func testArgonFilesRequestPreservesTranscriptContractAndThinkingLevels() async throws {
+        let transcript = "[20:00 - 25:00]\n\n講者 1：我們先確認 OGSTM。\n\n講者 2：好，接著討論。"
+        let transport = MockAIStudioTransport(responses: Array(
+            repeating: .success((finishReason: "STOP", text: transcript)), count: 3))
+        MockAdaptiveCloudURLProtocol.handler = { try transport.handle(request: $0) }
+        let session = GeminiTransportHelper.makeEphemeralRetrySession(protocolClasses: [MockAdaptiveCloudURLProtocol.self])
+        defer { session.invalidateAndCancel(); MockAdaptiveCloudURLProtocol.handler = nil }
+        for level in GeminiThinkingLevel.allCases {
+            let backend = GoogleAIStudioBackend(urlSession: session,
+                configuration: .init(apiKey: "fixture", modelID: "gemini-4-argon", thinkingLevel: level))
+            let result = try await backend.transcribeDetailed(audioData: Data("audio".utf8),
+                terms: ["OGSTM"], timeOffsetSeconds: 1_200)
+            XCTAssertEqual(result.text, transcript)
+            XCTAssertEqual(result.metadata.requestedModelID, "gemini-4-argon")
+            XCTAssertEqual(result.metadata.effectiveModelID, "gemini-4-argon")
+            XCTAssertEqual(result.metadata.thinkingLevel, level)
+            let request = try XCTUnwrap(transport.recordedGenerateRequests.last)
+            XCTAssertEqual(request.url?.path, "/v1beta/models/gemini-4-argon:generateContent")
+            XCTAssertEqual(request.timeoutInterval, 1_200, accuracy: 1)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+            let generation = try XCTUnwrap(body["generationConfig"] as? [String: Any])
+            XCTAssertEqual(generation["maxOutputTokens"] as? Int, 32_768)
+            XCTAssertEqual((generation["thinkingConfig"] as? [String: String])?["thinkingLevel"], level.rawValue)
+            for key in ["temperature", "topP", "topK", "responseMimeType", "responseSchema", "continuationToken"] {
+                XCTAssertNil(generation[key], "Unexpected Argon parameter: \(key)")
+            }
+            let instruction = try XCTUnwrap(body["systemInstruction"] as? [String: Any])
+            XCTAssertEqual((instruction["parts"] as? [[String: String]])?.first?["text"], GeminiTranscriptPrompt.systemInstruction)
+            let content = try XCTUnwrap((body["contents"] as? [[String: Any]])?.first)
+            let parts = try XCTUnwrap(content["parts"] as? [[String: Any]])
+            XCTAssertNotNil(parts.first?["fileData"])
+            let prompt = try XCTUnwrap(parts.last?["text"] as? String)
+            XCTAssertTrue(prompt.contains("20:00"))
+            XCTAssertTrue(prompt.contains("OGSTM"))
+        }
+        XCTAssertEqual(transport.createdFiles.count, 3)
+        XCTAssertEqual(transport.deletedFiles.sorted(), transport.createdFiles.sorted())
+    }
+
+    func testArgonTimeoutIsStillBoundedByCallerBudget() async throws {
+        let transport = MockAIStudioTransport(responses: [.success((finishReason: "STOP", text: "完整逐字稿"))])
+        MockAdaptiveCloudURLProtocol.handler = { try transport.handle(request: $0) }
+        let session = GeminiTransportHelper.makeEphemeralRetrySession(protocolClasses: [MockAdaptiveCloudURLProtocol.self])
+        defer { session.invalidateAndCancel(); MockAdaptiveCloudURLProtocol.handler = nil }
+        let backend = GoogleAIStudioBackend(urlSession: session,
+            configuration: .init(apiKey: "fixture", modelID: "gemini-4-argon"))
+        _ = try await CloudBudgetContext.$current.withValue(CloudSegmentBudget(limit: .seconds(450))) {
+            try await backend.transcribe(audioData: Data("audio".utf8))
+        }
+        let request = try XCTUnwrap(transport.recordedGenerateRequests.first)
+        XCTAssertGreaterThan(request.timeoutInterval, 400)
+        XCTAssertLessThanOrEqual(request.timeoutInterval, 450)
+        XCTAssertEqual(transport.deletedFiles, transport.createdFiles)
+    }
+
+    func testArgonTruncationAndAccessErrorsCleanUpWithoutModelFallback() async throws {
+        let responses: [Result<(finishReason: String, text: String), Error>] = [
+            .success((finishReason: "MAX_TOKENS", text: "部分逐字稿")),
+            .success((finishReason: "CONTINUATION", text: "尚未完成")),
+            .failure(GoogleAIStudioError.requestFailed(statusCode: 403, message: "permission denied")),
+            .failure(GoogleAIStudioError.requestFailed(statusCode: 404, message: "model unavailable"))
+        ]
+        for (index, response) in responses.enumerated() {
+            let transport = MockAIStudioTransport(responses: [response])
+            MockAdaptiveCloudURLProtocol.handler = { try transport.handle(request: $0) }
+            let session = GeminiTransportHelper.makeEphemeralRetrySession(protocolClasses: [MockAdaptiveCloudURLProtocol.self])
+            defer { session.invalidateAndCancel(); MockAdaptiveCloudURLProtocol.handler = nil }
+            let backend = GoogleAIStudioBackend(urlSession: session,
+                configuration: .init(apiKey: "fixture", modelID: "gemini-4-argon", fallbackPolicy: .flashOnly))
+            do {
+                _ = try await backend.transcribe(audioData: Data("audio".utf8))
+                XCTFail("Incomplete or denied request must not succeed")
+            } catch let error as CloudOutputTruncatedError {
+                XCTAssertEqual(index, 0)
+                XCTAssertEqual(error.partialText, "部分逐字稿")
+            } catch let error as GoogleAIStudioError {
+                if index == 1 {
+                    guard case .incompleteResponse(finishReason: "CONTINUATION", message: _) = error else {
+                        return XCTFail("Unexpected continuation error: \(error)")
+                    }
+                } else {
+                    guard case .requestFailed(statusCode: index == 2 ? 403 : 404, message: _) = error else {
+                        return XCTFail("Unexpected access error: \(error)")
+                    }
+                }
+            }
+            XCTAssertEqual(transport.recordedGenerateRequests.count, 1)
+            XCTAssertEqual(transport.deletedFiles, transport.createdFiles)
+        }
+    }
+
     func testThirdSegmentNetworkPauseResumesWithoutReuploadingFirstTwo() async throws {
         try await assertCheckpointResume(service: false)
     }
@@ -518,6 +609,10 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
         try await assertAdaptiveRecovery(parentTruncatedText: "這段截斷文字不得進入正式稿")
     }
 
+    func testArgonAdaptiveSplitUsesSnapshotModelAndSharedThirtyMinuteBudget() async throws {
+        try await assertAdaptiveRecovery(parentTruncatedText: "截斷稿", modelID: "gemini-4-argon")
+    }
+
     func testAdaptiveSegmentationRecoversFromEmptyMaxTokens() async throws {
         try await assertAdaptiveRecovery(parentTruncatedText: "")
     }
@@ -534,7 +629,7 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
         try await assertAdaptiveRecovery(parentTruncatedText: "截斷", timestampAnomalies: true)
     }
 
-    private func assertAdaptiveRecovery(parentTruncatedText: String, expireRight: Bool = false, completionDurable: Bool = true, timestampAnomalies: Bool = false) async throws {
+    private func assertAdaptiveRecovery(parentTruncatedText: String, expireRight: Bool = false, completionDurable: Bool = true, timestampAnomalies: Bool = false, modelID: String = "gemini-3.7-flash") async throws {
         let root = try TestSupport.makeTemporaryDirectory()
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
 
@@ -587,7 +682,7 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
             urlSession: session,
             configuration: .init(
                 apiKey: "mock-key",
-                modelID: "gemini-3.7-flash"
+                modelID: modelID
             )
         )
         let silenceDetector = CloudSilenceDetectorSpy()
@@ -598,11 +693,11 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
             googleAIStudioBackend: backend,
             cloudAdaptiveMinimumChildDuration: 1.0,
             silenceDetectionService: silenceDetector,
-            cloudSegmentBudgetLimit: expireRight ? .seconds(1) : .seconds(900)
+            cloudSegmentBudgetLimit: expireRight ? .seconds(1) : nil
         )
 
         let snapshot = JobSnapshot(
-            modelID: "gemini-3.7-flash",
+            modelID: modelID,
             glossaryID: nil,
             glossaryName: nil,
             terms: [],
@@ -612,7 +707,7 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
             keepRawTranscript: false,
             backendType: .googleAIStudio,
             googleAIStudioAPIKey: "mock-key",
-            googleAIStudioModelID: "gemini-3.7-flash"
+            googleAIStudioModelID: modelID
         )
         let job = TranscriptionJob(
             id: UUID(),
@@ -663,10 +758,18 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
             let body = try XCTUnwrap(request.httpBody)
             let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
             let config = try XCTUnwrap(json["generationConfig"] as? [String: Any])
-            XCTAssertEqual(config["maxOutputTokens"] as? Int, 65_536)
+            XCTAssertEqual(config["maxOutputTokens"] as? Int, modelID == "gemini-4-argon" ? 32_768 : 65_536)
+            XCTAssertTrue(request.url!.path.contains(modelID))
         }
         XCTAssertEqual(transport.createdFiles.count, 3)
         XCTAssertEqual(transport.deletedFiles.count, 3)
+
+        let budgetLogs = observedUpdates.compactMap { update -> String? in
+            if case let .log(_, message) = update, message.contains("budget created") { return message }
+            return nil
+        }
+        XCTAssertEqual(budgetLogs.count, 1, "Adaptive children must share the root budget")
+        XCTAssertTrue(budgetLogs.first?.contains(modelID == "gemini-4-argon" ? "limit=1800" : "limit=900") == true)
 
         // 2. Assert warning was emitted for MAX_TOKENS adaptive split
         let splitWarnings = observedUpdates.compactMap { update -> String? in

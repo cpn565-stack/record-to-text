@@ -63,7 +63,7 @@ final class LocalCheckpointV2Tests: XCTestCase {
             normalizationProfile: .current,
             inference: inference ?? makeInference(),
             presentation: LocalPresentationOptions(
-                openCCConfiguration: "s2twp.json",
+                openCCConfiguration: "s2tw.json",
                 outputLocatorHint: "/tmp/out.txt",
                 jobUUID: "uuid-1"
             )

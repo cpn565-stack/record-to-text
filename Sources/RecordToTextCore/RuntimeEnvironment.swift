@@ -399,7 +399,7 @@ public enum RuntimeEnvironment {
             pairs.append((.opencc, runtime.opencc))
             pairs.append((.helper, runtime.helper))
         } else if backendType == .googleAIStudio {
-            // Cloud response is post-processed with OpenCC s2twp before output.
+            // Cloud response is post-processed with OpenCC s2tw before output.
             pairs.append((.opencc, runtime.opencc))
         }
 

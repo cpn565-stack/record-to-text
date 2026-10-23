@@ -3,6 +3,23 @@ import XCTest
 @testable import RecordToTextCore
 
 final class GeminiBackendObservabilityTests: XCTestCase {
+    func testQuickArgonSelectionPersistsWithoutChangingTranscriptPreferences() throws {
+        var original = AppSettings(defaultOutputDirectory: "/tmp/output")
+        original.geminiThinkingLevel = .medium
+        original.keepRawTranscript = true
+        for choice in [QuickTranscriptionChoice.aiStudioGemini4Argon, .vertexGemini4Argon] {
+            let selected = choice.applying(to: original)
+            let restored = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(selected))
+            XCTAssertTrue(choice.matches(restored))
+            XCTAssertEqual(restored.geminiThinkingLevel, .medium)
+            XCTAssertEqual(restored.keepRawTranscript, original.keepRawTranscript)
+            XCTAssertEqual(restored.outputLocationMode, original.outputLocationMode)
+            XCTAssertEqual(restored.defaultOutputDirectory, original.defaultOutputDirectory)
+            XCTAssertEqual(restored.vertexAIIncludeSummary, original.vertexAIIncludeSummary)
+            XCTAssertFalse(QuickTranscriptionChoice.qwen3ASR1_7BBF16.matches(restored))
+        }
+    }
+
     func testNetworkRetryClassificationDoesNotRetryPermanentErrorsOrCancellation() {
         for code in [URLError.timedOut, .networkConnectionLost, .notConnectedToInternet,
                      .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed] {
@@ -20,6 +37,21 @@ final class GeminiBackendObservabilityTests: XCTestCase {
             XCTAssertEqual(GeminiGenerationConfig.transcriptionOutputTokens(modelID: model), 65_536)
         }
         XCTAssertEqual(GeminiGenerationConfig.transcriptionOutputTokens(modelID: "custom-model"), 16_384)
+        XCTAssertEqual(GeminiGenerationConfig.transcriptionOutputTokens(modelID: "gemini-4-argon"), 32_768)
+    }
+
+    func testArgonSupportKeepsOtherModelTimeoutsAndUnknownCapabilities() {
+        for model in ["gemini-3.8-flash", "custom-model"] {
+            XCTAssertEqual(GeminiGenerationConfig.requestTimeout(modelID: model), 300)
+            XCTAssertEqual(GeminiGenerationConfig.segmentBudget(modelID: model), .seconds(900))
+        }
+        XCTAssertEqual(GeminiGenerationConfig.segmentBudget(modelID: "gemini-4-argon"), .seconds(1_800))
+        XCTAssertNil(GeminiGenerationConfig.make(maxOutputTokens: 16_384,
+            modelID: "custom-model", thinkingLevel: .high)["thinkingConfig"])
+        let usage = CloudUsageMetadata(promptTokenCount: 1_000, candidatesTokenCount: 100,
+            thoughtsTokenCount: 200, totalTokenCount: 1_300)
+        XCTAssertNil(usage.estimatedCostUSD(modelID: "gemini-4-argon"))
+        XCTAssertEqual(usage.summaryDisplay(modelID: "gemini-4-argon"), "1.3k tokens (思考 200)")
     }
 
     func testMetadataParserCapturesModelVersionResponseAndUsage() throws {

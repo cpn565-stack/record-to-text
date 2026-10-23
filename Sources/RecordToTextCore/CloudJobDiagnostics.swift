@@ -17,6 +17,86 @@ public enum CloudRetryReason: String, Codable, Sendable {
     }
 }
 
+public enum CloudResponseMode: String, Codable, Sendable {
+    case unaryJSON, geminiSSE, rawData, unknown
+    public init(from decoder: Decoder) throws {
+        self = Self(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .unknown
+    }
+}
+
+public struct CloudAttemptDiagnostic: Codable, Equatable, Sendable {
+    public var modelID: String?
+    public var stage: CloudDiagnosticStage
+    public var responseMode: CloudResponseMode?
+    public var sendSequence: Int?
+    public var httpStatus: Int?
+    public var errorCategory: CloudFailureDiagnostic.Category?
+    public var finishReason: String?
+    public var uploadCompletedSeconds: Double?
+    public var firstResponseByteSeconds: Double?
+    public var firstTextDeltaSeconds: Double?
+    public var completedSeconds: Double?
+    public var receivedByteCount: Int?
+    public var sseEventCount: Int?
+    public var networkProtocol: String?
+    public var usedProxy: Bool?
+
+    public init(
+        modelID: String? = nil,
+        stage: CloudDiagnosticStage,
+        responseMode: CloudResponseMode? = nil,
+        sendSequence: Int? = nil,
+        httpStatus: Int? = nil,
+        errorCategory: CloudFailureDiagnostic.Category? = nil,
+        finishReason: String? = nil,
+        uploadCompletedSeconds: Double? = nil,
+        firstResponseByteSeconds: Double? = nil,
+        firstTextDeltaSeconds: Double? = nil,
+        completedSeconds: Double? = nil,
+        receivedByteCount: Int? = nil,
+        sseEventCount: Int? = nil,
+        networkProtocol: String? = nil,
+        usedProxy: Bool? = nil
+    ) {
+        self.modelID = Self.sanitizeIdentifier(modelID, maxLength: 120)
+        self.stage = stage
+        self.responseMode = responseMode
+        self.sendSequence = sendSequence
+        self.httpStatus = httpStatus
+        self.errorCategory = errorCategory
+        self.finishReason = Self.sanitizeIdentifier(finishReason, maxLength: 64)
+        self.uploadCompletedSeconds = Self.finiteNonNegative(uploadCompletedSeconds)
+        self.firstResponseByteSeconds = Self.finiteNonNegative(firstResponseByteSeconds)
+        self.firstTextDeltaSeconds = Self.finiteNonNegative(firstTextDeltaSeconds)
+        self.completedSeconds = Self.finiteNonNegative(completedSeconds)
+        self.receivedByteCount = receivedByteCount
+        self.sseEventCount = sseEventCount
+        self.networkProtocol = Self.sanitizeProtocol(networkProtocol)
+        self.usedProxy = usedProxy
+    }
+
+    static func sanitizeIdentifier(_ value: String?, maxLength: Int = 64) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+        guard value.count <= maxLength, value.range(of: "^[a-zA-Z0-9._-]+$", options: .regularExpression) != nil else {
+            return "custom"
+        }
+        return value
+    }
+
+    static func sanitizeProtocol(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+        guard value.count <= 32, value.range(of: "^[a-zA-Z0-9._/-]+$", options: .regularExpression) != nil else {
+            return "other"
+        }
+        return value
+    }
+
+    static func finiteNonNegative(_ value: Double?) -> Double? {
+        guard let value, value.isFinite, value >= 0 else { return nil }
+        return value
+    }
+}
+
 public struct CloudStageTiming: Codable, Equatable, Sendable {
     public let stage: CloudDiagnosticStage
     public let seconds: Double
@@ -42,17 +122,20 @@ public struct CloudSegmentDiagnostic: Codable, Equatable, Sendable {
     public var timestampReview: TranscriptTimestampReview?
     public var failure: CloudFailureDiagnostic?
     public var generationRequestCount: Int?
+    public var attempts: [CloudAttemptDiagnostic]?
 
     public init(startSeconds: Double, endSeconds: Double, outcome: Outcome,
                 reusedFromCheckpoint: Bool = false, preparationSeconds: Double? = nil,
                 cloudSeconds: Double? = nil, stageTimings: [CloudStageTiming] = [],
                 retryReasons: [CloudRetryReason] = [], timestampReview: TranscriptTimestampReview? = nil,
-                failure: CloudFailureDiagnostic? = nil, generationRequestCount: Int? = nil) {
+                failure: CloudFailureDiagnostic? = nil, generationRequestCount: Int? = nil,
+                attempts: [CloudAttemptDiagnostic]? = nil) {
         self.startSeconds = startSeconds; self.endSeconds = endSeconds; self.outcome = outcome
         self.reusedFromCheckpoint = reusedFromCheckpoint; self.preparationSeconds = preparationSeconds
         self.cloudSeconds = cloudSeconds; self.stageTimings = stageTimings
         self.retryReasons = retryReasons; self.timestampReview = timestampReview
         self.failure = failure; self.generationRequestCount = generationRequestCount
+        self.attempts = attempts
     }
 }
 
@@ -97,6 +180,11 @@ public struct CloudJobDiagnostics: Codable, Equatable, Sendable {
             lines.append("失敗事件=\(history.totalEventCount)；保留=\(history.events.count)；App 生成發送=\(history.generationRequestCount)")
             lines += history.events.map {
                 "\($0.timestamp.ISO8601Format())；root=\($0.rootSegmentID?.uuidString ?? "unknown")；segment=\($0.segmentIndex ?? 0)；attempt=\($0.attempt)；path=\($0.path?.rawValue ?? "unknown")；wait=\($0.networkWaitSeconds ?? 0)；sessionReset=\($0.sessionWasReset ?? false)；resultUnknown=\($0.resultUnknown)；" + $0.failure.debugSummary
+                    + ($0.responseMode.map { "；mode=\($0.rawValue)" } ?? "")
+                    + ($0.sendSequence.map { "；send=\($0)" } ?? "")
+                    + ($0.finishReason.map { "；finishReason=\($0)" } ?? "")
+                    + ($0.receivedByteCount.map { "；bytes=\($0)" } ?? "")
+                    + ($0.sseEventCount.map { "；sseEvents=\($0)" } ?? "")
                     + ($0.recoveryStopReason.map { "；recoveryStopReason=\($0.rawValue)" } ?? "")
                     + ($0.serviceStopReason.map { "；serviceStopReason=\($0.rawValue)" } ?? "")
                     + ($0.serviceWaitSeconds.map { "；serviceWaitSeconds=\($0)" } ?? "")
@@ -114,6 +202,7 @@ final class CloudDiagnosticCollector: @unchecked Sendable {
     private var generationRequestCount = 0
     private var attempt = 0
     private var stageAttempts: [CloudDiagnosticStage: Int] = [:]
+    private var attempts: [CloudAttemptDiagnostic] = []
     private var lastFailure: CloudFailureDiagnostic?
     private var lastRecoveryStopReason: CloudNetworkRecovery.StopReason?
     private var lastServiceStopReason: CloudServiceRecovery.StopReason?
@@ -135,11 +224,11 @@ final class CloudDiagnosticCollector: @unchecked Sendable {
     }
 
     func setModel(_ model: String) {
-        let safe = model.count <= 120 && model.range(of: "^[a-zA-Z0-9._-]+$", options: .regularExpression) != nil
-        lock.withLock { modelID = safe ? model : "custom" }
+        let safe = CloudAttemptDiagnostic.sanitizeIdentifier(model, maxLength: 120)
+        lock.withLock { modelID = safe }
     }
 
-    func requestStarted(stage: CloudDiagnosticStage) {
+    func requestStarted(stage: CloudDiagnosticStage, responseMode: CloudResponseMode? = nil, sendSequence: Int? = nil) {
         lock.withLock {
             stageAttempts[stage, default: 0] += 1
             attempt = stageAttempts[stage, default: 0]
@@ -147,6 +236,59 @@ final class CloudDiagnosticCollector: @unchecked Sendable {
             lastRecoveryStopReason = nil
             lastServiceStopReason = nil
             if stage == .generation { generationRequestCount += 1; history?.generationStarted() }
+            let resolvedSequence = sendSequence ?? (stage == .generation ? generationRequestCount : attempt)
+            let entry = CloudAttemptDiagnostic(
+                modelID: modelID,
+                stage: stage,
+                responseMode: responseMode,
+                sendSequence: resolvedSequence
+            )
+            attempts.append(entry)
+            if attempts.count > 32 {
+                attempts.removeFirst(attempts.count - 32)
+            }
+        }
+    }
+
+    func updateCurrentAttempt(
+        httpStatus: Int? = nil,
+        errorCategory: CloudFailureDiagnostic.Category? = nil,
+        finishReason: String? = nil,
+        uploadCompletedSeconds: Double? = nil,
+        firstResponseByteSeconds: Double? = nil,
+        firstTextDeltaSeconds: Double? = nil,
+        completedSeconds: Double? = nil,
+        receivedByteCount: Int? = nil,
+        sseEventCount: Int? = nil,
+        networkProtocol: String? = nil,
+        usedProxy: Bool? = nil
+    ) {
+        lock.withLock {
+            guard !attempts.isEmpty else { return }
+            let idx = attempts.count - 1
+            if let httpStatus { attempts[idx].httpStatus = httpStatus }
+            if let errorCategory { attempts[idx].errorCategory = errorCategory }
+            if let finishReason = CloudAttemptDiagnostic.sanitizeIdentifier(finishReason, maxLength: 64) {
+                attempts[idx].finishReason = finishReason
+            }
+            if let v = CloudAttemptDiagnostic.finiteNonNegative(uploadCompletedSeconds) {
+                attempts[idx].uploadCompletedSeconds = v
+            }
+            if let v = CloudAttemptDiagnostic.finiteNonNegative(firstResponseByteSeconds) {
+                attempts[idx].firstResponseByteSeconds = v
+            }
+            if let v = CloudAttemptDiagnostic.finiteNonNegative(firstTextDeltaSeconds) {
+                attempts[idx].firstTextDeltaSeconds = v
+            }
+            if let v = CloudAttemptDiagnostic.finiteNonNegative(completedSeconds) {
+                attempts[idx].completedSeconds = v
+            }
+            if let receivedByteCount { attempts[idx].receivedByteCount = receivedByteCount }
+            if let sseEventCount { attempts[idx].sseEventCount = sseEventCount }
+            if let proto = CloudAttemptDiagnostic.sanitizeProtocol(networkProtocol) {
+                attempts[idx].networkProtocol = proto
+            }
+            if let usedProxy { attempts[idx].usedProxy = usedProxy }
         }
     }
 
@@ -187,16 +329,44 @@ final class CloudDiagnosticCollector: @unchecked Sendable {
             lastFailure = diagnostic
             lastRecoveryStopReason = stopReason
             lastServiceStopReason = serviceStop
-            history?.record(.init(timestamp: Date(), rootSegmentID: rootSegmentID,
-                                  segmentIndex: segmentIndex, modelID: modelID, attempt: attempt,
-                                  completedSegmentCount: completedSegmentCount,
-                                  rootRemainingSeconds: rootRemainingSeconds,
-                                  resultUnknown: generationRequestCount > 0 && diagnostic.isTransientNetworkFailure,
-                                  failure: diagnostic, path: path,
-                                  networkWaitSeconds: waitedSeconds,
-                                  sessionWasReset: sessionWasReset,
-                                  recoveryStopReason: stopReason, serviceStopReason: serviceStop,
-                                  serviceWaitSeconds: service?.waitedSeconds))
+            var latestAttempt: CloudAttemptDiagnostic?
+            if !attempts.isEmpty {
+                let idx = attempts.count - 1
+                attempts[idx].errorCategory = diagnostic.category
+                if attempts[idx].httpStatus == nil {
+                    attempts[idx].httpStatus = diagnostic.httpStatus
+                }
+                latestAttempt = attempts[idx]
+            }
+            history?.record(.init(
+                timestamp: Date(),
+                rootSegmentID: rootSegmentID,
+                segmentIndex: segmentIndex,
+                modelID: modelID,
+                attempt: attempt,
+                completedSegmentCount: completedSegmentCount,
+                rootRemainingSeconds: rootRemainingSeconds,
+                resultUnknown: generationRequestCount > 0 && diagnostic.isTransientNetworkFailure,
+                failure: diagnostic,
+                path: path,
+                networkWaitSeconds: waitedSeconds,
+                sessionWasReset: sessionWasReset,
+                recoveryStopReason: stopReason,
+                serviceStopReason: serviceStop,
+                serviceWaitSeconds: service?.waitedSeconds,
+                responseMode: latestAttempt?.responseMode,
+                sendSequence: latestAttempt?.sendSequence,
+                httpStatus: latestAttempt?.httpStatus ?? diagnostic.httpStatus,
+                finishReason: latestAttempt?.finishReason,
+                uploadCompletedSeconds: latestAttempt?.uploadCompletedSeconds,
+                firstResponseByteSeconds: latestAttempt?.firstResponseByteSeconds,
+                firstTextDeltaSeconds: latestAttempt?.firstTextDeltaSeconds,
+                completedSeconds: latestAttempt?.completedSeconds,
+                receivedByteCount: latestAttempt?.receivedByteCount,
+                sseEventCount: latestAttempt?.sseEventCount,
+                networkProtocol: latestAttempt?.networkProtocol,
+                usedProxy: latestAttempt?.usedProxy
+            ))
             return diagnostic
         }
     }
@@ -216,7 +386,8 @@ final class CloudDiagnosticCollector: @unchecked Sendable {
                   stageTimings: CloudDiagnosticStage.allCases.compactMap { stage in
                       timings[stage].map { .init(stage: stage, seconds: $0) }
                   }, retryReasons: reasons, timestampReview: review,
-                  failure: lastFailure, generationRequestCount: generationRequestCount)
+                  failure: lastFailure, generationRequestCount: generationRequestCount,
+                  attempts: attempts.isEmpty ? nil : attempts)
         }
     }
 }
@@ -237,6 +408,18 @@ public struct CloudFailureEvent: Codable, Equatable, Sendable {
     public var recoveryStopReason: CloudNetworkRecovery.StopReason?
     public var serviceStopReason: CloudServiceRecovery.StopReason?
     public var serviceWaitSeconds: Double?
+    public var responseMode: CloudResponseMode?
+    public var sendSequence: Int?
+    public var httpStatus: Int?
+    public var finishReason: String?
+    public var uploadCompletedSeconds: Double?
+    public var firstResponseByteSeconds: Double?
+    public var firstTextDeltaSeconds: Double?
+    public var completedSeconds: Double?
+    public var receivedByteCount: Int?
+    public var sseEventCount: Int?
+    public var networkProtocol: String?
+    public var usedProxy: Bool?
 }
 
 public struct CloudFailureHistory: Codable, Equatable, Sendable {

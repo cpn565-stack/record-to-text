@@ -1,5 +1,33 @@
 # 下一次接續
 
+## 2026-10-17：build 14–15 Vertex 串流回應實作與 thinking 期間保活修正
+
+已依 [Vertex AI 串流回應修復規格](vertex-streaming-response-spec-2026-10-17.md) 完成實作（build 14），並針對真實 20 分鐘訪談錄音在 `gemini-4-argon`／`gemini-3.8-flash`（`thinkingLevel=high`）深度思考階段可能長達 80–130 秒、導致本機代理（如 `127.0.0.1:7890`）因約 60 秒無回應位元組而主動斷線（`NSURLErrorDomain -1005`）的問題，在 build 15 為 Vertex SSE 請求啟用 `thinkingConfig.includeThoughts = true`。
+
+實測確認啟用 `includeThoughts = true` 後，Vertex `:streamGenerateContent?alt=sse` 會在請求上傳完成後約 2–5 秒即回傳 HTTP 200 並每 3–4 秒持續送出 `thought: true` SSE 事件，使連線在整個思考階段保持活躍，不再觸發代理 60 秒閒置斷線；`GeminiStreamingResponseAccumulator` 仍嚴格過濾所有 `thought: true` 與 `thoughtSignature`，不進入逐字稿、日誌或持久化，且 `firstResponseByteSeconds` 與 `firstTextDeltaSeconds` 分別精準記錄首個回應位元組與首個實際逐字稿文字片段時間。S01–S16 全部 16 項測試、59 項相關單元測試及 72 項 self-test 均通過，已打包並安裝 `/Applications/record-to-text.app` 0.2.1（15）。
+
+## 2026-10-17：build 13 重試操作與功能檢視
+
+網路失敗後固定等 20 秒，加入「立刻重試」及逐秒倒數；手動跳過等待不增加工作、不重複發送、不重設發送次數或期限，取消仍優先。日誌區分網路／服務等待與模型回應。AI Studio／Vertex 的自訂模型選單也已修正：可由預設切入，輸入完成後套用一次，空白草稿不改動設定或排隊工作。
+
+完整檢查 Swift 527 項（1 項預設跳過、0 失敗）、Python 134 項、self-test 72 項、pipeline 10 個情境通過；模型選單修改後相關 54 項測試及隔離 AppKit 實際操作通過。已安裝並開啟 `/Applications/record-to-text.app` 0.2.1（13），保留設定及 14 筆工作狀態，沒有自動開始排隊工作；build 12 已封存。未新增真實 Google API 轉錄驗證。
+
+後續優先序：測試所選模型的可用性 → 可選較短音訊分段 → 按實際模型／思考 token 修正成本估算 → 顯示目前 App 路徑。這些建議尚未實作，詳見[功能檢視與驗證紀錄](functional-review-2026-10-17.md)。
+
+## 2026-10-15：build 12 Gemini 4 Argon
+
+使用者指定只新增模型，沿用既有逐字稿格式。設定與主視窗加入 Argon，送出實際思考強度，直接非串流 REST 採 32,768 輸出上限；單次推論 20 分鐘／原始音訊段共用 30 分鐘期限。保留現有分段、截斷處理與清理，不加入 JSON 或摘要。詳見 [Argon 支援紀錄](gemini-4-argon-support-2026-10-15.md)。
+
+完整檢查通過（Swift 522 項、1 項預設跳過、0 失敗；Python 134 項、72 項 self-test、10 個 pipeline 情境），快速選單追加驗證 12 項通過。已安裝並開啟 `/Applications/record-to-text.app` build 12，保留原設定、工作與 build 11 備份；未做真實 Google API 辨識或帳號權限驗證。
+
+## 2026-10-13：build 11 本機模型驗證修正
+
+修正 checkpoint 的模型驗證漏用 `Models/hub`，以及 Hugging Face snapshot 符號連結被跳過的問題；未解析的連結拒絕產生 manifest，取消驗證仍視為取消。原「找不到 snapshot」訊息只停用跨次續跑，與工作取消分開判讀。模型已在本機，不需重新下載。
+
+驗證：相關111個 Swift 測試通過；真實模型的12秒音訊，經隔離的完整本機 pipeline、兩個6秒段及文字輸出離線測試通過。未重跑完整長錄音。版本0.2.1（11），詳見[本機模型驗證修正](local-model-cache-fix-2026-10-13.md)。
+
+已依使用者要求，在原轉錄完成後更新 `/Applications/record-to-text.app` 並重開 build 11；既有工作與完成紀錄保留，build 10 已封存備份。
+
 ## 2026-10-08：build 10 主視窗拖放
 
 錄音檔現在可拖到主視窗內容區的標題、工作佇列與四周空白，不必對準錄音框；文字輸入框依使用者要求保留原生編輯與拖拉行為。拖入時顯示視窗邊框與放開提示，錄音框文案更新為「將錄音拖入視窗」。沿用原有檔案格式檢查、重複檔案確認與手動開始流程。

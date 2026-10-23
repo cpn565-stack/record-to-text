@@ -1,9 +1,11 @@
 import Foundation
 
-/// The three common engine/model combinations exposed by the main-window
+/// Common engine/model combinations exposed by the main-window
 /// quick selector. Advanced model choices remain available in Settings.
 public enum QuickTranscriptionChoice: String, CaseIterable, Identifiable, Sendable {
     case qwen3ASR1_7BBF16
+    case aiStudioGemini4Argon
+    case vertexGemini4Argon
     case vertexGemini38Flash
     case aiStudioGemini38Flash
     case vertexGemini37Flash
@@ -15,6 +17,10 @@ public enum QuickTranscriptionChoice: String, CaseIterable, Identifiable, Sendab
         switch self {
         case .qwen3ASR1_7BBF16:
             return "Qwen3-ASR 1.7B BF16"
+        case .aiStudioGemini4Argon:
+            return "AI Studio (Gemini 4 Argon)"
+        case .vertexGemini4Argon:
+            return "Vertex AI (Gemini 4 Argon)"
         case .vertexGemini38Flash:
             return "Vertex AI (Gemini 3.8 Flash)"
         case .aiStudioGemini38Flash:
@@ -30,9 +36,9 @@ public enum QuickTranscriptionChoice: String, CaseIterable, Identifiable, Sendab
         switch self {
         case .qwen3ASR1_7BBF16:
             return .localQwen
-        case .vertexGemini38Flash, .vertexGemini37Flash:
+        case .vertexGemini4Argon, .vertexGemini38Flash, .vertexGemini37Flash:
             return .vertexAI
-        case .aiStudioGemini38Flash, .aiStudioGemini37Flash:
+        case .aiStudioGemini4Argon, .aiStudioGemini38Flash, .aiStudioGemini37Flash:
             return .googleAIStudio
         }
     }
@@ -44,6 +50,10 @@ public enum QuickTranscriptionChoice: String, CaseIterable, Identifiable, Sendab
         case .qwen3ASR1_7BBF16:
             updated.selectedModels[CPUArchitecture.current.rawValue] =
                 ASRModelDescriptor.appleSiliconBF16.id
+        case .aiStudioGemini4Argon:
+            updated.googleAIStudioModelID = "gemini-4-argon"
+        case .vertexGemini4Argon:
+            updated.vertexAIModelID = "gemini-4-argon"
         case .vertexGemini38Flash:
             updated.vertexAIModelID = "gemini-3.8-flash"
         case .aiStudioGemini38Flash:
@@ -63,6 +73,10 @@ public enum QuickTranscriptionChoice: String, CaseIterable, Identifiable, Sendab
         switch self {
         case .qwen3ASR1_7BBF16:
             return settings.selectedModelID == ASRModelDescriptor.appleSiliconBF16.id
+        case .aiStudioGemini4Argon:
+            return settings.googleAIStudioModelID == "gemini-4-argon"
+        case .vertexGemini4Argon:
+            return settings.vertexAIModelID == "gemini-4-argon"
         case .vertexGemini38Flash:
             return settings.vertexAIModelID == "gemini-3.8-flash"
         case .aiStudioGemini38Flash:

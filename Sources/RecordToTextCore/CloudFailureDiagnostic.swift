@@ -18,7 +18,7 @@ public struct CloudFailureDiagnostic: Codable, Equatable, Sendable {
         case connectionLost, offline, dnsFailure, hostUnreachable
         case urlSessionTimeout, requestDeadlineExceeded, segmentDeadlineExceeded
         case authentication, authUnavailable, tlsFailure, rateLimited, serverError
-        case emptyResponse, contentBlocked, invalidResponse, transportFailure, cancelled, unknown
+        case emptyResponse, contentBlocked, invalidResponse, incompleteStream, transportFailure, cancelled, unknown
 
         public init(from decoder: Decoder) throws {
             self = Self(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .unknown
@@ -43,7 +43,7 @@ public struct CloudFailureDiagnostic: Codable, Equatable, Sendable {
 
     public var isTransientNetworkFailure: Bool {
         [.connectionLost, .offline, .dnsFailure, .hostUnreachable, .urlSessionTimeout,
-         .requestDeadlineExceeded].contains(category)
+         .requestDeadlineExceeded, .incompleteStream].contains(category)
     }
 
     public var userMessage: String {
@@ -62,6 +62,7 @@ public struct CloudFailureDiagnostic: Codable, Equatable, Sendable {
         case .emptyResponse: return "Google 未提供可用的逐字稿文字。"
         case .contentBlocked: return "Google 未允許處理本片段。"
         case .invalidResponse: return "Google 回應內容無法使用。"
+        case .incompleteStream: return "Google 串流回應未完整結束。"
         case .transportFailure: return "本機傳輸通道失敗。"
         case .cancelled: return "使用者取消工作。"
         case .unknown: return "雲端操作失敗，原因尚未確認。"
@@ -79,6 +80,11 @@ public struct CloudFailureDiagnostic: Codable, Equatable, Sendable {
     public static func classify(_ error: Error, stage: CloudDiagnosticStage = .unknown) -> Self {
         if let service = error as? CloudServiceRecoveryExhausted { return .http(429, stage: service.recovery.stage) }
         if let http = error as? CloudHTTPFailure { return .http(http.status, stage: http.stage) }
+        if let streamError = error as? GeminiStreamServerError { return .http(streamError.statusCode, stage: stage) }
+        if error is CloudIncompleteStreamError { return .init(category: .incompleteStream, stage: stage) }
+        if let sseError = error as? GeminiSSEError {
+            return .init(category: sseError == .incompleteEventAtEOF ? .incompleteStream : .invalidResponse, stage: stage)
+        }
         if let exhausted = error as? CloudNetworkRecoveryExhausted {
             return exhausted.recovery.lastFailure ?? .init(category: .offline, stage: stage)
         }

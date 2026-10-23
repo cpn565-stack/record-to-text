@@ -1,0 +1,540 @@
+{
+  "verifiedDate": "2026-10-17",
+  "scope": "Research only; no application code, settings, job queue or installed app changes. Synthetic audio only.",
+  "audio": {
+    "durationSeconds": 1200,
+    "codec": "MP3",
+    "sampleRate": 16000,
+    "channels": 1,
+    "bitrate": 24000,
+    "bytes": 3600513,
+    "sha256": "a1c20963890bca825a3e4ca048e979c317dd80cf8856a0897a163504308709ac"
+  },
+  "requestCount": 8,
+  "findings": [
+    "Both models accept short audio using the installed application transport shape and system proxy.",
+    "Flash native HTTP/2 proxied nonstreaming failed with -1005 about 63 seconds after upload; a second proxied unary call returned 429.",
+    "Both Flash and Argon completed the identical 20-minute synthetic audio through streaming responses over HTTP/2 with the system proxy.",
+    "Python HTTP/1.1 unary succeeded both without an HTTP proxy and with the explicit localhost HTTP proxy. The proxied run had a shorter inference wait, so protocol versus proxy idle timeout remains unresolved.",
+    "The Swift bypass attempt was not a valid direct control; metrics reported a proxy connection.",
+    "Each condition has one or two observations and model latency varies. STOP validates API completion, not transcription accuracy."
+  ],
+  "recommendation": "Prioritize a bounded Vertex streaming-response implementation with terminal STOP validation, partial-response rejection on disconnect, final usage handling, existing cancellation/deadlines and 429 cooldown. Keep AI Studio as the currently successful user workflow while this is implemented and verified.",
+  "sources": [
+    "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/4-argon",
+    "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/3-8-flash",
+    "https://docs.cloud.google.com/gemini-enterprise-agent-platform/reference/rest/v1/projects.locations.publishers.models/streamGenerateContent",
+    "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/deploy/error-code-429",
+    "https://developer.apple.com/library/archive/qa/qa1941/_index.html"
+  ],
+  "probes": [
+    {
+      "file": "long-argon-system-stream.jsonl",
+      "events": [
+        {
+          "audioFile": "long24.mp3",
+          "event": "start",
+          "mode": "stream",
+          "model": "gemini-4-argon",
+          "requestBytes": 5034365,
+          "route": "system",
+          "thinking": "high"
+        },
+        {
+          "bytes": 5034365,
+          "event": "upload_complete",
+          "seconds": 21.033
+        },
+        {
+          "event": "headers",
+          "seconds": 35.615,
+          "status": 200
+        },
+        {
+          "event": "first_data",
+          "seconds": 35.616
+        },
+        {
+          "bytes": 70059,
+          "containsSyntheticMarker": false,
+          "event": "complete",
+          "finishReasons": [
+            "STOP"
+          ],
+          "metrics": [
+            {
+              "protocol": "h2",
+              "proxy": true,
+              "requestBytes": 5037218,
+              "responseBytes": 71742,
+              "reused": false,
+              "waitAfterUpload": 14.565840005874634
+            }
+          ],
+          "modelVersion": "gemini-4-argon",
+          "seconds": 87.403,
+          "status": 200,
+          "textCharacters": 19302,
+          "usage": {
+            "candidatesTokenCount": 4423,
+            "candidatesTokensDetails": [
+              {
+                "modality": "TEXT",
+                "tokenCount": 4423
+              }
+            ],
+            "promptTokenCount": 31738,
+            "promptTokensDetails": [
+              {
+                "modality": "TEXT",
+                "tokenCount": 538
+              },
+              {
+                "modality": "AUDIO",
+                "tokenCount": 31200
+              }
+            ],
+            "thoughtsTokenCount": 766,
+            "totalTokenCount": 36927,
+            "trafficType": "ON_DEMAND"
+          }
+        }
+      ],
+      "caveat": null
+    },
+    {
+      "file": "long-flash-direct-unary.jsonl",
+      "events": [
+        {
+          "audioFile": "long24.mp3",
+          "event": "start",
+          "mode": "unary",
+          "model": "gemini-3.8-flash",
+          "requestBytes": 5034365,
+          "route": "direct",
+          "thinking": "high"
+        },
+        {
+          "bytes": 5034365,
+          "event": "upload_complete",
+          "seconds": 18.413
+        },
+        {
+          "event": "headers",
+          "seconds": 80.236,
+          "status": 429
+        },
+        {
+          "event": "first_data",
+          "seconds": 80.236
+        },
+        {
+          "apiError": "RESOURCE_EXHAUSTED",
+          "apiMessage": "Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.",
+          "bytes": 238,
+          "containsSyntheticMarker": false,
+          "event": "complete",
+          "finishReasons": [],
+          "metrics": [
+            {
+              "protocol": "h2",
+              "proxy": true,
+              "requestBytes": 5037218,
+              "responseBytes": 431,
+              "reused": false,
+              "waitAfterUpload": 61.81345796585083
+            }
+          ],
+          "seconds": 80.237,
+          "status": 429,
+          "textCharacters": 0
+        }
+      ],
+      "caveat": "The attempted Swift direct configuration remained proxied per metrics. Do not treat this as a proxy-bypass test."
+    },
+    {
+      "file": "long-flash-http1-direct.jsonl",
+      "events": [
+        {
+          "seconds": 0.01,
+          "event": "start",
+          "model": "gemini-3.8-flash",
+          "transport": "http.client no HTTP proxy",
+          "requestBytes": 4801387,
+          "audio": "long24.mp3"
+        },
+        {
+          "seconds": 2.855,
+          "event": "upload_complete",
+          "peerIsLoopback": false
+        },
+        {
+          "seconds": 71.239,
+          "event": "headers",
+          "status": 200,
+          "version": 11
+        },
+        {
+          "seconds": 71.275,
+          "event": "complete",
+          "status": 200,
+          "bytes": 54890,
+          "finishReasons": [
+            "STOP"
+          ],
+          "textCharacters": 19002,
+          "usage": {
+            "promptTokenCount": 30028,
+            "candidatesTokenCount": 4221,
+            "totalTokenCount": 42371,
+            "trafficType": "ON_DEMAND",
+            "promptTokensDetails": [
+              {
+                "modality": "TEXT",
+                "tokenCount": 28
+              },
+              {
+                "modality": "AUDIO",
+                "tokenCount": 30000
+              }
+            ],
+            "candidatesTokensDetails": [
+              {
+                "modality": "TEXT",
+                "tokenCount": 4221
+              }
+            ],
+            "thoughtsTokenCount": 8122
+          },
+          "apiError": null,
+          "apiMessage": null
+        }
+      ],
+      "caveat": null
+    },
+    {
+      "file": "long-flash-http1-proxy.jsonl",
+      "events": [
+        {
+          "seconds": 0.013,
+          "event": "start",
+          "model": "gemini-3.8-flash",
+          "transport": "http.client explicit localhost HTTP proxy",
+          "requestBytes": 4801387,
+          "audio": "long24.mp3"
+        },
+        {
+          "seconds": 12.567,
+          "event": "upload_complete",
+          "peerIsLoopback": true
+        },
+        {
+          "seconds": 56.857,
+          "event": "headers",
+          "status": 200,
+          "version": 11
+        },
+        {
+          "seconds": 57.023,
+          "event": "complete",
+          "status": 200,
+          "bytes": 32601,
+          "finishReasons": [
+            "STOP"
+          ],
+          "textCharacters": 19002,
+          "usage": {
+            "promptTokenCount": 30028,
+            "candidatesTokenCount": 4221,
+            "totalTokenCount": 36662,
+            "trafficType": "ON_DEMAND",
+            "promptTokensDetails": [
+              {
+                "modality": "AUDIO",
+                "tokenCount": 30000
+              },
+              {
+                "modality": "TEXT",
+                "tokenCount": 28
+              }
+            ],
+            "candidatesTokensDetails": [
+              {
+                "modality": "TEXT",
+                "tokenCount": 4221
+              }
+            ],
+            "thoughtsTokenCount": 2413
+          },
+          "apiError": null,
+          "apiMessage": null
+        }
+      ],
+      "caveat": null
+    },
+    {
+      "file": "long-flash-system-stream.jsonl",
+      "events": [
+        {
+          "audioFile": "long24.mp3",
+          "event": "start",
+          "mode": "stream",
+          "model": "gemini-3.8-flash",
+          "requestBytes": 5034365,
+          "route": "system",
+          "thinking": "high"
+        },
+        {
+          "bytes": 5034365,
+          "event": "upload_complete",
+          "seconds": 19.389
+        },
+        {
+          "event": "headers",
+          "seconds": 51.739,
+          "status": 200
+        },
+        {
+          "event": "first_data",
+          "seconds": 51.74
+        },
+        {
+          "bytes": 92423,
+          "containsSyntheticMarker": false,
+          "event": "complete",
+          "finishReasons": [
+            "STOP"
+          ],
+          "metrics": [
+            {
+              "protocol": "h2",
+              "proxy": true,
+              "requestBytes": 5037245,
+              "responseBytes": 93998,
+              "reused": false,
+              "waitAfterUpload": 32.34696102142334
+            }
+          ],
+          "modelVersion": "gemini-3.8-flash",
+          "seconds": 76.906,
+          "status": 200,
+          "textCharacters": 18818,
+          "usage": {
+            "candidatesTokenCount": 4113,
+            "candidatesTokensDetails": [
+              {
+                "modality": "TEXT",
+                "tokenCount": 4113
+              }
+            ],
+            "promptTokenCount": 30028,
+            "promptTokensDetails": [
+              {
+                "modality": "TEXT",
+                "tokenCount": 28
+              },
+              {
+                "modality": "AUDIO",
+                "tokenCount": 30000
+              }
+            ],
+            "thoughtsTokenCount": 5269,
+            "totalTokenCount": 39410,
+            "trafficType": "ON_DEMAND"
+          }
+        }
+      ],
+      "caveat": null
+    },
+    {
+      "file": "long-flash-system-unary.jsonl",
+      "events": [
+        {
+          "audioFile": "long24.mp3",
+          "event": "start",
+          "mode": "unary",
+          "model": "gemini-3.8-flash",
+          "requestBytes": 5034365,
+          "route": "system",
+          "thinking": "high"
+        },
+        {
+          "bytes": 5034365,
+          "event": "upload_complete",
+          "seconds": 18.182
+        },
+        {
+          "bytes": 0,
+          "containsSyntheticMarker": false,
+          "errorCode": -1005,
+          "errorDomain": "NSURLErrorDomain",
+          "event": "complete",
+          "finishReasons": [],
+          "metrics": [
+            {
+              "protocol": "h2",
+              "proxy": true,
+              "requestBytes": 5037218,
+              "responseBytes": 0,
+              "reused": false
+            }
+          ],
+          "seconds": 81.108,
+          "status": 0,
+          "textCharacters": 0,
+          "underlyingCode": -1005,
+          "underlyingDomain": "kCFErrorDomainCFNetwork"
+        }
+      ],
+      "caveat": null
+    },
+    {
+      "file": "short-argon.jsonl",
+      "events": [
+        {
+          "audioFile": "short.mp3",
+          "event": "start",
+          "mode": "unary",
+          "model": "gemini-4-argon",
+          "requestBytes": 111969,
+          "route": "system",
+          "thinking": "high"
+        },
+        {
+          "bytes": 111969,
+          "event": "upload_complete",
+          "seconds": 0.773
+        },
+        {
+          "event": "headers",
+          "seconds": 5.153,
+          "status": 200
+        },
+        {
+          "event": "first_data",
+          "seconds": 5.154
+        },
+        {
+          "bytes": 3090,
+          "containsSyntheticMarker": true,
+          "event": "complete",
+          "finishReasons": [
+            "STOP"
+          ],
+          "metrics": [
+            {
+              "protocol": "h2",
+              "proxy": true,
+              "requestBytes": 112032,
+              "responseBytes": 1802,
+              "reused": false,
+              "waitAfterUpload": 4.378834009170532
+            }
+          ],
+          "modelVersion": "gemini-4-argon",
+          "seconds": 5.156,
+          "status": 200,
+          "textCharacters": 184,
+          "usage": {
+            "candidatesTokenCount": 38,
+            "candidatesTokensDetails": [
+              {
+                "modality": "TEXT",
+                "tokenCount": 38
+              }
+            ],
+            "promptTokenCount": 333,
+            "promptTokensDetails": [
+              {
+                "modality": "TEXT",
+                "tokenCount": 64
+              },
+              {
+                "modality": "AUDIO",
+                "tokenCount": 269
+              }
+            ],
+            "thoughtsTokenCount": 141,
+            "totalTokenCount": 512,
+            "trafficType": "ON_DEMAND"
+          }
+        }
+      ],
+      "caveat": null
+    },
+    {
+      "file": "short-flash.jsonl",
+      "events": [
+        {
+          "audioFile": "short.mp3",
+          "event": "start",
+          "mode": "unary",
+          "model": "gemini-3.8-flash",
+          "requestBytes": 111969,
+          "route": "system",
+          "thinking": "high"
+        },
+        {
+          "bytes": 111969,
+          "event": "upload_complete",
+          "seconds": 0.694
+        },
+        {
+          "event": "headers",
+          "seconds": 3.832,
+          "status": 200
+        },
+        {
+          "event": "first_data",
+          "seconds": 3.832
+        },
+        {
+          "bytes": 3180,
+          "containsSyntheticMarker": true,
+          "event": "complete",
+          "finishReasons": [
+            "STOP"
+          ],
+          "metrics": [
+            {
+              "protocol": "h2",
+              "proxy": true,
+              "requestBytes": 112032,
+              "responseBytes": 1828,
+              "reused": false,
+              "waitAfterUpload": 3.1308319568634033
+            }
+          ],
+          "modelVersion": "gemini-3.8-flash",
+          "seconds": 3.834,
+          "status": 200,
+          "textCharacters": 184,
+          "usage": {
+            "candidatesTokenCount": 34,
+            "candidatesTokensDetails": [
+              {
+                "modality": "TEXT",
+                "tokenCount": 34
+              }
+            ],
+            "promptTokenCount": 281,
+            "promptTokensDetails": [
+              {
+                "modality": "TEXT",
+                "tokenCount": 28
+              },
+              {
+                "modality": "AUDIO",
+                "tokenCount": 253
+              }
+            ],
+            "thoughtsTokenCount": 212,
+            "totalTokenCount": 527,
+            "trafficType": "ON_DEMAND"
+          }
+        }
+      ],
+      "caveat": null
+    }
+  ]
+}

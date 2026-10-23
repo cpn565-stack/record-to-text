@@ -138,7 +138,7 @@ final class LocalV2IntegrationTests: XCTestCase {
         let helper = try writeFakeHelper(modelCache: paths.models)
 
         let snapshotDirectory = LocalModelManifestStore.snapshotDirectory(
-            cacheDirectory: paths.models,
+            cacheDirectory: ModelCache.hubRoot(modelsDirectory: paths.models),
             modelID: modelID,
             revision: revision
         )

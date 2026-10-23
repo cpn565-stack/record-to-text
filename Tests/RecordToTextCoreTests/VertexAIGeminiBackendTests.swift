@@ -77,10 +77,11 @@ final class VertexAIGeminiBackendTests: XCTestCase {
         var requests = 0
         MockURLProtocol.requestHandler = { request in
             requests += 1
-            XCTAssertTrue(request.url!.absoluteString.contains("gemini-3.8-flash:generateContent"))
+            XCTAssertEqual(try contextRequestText(contextRequestBody(request)).components(separatedBy: "empty-retry-context").count, 2)
+            XCTAssertTrue(request.url!.absoluteString.contains("gemini-3.8-flash:streamGenerateContent?alt=sse"))
             let json = requests == 1
-                ? #"{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"thoughtsTokenCount":3308}}"#
-                : #"{"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":"完整逐字稿"}]}}]}"#
+                ? "data: {\"candidates\":[{\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"thoughtsTokenCount\":3308}}\n\n"
+                : "data: {\"candidates\":[{\"finishReason\":\"STOP\",\"content\":{\"parts\":[{\"text\":\"完整逐字稿\"}]}}]}\n\n"
             return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(json.utf8))
         }
         let backend = VertexAIGeminiBackend(
@@ -88,9 +89,9 @@ final class VertexAIGeminiBackendTests: XCTestCase {
             configuration: .init(projectID: "mock-project", location: "global", modelID: "gemini-3.8-flash"))
         let collector = CloudDiagnosticCollector()
         let result = try await CloudDiagnosticContext.$current.withValue(collector) {
-            try await backend.transcribe(audioData: Data("audio".utf8))
+            try await backend.transcribeDetailed(audioData: Data("audio".utf8), recordingContext: "empty-retry-context")
         }
-        XCTAssertEqual(result, "完整逐字稿")
+        XCTAssertEqual(result.text, "完整逐字稿")
         XCTAssertEqual(requests, 2)
         let diagnostic = collector.snapshot(start: 0, end: 10, outcome: .completed, preparation: nil, cloud: nil)
         XCTAssertEqual(diagnostic.retryReasons, [.emptyResponse])
@@ -102,8 +103,8 @@ final class VertexAIGeminiBackendTests: XCTestCase {
         var requests = 0
         MockURLProtocol.requestHandler = { request in
             requests += 1
-            XCTAssertTrue(request.url!.absoluteString.contains("gemini-3.8-flash:generateContent"))
-            let json = #"{"candidates":[{"finishReason":"STOP","content":{"parts":[{"thought":true,"text":"thinking"}]}}]}"#
+            XCTAssertTrue(request.url!.absoluteString.contains("gemini-3.8-flash:streamGenerateContent?alt=sse"))
+            let json = "data: {\"candidates\":[{\"finishReason\":\"STOP\",\"content\":{\"parts\":[{\"thought\":true,\"text\":\"thinking\"}]}}]}\n\n"
             return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(json.utf8))
         }
         let backend = VertexAIGeminiBackend(
@@ -117,13 +118,14 @@ final class VertexAIGeminiBackendTests: XCTestCase {
     }
 
     func testSafetyAndUnknownFinishReasonsNeverRetryEmptyContent() async throws {
-        for reason in ["SAFETY", "OTHER", "MISSING_FINISH_REASON"] {
+        for reason in ["SAFETY", "OTHER", "CONTINUATION", "UNKNOWN_REASON"] {
             var requests = 0
             MockURLProtocol.requestHandler = { request in
                 requests += 1
-                let candidate: [String: Any] = reason == "MISSING_FINISH_REASON" ? [:] : ["finishReason": reason]
-                let data = try JSONSerialization.data(withJSONObject: ["candidates": [candidate]])
-                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, data)
+                let candidate: [String: Any] = ["finishReason": reason]
+                let rawJSON = try JSONSerialization.data(withJSONObject: ["candidates": [candidate]])
+                let sseData = Data("data: \(String(decoding: rawJSON, as: UTF8.self))\n\n".utf8)
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, sseData)
             }
             let backend = VertexAIGeminiBackend(
                 authService: GCloudAuthService(customGCloudPath: fakeGCloudURL.path), urlSession: mockSession,
@@ -160,7 +162,7 @@ final class VertexAIGeminiBackendTests: XCTestCase {
         var requests = 0
         MockURLProtocol.requestHandler = { request in
             requests += 1
-            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(#"{"candidates":[{"finishReason":"STOP"}]}"#.utf8))
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data("data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n".utf8))
         }
         let auth = GCloudAuthService(customGCloudPath: fakeGCloudURL.path)
         _ = try await auth.getAccessToken()
@@ -190,7 +192,7 @@ final class VertexAIGeminiBackendTests: XCTestCase {
     func testRootBudgetStopsGCSUploadBeforeGeneration() async throws {
         var generationRequests = 0
         MockURLProtocol.requestHandler = { request in
-            if request.url!.absoluteString.contains("generateContent") { generationRequests += 1 }
+            if request.url!.absoluteString.contains("streamGenerateContent") { generationRequests += 1 }
             if request.httpMethod == "POST" { Thread.sleep(forTimeInterval: 0.4) }
             return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data("{}".utf8))
         }
@@ -214,7 +216,7 @@ final class VertexAIGeminiBackendTests: XCTestCase {
         MockURLProtocol.requestHandler = { request in
             requests += 1
             if requests == 1 { throw URLError(.timedOut) }
-            let data = Data(#"{"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":"完整逐字稿"}]}}]}"#.utf8)
+            let data = Data("data: {\"candidates\":[{\"finishReason\":\"STOP\",\"content\":{\"parts\":[{\"text\":\"完整逐字稿\"}]}}]}\n\n".utf8)
             return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, data)
         }
         let backend = VertexAIGeminiBackend(
@@ -252,39 +254,24 @@ final class VertexAIGeminiBackendTests: XCTestCase {
         let expectedLocation = "asia-east1"
         let expectedModel = "gemini-2.0-flash-001"
 
-        let mockResponseJSON = """
-        {
-            "candidates": [
-                {
-                    "content": {
-                        "parts": [
-                            {
-                                "text": "## 📌 會議/課堂摘要\\n- 重點一\\n\\n## 📝 完整整理逐字稿\\n今天會議主要討論系統架構整合。"
-                            }
-                        ],
-                        "role": "model"
-                    },
-                    "finishReason": "STOP"
-                }
-            ]
-        }
-        """
+        let mockResponseSSE = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"## 📌 會議/課堂摘要\\\\n- 重點一\\\\n\\\\n## 📝 完整整理逐字稿\\\\n今天會議主要討論系統架構整合。\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}]}\n\n"
 
         MockURLProtocol.requestHandler = { request in
             XCTAssertEqual(
                 request.url?.absoluteString,
-                "https://\(expectedLocation)-aiplatform.googleapis.com/v1/projects/\(expectedProject)/locations/\(expectedLocation)/publishers/google/models/\(expectedModel):generateContent"
+                "https://\(expectedLocation)-aiplatform.googleapis.com/v1/projects/\(expectedProject)/locations/\(expectedLocation)/publishers/google/models/\(expectedModel):streamGenerateContent?alt=sse"
             )
             XCTAssertEqual(request.httpMethod, "POST")
             XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer mock-access-token")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "text/event-stream")
 
             let response = HTTPURLResponse(
                 url: request.url!,
                 statusCode: 200,
                 httpVersion: nil,
-                headerFields: ["Content-Type": "application/json"]
+                headerFields: ["Content-Type": "text/event-stream"]
             )!
-            return (response, mockResponseJSON.data(using: .utf8)!)
+            return (response, mockResponseSSE.data(using: .utf8)!)
         }
 
         let authService = GCloudAuthService(customGCloudPath: fakeGCloudURL.path)
@@ -319,23 +306,7 @@ final class VertexAIGeminiBackendTests: XCTestCase {
         let expectedModel = "gemini-3.7-flash"
 
         var callCount = 0
-        let mockResponseJSON = """
-        {
-            "candidates": [
-                {
-                    "content": {
-                        "parts": [
-                            {
-                                "text": "這是重試後成功轉錄的逐字稿。"
-                            }
-                        ],
-                        "role": "model"
-                    },
-                    "finishReason": "STOP"
-                }
-            ]
-        }
-        """
+        let mockResponseSSE = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"這是重試後成功轉錄的逐字稿。\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}]}\n\n"
 
         MockURLProtocol.requestHandler = { request in
             callCount += 1
@@ -348,9 +319,9 @@ final class VertexAIGeminiBackendTests: XCTestCase {
                 url: request.url!,
                 statusCode: 200,
                 httpVersion: nil,
-                headerFields: ["Content-Type": "application/json"]
+                headerFields: ["Content-Type": "text/event-stream"]
             )!
-            return (response, mockResponseJSON.data(using: .utf8)!)
+            return (response, mockResponseSSE.data(using: .utf8)!)
         }
 
         let config = VertexAIGeminiBackend.Configuration(

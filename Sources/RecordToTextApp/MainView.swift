@@ -994,10 +994,17 @@ private struct JobRowView: View {
                     Text("前次請求的結果未知；重送可能產生重複費用。")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
-                Text("剩餘等待額度：\(Int(recovery.remainingWaitSeconds)) 秒").font(.caption2).foregroundStyle(.secondary)
                 if let retryAt = recovery.nextRetryAt {
-                    Text("下次重試不早於 \(retryAt.formatted(date: .omitted, time: .standard))")
-                        .font(.caption2).foregroundStyle(.secondary)
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        Text("約 \(max(0, Int(ceil(retryAt.timeIntervalSince(context.date))))) 秒後重試")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                if recovery.state == .waiting, job.id == viewModel.activeJobID {
+                    Button("立刻重試") { viewModel.retryNetworkImmediately(job.id) }
+                        .controlSize(.small)
+                        .disabled(!viewModel.canRetryNetworkImmediately(job.id))
+                        .help("跳過目前的網路等待倒數，重新嘗試目前片段")
                 }
             }
         } else if job.snapshot.backendType != .localQwen,

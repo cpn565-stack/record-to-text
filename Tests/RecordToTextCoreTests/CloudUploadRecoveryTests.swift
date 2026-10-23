@@ -93,8 +93,9 @@ final class CloudUploadRecoveryTests: XCTestCase {
         XCTAssertEqual(text, "完整逐字稿")
         XCTAssertEqual(initializes, 3)
         XCTAssertEqual(generates, 1)
-        XCTAssertGreaterThanOrEqual(clock.seconds, 153)
-        XCTAssertLessThan(clock.seconds, 160)
+        // Two fixed 20-second retries, a 120-second outage, stability and polling.
+        XCTAssertGreaterThanOrEqual(clock.seconds, 163)
+        XCTAssertLessThan(clock.seconds, 170)
     }
 
     func testLostFilesUploadResponseUsesNamedMetadataWithoutUploadingAgain() async throws {
@@ -197,10 +198,10 @@ final class CloudUploadRecoveryTests: XCTestCase {
             var name = ""
             UploadRecoveryProtocol.handler = { request in
                 if request.httpMethod == "DELETE" { return (204, [:], Data()) }
-                if request.url!.path.contains(":generateContent") {
+                if request.url!.path.contains(":streamGenerateContent") {
                     generates += 1
                     XCTAssertGreaterThan(checks, 0)
-                    return (200, [:], self.success)
+                    return (200, [:], Data("data: \(String(decoding: self.success, as: UTF8.self))\n\n".utf8))
                 }
                 if request.url!.path.hasPrefix("/upload/") {
                     uploads += 1

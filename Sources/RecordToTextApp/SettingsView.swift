@@ -364,46 +364,9 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                     }
 
-                    Picker(
-                        "模型選擇",
-                        selection: Binding(
-                            get: {
-                                if GeminiModelDescriptor.presetModels.contains(where: { $0.id == viewModel.settings.googleAIStudioModelID }) {
-                                    return viewModel.settings.googleAIStudioModelID
-                                }
-                                return "custom"
-                            },
-                            set: { newValue in
-                                if newValue != "custom" {
-                                    viewModel.setSetting(\.googleAIStudioModelID, to: newValue)
-                                }
-                            }
-                        )
-                    ) {
-                        ForEach(GeminiModelDescriptor.presetModels) { preset in
-                            Text(preset.displayName).tag(preset.id)
-                        }
-                        Text("自訂模型 ID…").tag("custom")
-                    }
+                    GeminiModelPicker(modelID: setting(\.googleAIStudioModelID))
 
-                    if !GeminiModelDescriptor.presetModels.contains(where: { $0.id == viewModel.settings.googleAIStudioModelID }) {
-                        TextField(
-                            "自訂模型 ID (Model ID)",
-                            text: Binding(
-                                get: { viewModel.settings.googleAIStudioModelID },
-                                set: { viewModel.setSetting(\.googleAIStudioModelID, to: $0.isEmpty ? "gemini-3.8-flash" : $0) }
-                            )
-                        )
-                        .textFieldStyle(.roundedBorder)
-                    }
-
-                    if let selectedPreset = GeminiModelDescriptor.presetModels.first(where: { $0.id == viewModel.settings.googleAIStudioModelID }) {
-                        Text(selectedPreset.note)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Text("Google AI Studio API 採用標準 Gemini API Key，免裝 gcloud、免設定 GCP 專案。長錄音會自動分段上傳並依順序合併，輸出台灣繁體中文。其餘設定會自動儲存；API Key 需按「儲存到 Keychain」。")
+                    Text("Google AI Studio API 採用標準 Gemini API Key，免裝 gcloud、免設定 GCP 專案。長錄音會自動分段上傳並依順序合併，輸出台灣繁體中文。預設模型與其餘設定會自動儲存；自訂模型 ID 需按「套用」，API Key 需按「儲存到 Keychain」。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -438,44 +401,7 @@ struct SettingsView: View {
                     )
                     .textFieldStyle(.roundedBorder)
 
-                    Picker(
-                        "模型選擇",
-                        selection: Binding(
-                            get: {
-                                if GeminiModelDescriptor.presetModels.contains(where: { $0.id == viewModel.settings.vertexAIModelID }) {
-                                    return viewModel.settings.vertexAIModelID
-                                }
-                                return "custom"
-                            },
-                            set: { newValue in
-                                if newValue != "custom" {
-                                    viewModel.setSetting(\.vertexAIModelID, to: newValue)
-                                }
-                            }
-                        )
-                    ) {
-                        ForEach(GeminiModelDescriptor.presetModels) { preset in
-                            Text(preset.displayName).tag(preset.id)
-                        }
-                        Text("自訂模型 ID…").tag("custom")
-                    }
-
-                    if !GeminiModelDescriptor.presetModels.contains(where: { $0.id == viewModel.settings.vertexAIModelID }) {
-                        TextField(
-                            "自訂模型 ID (Model ID)",
-                            text: Binding(
-                                get: { viewModel.settings.vertexAIModelID },
-                                set: { viewModel.setSetting(\.vertexAIModelID, to: $0.isEmpty ? "gemini-3.8-flash" : $0) }
-                            )
-                        )
-                        .textFieldStyle(.roundedBorder)
-                    }
-
-                    if let selectedPreset = GeminiModelDescriptor.presetModels.first(where: { $0.id == viewModel.settings.vertexAIModelID }) {
-                        Text(selectedPreset.note)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                    GeminiModelPicker(modelID: setting(\.vertexAIModelID))
 
                     Toggle(
                         "附加內容摘要（輸出不再是純逐字稿）",
@@ -514,7 +440,7 @@ struct SettingsView: View {
                             Text(level.displayName).tag(level)
                         }
                     }
-                    Text("此設定會實際送給 Gemini 3.x；程度越高通常等待越久、消耗 token 越多，不保證逐字稿一定更準。每個工作加入佇列時會鎖定當下設定。")
+                    Text("此設定會實際送給 Gemini 3.x 與 Gemini 4 Argon；程度越高通常等待越久、消耗 token 越多，不保證逐字稿一定更準。每個工作加入佇列時會鎖定當下設定。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
@@ -539,7 +465,7 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
 
                     LabeledContent("雲端單段輸出上限") {
-                        Text("16,384 tokens")
+                        Text("\(GeminiGenerationConfig.transcriptionOutputTokens(modelID: viewModel.settings.backendType == .vertexAI ? viewModel.settings.vertexAIModelID : viewModel.settings.googleAIStudioModelID).formatted()) tokens")
                             .foregroundStyle(.secondary)
                     }
                     Text("Cloud 最終稿會在本機經 OpenCC s2twp 統一成台灣繁體，因此環境檢查會要求 OpenCC。")

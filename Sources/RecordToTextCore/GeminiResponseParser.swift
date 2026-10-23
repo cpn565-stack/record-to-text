@@ -41,9 +41,27 @@ enum GeminiResponseParser {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw Failure.invalidJSONResponse
         }
+        return try transcript(
+            fromJSON: json,
+            rawByteCount: data.count,
+            errors: errors,
+            httpStatusCode: httpStatusCode,
+            collapseBlankLines: collapseBlankLines,
+            logger: logger
+        )
+    }
+
+    static func transcript<Failure: GeminiResponseError>(
+        fromJSON json: [String: Any],
+        rawByteCount: Int,
+        errors: Failure.Type,
+        httpStatusCode: Int,
+        collapseBlankLines: Bool = false,
+        logger: ((_ level: String, _ message: String) -> Void)?
+    ) throws -> String {
         func warn(_ reason: String) {
             logger?("warning", GeminiResponseInventory.summary(
-                from: json, reason: reason, rawByteCount: data.count))
+                from: json, reason: reason, rawByteCount: rawByteCount))
         }
         if let diagnostics = GeminiPromptFeedbackParser.diagnosticsIfBlocked(
             from: json, httpStatusCode: httpStatusCode
@@ -67,6 +85,10 @@ enum GeminiResponseParser {
             throw Failure.prohibitedContent(finishMessage ?? reason)
         }
         let truncated = GeminiTranscriptFinishReason.isTruncated(reason)
+        guard truncated || GeminiTranscriptFinishReason.allowsUsableText(reason) else {
+            warn(reason)
+            throw Failure.incompleteResponse(finishReason: reason, message: finishMessage)
+        }
         let parts = (candidate["content"] as? [String: Any])?["parts"] as? [[String: Any]]
         if !truncated, parts == nil {
             warn("missing_candidate_parts")
@@ -83,9 +105,6 @@ enum GeminiResponseParser {
         guard !sanitized.isEmpty else {
             warn("empty_transcript_text")
             throw Failure.emptyTranscript(finishReason: reason)
-        }
-        guard GeminiTranscriptFinishReason.allowsUsableText(reason) else {
-            throw Failure.incompleteResponse(finishReason: reason, message: finishMessage)
         }
         return sanitized
     }

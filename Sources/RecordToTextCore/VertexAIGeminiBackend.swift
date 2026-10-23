@@ -105,6 +105,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
     private var authService: GCloudAuthService
     private let urlSession: URLSession
     private let networkEnvironment: CloudNetworkEnvironment
+    private let streamingLimits: GeminiStreamingLimits
     private let lock = NSLock()
     private var config: Configuration
 
@@ -115,12 +116,14 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         networkEnvironment: CloudNetworkEnvironment = .init(),
         authService: GCloudAuthService = GCloudAuthService(),
         urlSession: URLSession = GeminiTransportHelper.makeEphemeralRetrySession(),
-        configuration: Configuration = .default
+        configuration: Configuration = .default,
+        streamingLimits: GeminiStreamingLimits = .default
     ) {
         self.authService = authService
         self.urlSession = urlSession
         self.networkEnvironment = networkEnvironment
         self.config = configuration
+        self.streamingLimits = streamingLimits
     }
 
     public func updateConfiguration(_ newConfig: Configuration) {
@@ -155,7 +158,9 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         logger: ((_ level: String, _ message: String) -> Void)? = nil
     ) async throws -> CloudTranscriptionResult {
         if CloudNetworkContext.current == nil || CloudNetworkContext.segmentAttempts == nil {
-            let budget = CloudBudgetContext.current ?? CloudSegmentBudget(now: networkEnvironment.now)
+            let budget = CloudBudgetContext.current ?? CloudSegmentBudget(
+                limit: GeminiGenerationConfig.segmentBudget(modelID: getConfiguration().modelID),
+                now: networkEnvironment.now)
             let context = CloudNetworkContext.current ?? CloudNetworkRecoveryContext(budget: budget, environment: networkEnvironment)
             return try await CloudBudgetContext.$current.withValue(budget) {
                 try await CloudNetworkContext.$current.withValue(context) {
@@ -441,7 +446,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         let host = location == "global"
             ? "aiplatform.googleapis.com"
             : "\(location)-aiplatform.googleapis.com"
-        let endpointString = "https://\(host)/v1/projects/\(projectID)/locations/\(location)/publishers/google/models/\(effectiveModelID):generateContent"
+        let endpointString = "https://\(host)/v1/projects/\(projectID)/locations/\(location)/publishers/google/models/\(effectiveModelID):streamGenerateContent?alt=sse"
         guard let endpointURL = URL(string: endpointString) else {
             throw VertexAIError.invalidEndpointURL(endpointString)
         }
@@ -453,6 +458,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             fallbackReason: fallbackReason,
             resolvedLocation: location,
             endpointURL: endpointURL,
+            responseMode: .geminiSSE,
             accessToken: accessToken,
             authService: authService,
             inputByteCount: inputByteCount,
@@ -532,6 +538,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             fallbackReason: nil,
             resolvedLocation: location,
             endpointURL: endpointURL,
+            responseMode: .unaryJSON,
             accessToken: accessToken,
             authService: authService,
             inputByteCount: trimmedTranscript.utf8.count,
@@ -556,6 +563,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         fallbackReason: String?,
         resolvedLocation: String,
         endpointURL: URL,
+        responseMode: CloudResponseMode,
         accessToken: String,
         authService: GCloudAuthService,
         inputByteCount: Int,
@@ -572,7 +580,8 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         let generationConfig = GeminiGenerationConfig.make(
             maxOutputTokens: maximumOutputTokens,
             modelID: effectiveModelID,
-            thinkingLevel: thinkingLevel
+            thinkingLevel: thinkingLevel,
+            includeThoughts: responseMode == .geminiSSE
         )
         logger?(
             "info",
@@ -619,18 +628,22 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("Bearer \(resolvedAccessToken)", forHTTPHeaderField: "Authorization")
         urlRequest.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
-        urlRequest.timeoutInterval = 300 // 5 分鐘超時
+        if responseMode == .geminiSSE {
+            urlRequest.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        }
+        urlRequest.timeoutInterval = GeminiGenerationConfig.requestTimeout(modelID: effectiveModelID)
 
         let startedAt = Date()
         var (data, httpResponse) = try await sendWithPOSIXRetry(
             request: urlRequest,
             fileURL: tempRequestFile,
+            responseMode: responseMode,
             session: urlSession,
             logger: logger
         )
 
-        // 若遇 401 Token 過期，自動刷新並重試一次
-        if httpResponse.statusCode == 401 {
+        // 若遇 401 Token 過期，自動刷新並重試一次（共用 4 次發送配額，不得額外開通第 5 次）
+        if httpResponse.statusCode == 401, (CloudNetworkContext.generation?.count ?? 0) < 4 {
             CloudDiagnosticContext.current?.retry(.authenticationRefresh)
             authService.invalidateToken()
             do {
@@ -648,7 +661,12 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             // failure into an authentication failure.
             urlRequest.setValue("Bearer \(resolvedAccessToken)", forHTTPHeaderField: "Authorization")
             let retryResult = try await sendWithPOSIXRetry(
-                request: urlRequest, fileURL: tempRequestFile, session: urlSession, logger: logger)
+                request: urlRequest,
+                fileURL: tempRequestFile,
+                responseMode: responseMode,
+                session: urlSession,
+                logger: logger
+            )
             data = retryResult.0
             httpResponse = retryResult.1
         }
@@ -705,15 +723,26 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
     private func sendWithPOSIXRetry(
         request: URLRequest,
         fileURL: URL,
+        responseMode: CloudResponseMode,
         session: URLSession,
         logger: ((_ level: String, _ message: String) -> Void)?
     ) async throws -> (Data, HTTPURLResponse) {
         do {
-            let (data, response) = try await GeminiTransportHelper.budgetedUpload(session: session, request: request, fileURL: fileURL)
+            let (data, response) = try await GeminiTransportHelper.budgetedUpload(
+                session: session,
+                request: request,
+                fileURL: fileURL,
+                stage: .generation,
+                responseMode: responseMode,
+                streamingLimits: streamingLimits
+            )
             guard let http = response as? HTTPURLResponse else { throw VertexAIError.invalidJSONResponse }
             return (data, http)
         } catch {
             if GeminiTransportHelper.isPOSIXMessageTooLarge(error) { throw VertexAIError.transportMessageTooLarge }
+            if let sseError = error as? GeminiSSEError {
+                throw VertexAIError.requestFailed(statusCode: 200, message: sseError.localizedDescription)
+            }
             throw error
         }
     }
@@ -751,8 +780,13 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
 
         let expectedHash = Data(Insecure.MD5.hash(data: audioData)).base64EncodedString()
         let (_, response) = try await GeminiTransportHelper.budgetedUpload(
-            session: urlSession, request: request, fileURL: tempAudioFile,
-            attempts: CloudNetworkContext.segmentAttempts?.quota(for: "preparation:gcsUpload", stage: .upload), confirmUpload: {
+            session: urlSession,
+            request: request,
+            fileURL: tempAudioFile,
+            stage: .upload,
+            responseMode: .rawData,
+            attempts: CloudNetworkContext.segmentAttempts?.quota(for: "preparation:gcsUpload", stage: .upload),
+            confirmUpload: {
                 let (data, response) = try await self.gcsMetadata(bucket: bucket, objectName: objectName, accessToken: accessToken)
                 guard response.statusCode == 200,
                       let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -777,7 +811,12 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         var request = URLRequest(url: url)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = 15
-        let (data, response) = try await GeminiTransportHelper.budgetedData(session: urlSession, request: request, stage: "poll")
+        let (data, response) = try await GeminiTransportHelper.budgetedData(
+            session: urlSession,
+            request: request,
+            stage: "poll",
+            responseMode: .unaryJSON
+        )
         guard let http = response as? HTTPURLResponse else { throw VertexAIError.invalidJSONResponse }
         return (data, http)
     }
@@ -869,6 +908,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
     func parseCandidateText(
         from data: Data,
         httpStatusCode: Int = 200,
+        recordingContextBlock: String = "",
         logger: ((_ level: String, _ message: String) -> Void)? = nil
     ) throws -> String {
         try GeminiResponseParser.transcript(from: data, errors: VertexAIError.self,

@@ -191,7 +191,9 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         logger: ((_ level: String, _ message: String) -> Void)? = nil
     ) async throws -> CloudTranscriptionResult {
         if CloudNetworkContext.current == nil || CloudNetworkContext.segmentAttempts == nil {
-            let budget = CloudBudgetContext.current ?? CloudSegmentBudget(now: networkEnvironment.now)
+            let budget = CloudBudgetContext.current ?? CloudSegmentBudget(
+                limit: GeminiGenerationConfig.segmentBudget(modelID: getConfiguration().modelID),
+                now: networkEnvironment.now)
             let context = CloudNetworkContext.current ?? CloudNetworkRecoveryContext(budget: budget, environment: networkEnvironment)
             return try await CloudBudgetContext.$current.withValue(budget) {
                 try await CloudNetworkContext.$current.withValue(context) {
@@ -504,7 +506,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             "application/json; charset=utf-8",
             forHTTPHeaderField: "Content-Type"
         )
-        urlRequest.timeoutInterval = 300
+        urlRequest.timeoutInterval = GeminiGenerationConfig.requestTimeout(modelID: effectiveModelID)
 
         let startedAt = Date()
         let (data, httpResponse) = try await sendWithPOSIXRetry(
@@ -568,7 +570,13 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         logger: ((_ level: String, _ message: String) -> Void)?
     ) async throws -> (Data, HTTPURLResponse) {
         do {
-            let (data, response) = try await GeminiTransportHelper.budgetedUpload(session: session, request: request, fileURL: fileURL)
+            let (data, response) = try await GeminiTransportHelper.budgetedUpload(
+                session: session,
+                request: request,
+                fileURL: fileURL,
+                stage: .generation,
+                responseMode: .unaryJSON
+            )
             guard let http = response as? HTTPURLResponse else { throw GoogleAIStudioError.invalidJSONResponse }
             return (data, http)
         } catch {
@@ -603,7 +611,11 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         let uploadRequest = try await makeRequest()
         let expectedHash = Data(SHA256.hash(data: audioData)).base64EncodedString()
         let (uploadData, uploadResponse) = try await GeminiTransportHelper.budgetedUpload(
-            session: urlSession, request: uploadRequest, fileURL: tempAudioFile,
+            session: urlSession,
+            request: uploadRequest,
+            fileURL: tempAudioFile,
+            stage: .upload,
+            responseMode: .unaryJSON,
             attempts: CloudNetworkContext.segmentAttempts?.quota(for: "preparation:filesUpload", stage: .upload),
             confirmUpload: {
                 let (data, response) = try await self.remoteFileMetadata(name: requestedName, apiKey: apiKey)
@@ -641,8 +653,13 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         initRequest.httpBody = try JSONSerialization.data(withJSONObject: initMetadata)
         initRequest.timeoutInterval = 30
 
-        let (_, initResponse) = try await GeminiTransportHelper.budgetedData(session: urlSession, request: initRequest,
-            stage: "upload", attempts: CloudNetworkContext.segmentAttempts?.quota(for: "preparation:filesInit", stage: .upload))
+        let (_, initResponse) = try await GeminiTransportHelper.budgetedData(
+            session: urlSession,
+            request: initRequest,
+            stage: "upload",
+            responseMode: .rawData,
+            attempts: CloudNetworkContext.segmentAttempts?.quota(for: "preparation:filesInit", stage: .upload)
+        )
         guard let initHTTP = initResponse as? HTTPURLResponse else {
             throw GoogleAIStudioError.invalidJSONResponse
         }
@@ -679,7 +696,12 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         var request = URLRequest(url: url)
         request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
         request.timeoutInterval = 15
-        let (data, response) = try await GeminiTransportHelper.budgetedData(session: urlSession, request: request, stage: "poll")
+        let (data, response) = try await GeminiTransportHelper.budgetedData(
+            session: urlSession,
+            request: request,
+            stage: "poll",
+            responseMode: .unaryJSON
+        )
         guard let http = response as? HTTPURLResponse else { throw GoogleAIStudioError.invalidJSONResponse }
         return (data, http)
     }
@@ -733,7 +755,12 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                 pollRequest.timeoutInterval = min(15, polling.remaining)
 
                 let (pollData, pollResponse) = try await CloudNetworkContext.$polling.withValue(polling) {
-                    try await GeminiTransportHelper.budgetedData(session: urlSession, request: pollRequest, stage: "poll")
+                    try await GeminiTransportHelper.budgetedData(
+                        session: urlSession,
+                        request: pollRequest,
+                        stage: "poll",
+                        responseMode: .unaryJSON
+                    )
                 }
                 guard let pollHTTP = pollResponse as? HTTPURLResponse else {
                     throw GoogleAIStudioError.invalidJSONResponse
@@ -840,6 +867,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
     func parseCandidateText(
         from data: Data,
         httpStatusCode: Int = 200,
+        recordingContextBlock: String = "",
         logger: ((_ level: String, _ message: String) -> Void)? = nil
     ) throws -> String {
         try GeminiResponseParser.transcript(from: data, errors: GoogleAIStudioError.self,

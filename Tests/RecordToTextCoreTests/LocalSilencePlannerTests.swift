@@ -2002,7 +2002,7 @@ final class LocalSilencePlannerTests: XCTestCase {
                 mlxAudioVersion: "0.4.6"
             ),
             presentation: LocalPresentationOptions(
-                openCCConfiguration: "s2twp.json",
+                openCCConfiguration: "s2tw.json",
                 outputLocatorHint: "/tmp/out.txt",
                 jobUUID: "uuid-1"
             )

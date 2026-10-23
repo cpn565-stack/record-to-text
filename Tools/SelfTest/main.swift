@@ -1196,6 +1196,7 @@ tests.check(
             && system.contains("講者 1：")
             && system.contains("不得猜測身分")
             && system.contains("不同講者回合之間必須保留一個空白行")
+            && system.contains("嚴禁將其轉換為台灣用語")
             && system.contains("[05:00 - 10:00]")
             && user.contains("20:00")
             && user.contains("不要從 00:00 重新計時")
@@ -1659,28 +1660,16 @@ tests.check(
                 return (response, Data("{}".utf8))
             }
 
-            if urlString.contains(":generateContent") {
+            if urlString.contains(":streamGenerateContent?alt=sse") {
                 sawGenerate = true
-                let responseJSON = """
-                {
-                    "candidates": [
-                        {
-                            "content": {
-                                "parts": [{"text": "由 Vertex AI GCS 轉錄成功之逐字稿"}],
-                                "role": "model"
-                            },
-                            "finishReason": "STOP"
-                        }
-                    ]
-                }
-                """
+                let responseSSE = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"由 Vertex AI GCS 轉錄成功之逐字稿\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}]}\n\n"
                 let response = HTTPURLResponse(
                     url: request.url!,
                     statusCode: 200,
                     httpVersion: nil,
-                    headerFields: ["Content-Type": "application/json"]
+                    headerFields: ["Content-Type": "text/event-stream"]
                 )!
-                return (response, Data(responseJSON.utf8))
+                return (response, Data(responseSSE.utf8))
             }
 
             if urlString.contains("storage.googleapis.com/storage/v1/b/test-storage-bucket/o") && request.httpMethod == "DELETE" {
@@ -2077,7 +2066,7 @@ tests.check(
         MockTransportURLProtocol.requestHandler = { request in
             let urlString = request.url?.absoluteString ?? ""
 
-            if urlString.contains(":generateContent") {
+            if urlString.contains(":streamGenerateContent?alt=sse") {
                 generateCalls += 1
                 if generateCalls == 1 {
                     // Transient server overload must be retried, not fatal.
@@ -2087,12 +2076,10 @@ tests.check(
                         Data(busy.utf8)
                     )
                 }
-                let responseJSON = """
-                {"candidates":[{"content":{"parts":[{"text":"Vertex 重試後成功的逐字稿"}],"role":"model"},"finishReason":"STOP"}]}
-                """
+                let responseSSE = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Vertex 重試後成功的逐字稿\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}]}\n\n"
                 return (
-                    HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!,
-                    Data(responseJSON.utf8)
+                    HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "text/event-stream"])!,
+                    Data(responseSSE.utf8)
                 )
             }
 

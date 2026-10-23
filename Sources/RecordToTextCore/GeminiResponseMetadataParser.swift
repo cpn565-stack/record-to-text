@@ -12,6 +12,26 @@ public enum GeminiResponseMetadataParser {
     ) -> CloudTranscriptionMetadata {
         let json = (try? JSONSerialization.jsonObject(with: data))
             as? [String: Any]
+        return makeMetadata(
+            fromJSON: json,
+            requestedModelID: requestedModelID,
+            effectiveModelID: effectiveModelID,
+            retryCount: retryCount,
+            fallbackReason: fallbackReason,
+            thinkingLevel: thinkingLevel,
+            latencySeconds: latencySeconds
+        )
+    }
+
+    public static func makeMetadata(
+        fromJSON json: [String: Any]?,
+        requestedModelID: String,
+        effectiveModelID: String,
+        retryCount: Int,
+        fallbackReason: String?,
+        thinkingLevel: GeminiThinkingLevel,
+        latencySeconds: Double
+    ) -> CloudTranscriptionMetadata {
         let usageObject = json?["usageMetadata"] as? [String: Any]
 
         func integer(_ key: String) -> Int? {

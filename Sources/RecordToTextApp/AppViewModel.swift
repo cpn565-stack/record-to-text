@@ -1235,6 +1235,18 @@ final class AppViewModel: ObservableObject {
         manualDrainRequested = false
     }
 
+    func canRetryNetworkImmediately(_ jobID: UUID) -> Bool {
+        !isTerminating && activeJobID == jobID && !cancellationRequested.contains(jobID)
+            && jobs.first(where: { $0.id == jobID })?.networkRecovery?.state == .waiting
+            && activeEngine?.canRetryNetworkImmediately(jobID: jobID) == true
+    }
+
+    func retryNetworkImmediately(_ jobID: UUID) {
+        guard canRetryNetworkImmediately(jobID),
+              activeEngine?.retryNetworkImmediately(jobID: jobID) == true else { return }
+        appendLog("已跳過重試倒數，準備重新連線。", to: jobID)
+    }
+
     func cancelCurrentJob() {
         if let activeJobID { queueSleep.cancelWork(activeJobID) }
         guard let activeJobID else {

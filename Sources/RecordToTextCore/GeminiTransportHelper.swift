@@ -1,23 +1,81 @@
 import Foundation
 
 public enum GeminiTransportHelper {
-    static func budgetedUpload(session: URLSession, request: URLRequest, fileURL: URL,
-                              attempts: CloudRequestAttempts? = nil,
-                              confirmUpload: (() async throws -> (Data, URLResponse)?)? = nil,
-                              restartUpload: (() async throws -> URLRequest)? = nil) async throws -> (Data, URLResponse) {
-        let stage = request.url?.absoluteString.contains("generateContent") == true ? "generation" : "upload"
-        return try await send(session: session, request: request, fileURL: fileURL, stage: stage,
-                              attempts: attempts, confirmUpload: confirmUpload, restartUpload: restartUpload)
+    static func budgetedUpload(
+        session: URLSession,
+        request: URLRequest,
+        fileURL: URL,
+        stage: CloudDiagnosticStage? = nil,
+        responseMode: CloudResponseMode? = nil,
+        streamingLimits: GeminiStreamingLimits = .default,
+        attempts: CloudRequestAttempts? = nil,
+        confirmUpload: (() async throws -> (Data, URLResponse)?)? = nil,
+        restartUpload: (() async throws -> URLRequest)? = nil
+    ) async throws -> (Data, URLResponse) {
+        let resolvedStage: CloudDiagnosticStage
+        if let stage {
+            resolvedStage = stage
+        } else {
+            resolvedStage = request.url?.absoluteString.lowercased().contains("generatecontent") == true
+                ? .generation : .upload
+        }
+        let resolvedMode: CloudResponseMode
+        if let responseMode {
+            resolvedMode = responseMode
+        } else if resolvedStage == .generation,
+                  request.url?.absoluteString.contains("streamGenerateContent") == true {
+            resolvedMode = .geminiSSE
+        } else if resolvedStage == .upload {
+            resolvedMode = .rawData
+        } else {
+            resolvedMode = .unaryJSON
+        }
+        return try await send(
+            session: session,
+            request: request,
+            fileURL: fileURL,
+            stage: resolvedStage.rawValue,
+            responseMode: resolvedMode,
+            streamingLimits: streamingLimits,
+            attempts: attempts,
+            confirmUpload: confirmUpload,
+            restartUpload: restartUpload
+        )
     }
-    static func budgetedData(session: URLSession, request: URLRequest, stage: String, attempts: CloudRequestAttempts? = nil) async throws -> (Data, URLResponse) {
-        try await send(session: session, request: request, fileURL: nil, stage: stage, attempts: attempts)
+
+    static func budgetedData(
+        session: URLSession,
+        request: URLRequest,
+        stage: String,
+        responseMode: CloudResponseMode = .unaryJSON,
+        streamingLimits: GeminiStreamingLimits = .default,
+        attempts: CloudRequestAttempts? = nil
+    ) async throws -> (Data, URLResponse) {
+        try await send(
+            session: session,
+            request: request,
+            fileURL: nil,
+            stage: stage,
+            responseMode: responseMode,
+            streamingLimits: streamingLimits,
+            attempts: attempts
+        )
     }
-    private static func send(session: URLSession, request: URLRequest, fileURL: URL?, stage: String,
-                             attempts: CloudRequestAttempts? = nil,
-                             confirmUpload: (() async throws -> (Data, URLResponse)?)? = nil,
-                             restartUpload: (() async throws -> URLRequest)? = nil) async throws -> (Data, URLResponse) {
+
+    private static func send(
+        session: URLSession,
+        request: URLRequest,
+        fileURL: URL?,
+        stage: String,
+        responseMode: CloudResponseMode = .unaryJSON,
+        streamingLimits: GeminiStreamingLimits = .default,
+        attempts: CloudRequestAttempts? = nil,
+        confirmUpload: (() async throws -> (Data, URLResponse)?)? = nil,
+        restartUpload: (() async throws -> URLRequest)? = nil
+    ) async throws -> (Data, URLResponse) {
         let context = CloudNetworkContext.current
-        let generation = stage == "generation"
+        let diagnosticStage = CloudDiagnosticStage(rawValue: stage) ?? .unknown
+        let generation = diagnosticStage == .generation
         let quota = attempts ?? (generation ? CloudNetworkContext.generation : nil)
         var previousError: Error?
         var request = request
@@ -38,7 +96,9 @@ public enum GeminiTransportHelper {
                 if let restartUpload { request = try await restartUpload() }
             }
             var bounded = request
-            var maximum = min(300, request.timeoutInterval)
+            // Argon may need up to 20 minutes for a generation. Upload/poll
+            // limits and the root's overall deadline still apply independently.
+            var maximum = min(generation ? 1_200 : 300, request.timeoutInterval)
             if stage == "poll", let polling = CloudNetworkContext.polling {
                 guard polling.remaining > 0 else { throw GoogleAIStudioError.fileProcessingTimedOut }
                 maximum = min(maximum, polling.remaining)
@@ -49,21 +109,52 @@ public enum GeminiTransportHelper {
             let activeSession = request.httpMethod == "GET"
                 ? context?.metadataTransport(using: ownedSession) ?? ownedSession : ownedSession
             do {
-                let result = try await CloudBudgetContext.perform(stage: stage, maximumDuration: .seconds(maximum)) {
-                    try await CancellableCloudRequest().run(session: activeSession, request: finalRequest, fileURL: fileURL, attempts: quota)
+                let result: (Data, URLResponse)
+                do {
+                    result = try await CloudBudgetContext.perform(stage: stage, maximumDuration: .seconds(maximum)) {
+                        try await CancellableCloudRequest().run(
+                            session: activeSession,
+                            request: finalRequest,
+                            fileURL: fileURL,
+                            stage: diagnosticStage,
+                            responseMode: responseMode,
+                            streamingLimits: streamingLimits,
+                            attempts: quota
+                        )
+                    }
+                } catch let streamError as GeminiStreamServerError {
+                    let headers = streamError.httpResponse?.allHeaderFields as? [String: String]
+                    let responseURL = streamError.httpResponse?.url
+                        ?? finalRequest.url
+                        ?? URL(string: "https://aiplatform.googleapis.com")!
+                    guard let synthesizedHTTP = HTTPURLResponse(
+                        url: responseURL,
+                        statusCode: streamError.statusCode,
+                        httpVersion: nil,
+                        headerFields: headers
+                    ) else {
+                        throw streamError
+                    }
+                    CloudDiagnosticContext.current?.updateCurrentAttempt(httpStatus: streamError.statusCode)
+                    result = (streamError.errorData, synthesizedHTTP)
                 }
                 if let http = result.1 as? HTTPURLResponse, http.statusCode >= 400 {
-                    CloudDiagnosticContext.current?.failure(.http(http.statusCode, stage: .init(rawValue: stage) ?? .unknown))
+                    let httpDiag = CloudFailureDiagnostic.http(http.statusCode, stage: diagnosticStage)
+                    CloudDiagnosticContext.current?.updateCurrentAttempt(
+                        httpStatus: http.statusCode,
+                        errorCategory: httpDiag.category
+                    )
+                    CloudDiagnosticContext.current?.failure(httpDiag)
                     if http.statusCode == 429 {
                         // Keep the hint even when the backend maps this response
                         // to its legacy daily-quota error without a delay field.
                         context?.service.noteServerDelay(retryAfterSeconds(response: http, data: result.0),
-                            stage: .init(rawValue: stage) ?? .unknown)
+                            stage: diagnosticStage)
                     }
                     if !generation, http.statusCode == 429, let context {
                         context.requestSucceeded()
                         try await context.service.rateLimited(after: quota?.count ?? attempt,
-                            stage: .init(rawValue: stage) ?? .unknown,
+                            stage: diagnosticStage,
                             serverDelay: retryAfterSeconds(response: http, data: result.0),
                             dailyQuota: isDailyQuotaExceeded(data: result.0, message: ""),
                             canRetry: attempt < 4, resultUnknown: context.snapshot().resultUnknown)
@@ -79,10 +170,12 @@ public enum GeminiTransportHelper {
                 }
                 context?.requestSucceeded()
                 if (result.1 as? HTTPURLResponse)?.statusCode != 429 {
-                    context?.service.resolve(stage: .init(rawValue: stage) ?? .unknown)
+                    context?.service.resolve(stage: diagnosticStage)
                 }
                 return result
             } catch {
+                let classified = CloudFailureDiagnostic.classify(error, stage: diagnosticStage)
+                CloudDiagnosticContext.current?.updateCurrentAttempt(errorCategory: classified.category)
                 if Task.isCancelled || isNetworkCancellation(error) { throw CancellationError() }
                 if let deadline = error as? CloudSegmentDeadlineExceeded {
                     if let context, context.service.isRecovering { throw context.service.exhausted(.rootDeadline) }
@@ -94,7 +187,7 @@ public enum GeminiTransportHelper {
                 let posix = isPOSIXMessageTooLarge(error)
                 guard transient || posix else { throw error }
                 if transient { context.service.resolve() }
-                if transient { context.noteFailure(.classify(error, stage: .init(rawValue: stage) ?? .unknown), generation: generation) }
+                if transient { context.noteFailure(classified, generation: generation) }
                 let sends = quota?.count ?? attempt
                 guard attempt < 4, sends < 4 else {
                     if transient {
@@ -123,7 +216,7 @@ public enum GeminiTransportHelper {
                 previousError = error
             }
         }
-        throw CloudRequestLimitExceeded(stage: .init(rawValue: stage) ?? .unknown)
+        throw CloudRequestLimitExceeded(stage: diagnosticStage)
     }
 
     /// 檢查錯誤是否為 POSIX 40 (EMSGSIZE: Message too long) 或相關底層 CFStream 錯誤
@@ -229,7 +322,7 @@ public enum GeminiTransportHelper {
         }
         config.waitsForConnectivity = true
         config.timeoutIntervalForRequest = 300
-        config.timeoutIntervalForResource = 600
+        config.timeoutIntervalForResource = 1_200
         return URLSession(configuration: config)
     }
 
