@@ -186,6 +186,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         mimeType: String = "audio/mp3",
         terms: [String] = [],
         customPrompt: String = "",
+        recordingContext: String = "",
         timeOffsetSeconds: Double = 0,
         workingDirectory: URL? = nil,
         logger: ((_ level: String, _ message: String) -> Void)? = nil
@@ -198,9 +199,16 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             return try await CloudBudgetContext.$current.withValue(budget) {
                 try await CloudNetworkContext.$current.withValue(context) {
                     try await CloudNetworkContext.$segmentAttempts.withValue(CloudModelAttempts()) {
-                        try await self.transcribeDetailed(audioData: audioData, mimeType: mimeType, terms: terms, customPrompt: customPrompt, timeOffsetSeconds: timeOffsetSeconds, workingDirectory: workingDirectory, logger: logger)
+                        try await self.transcribeDetailed(audioData: audioData, mimeType: mimeType, terms: terms, customPrompt: customPrompt, recordingContext: recordingContext, timeOffsetSeconds: timeOffsetSeconds, workingDirectory: workingDirectory, logger: logger)
                     }
                 }
+            }
+        }
+        let customPrompt = try GeminiTranscriptPrompt.promptByPrependingRecordingContext(
+            customPrompt, context: recordingContext, terms: terms)
+        let logger = logger.map { destination in
+            { (level: String, message: String) in
+                destination(level, CloudRecordingContext.redactedDiagnostic(message, context: recordingContext))
             }
         }
         let currentConfig = getConfiguration()
@@ -232,6 +240,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                     audioByteCount: audioData.count,
                     terms: terms,
                     customPrompt: customPrompt,
+                    recordingContext: recordingContext,
                     timeOffsetSeconds: timeOffsetSeconds,
                     thinkingLevel: currentConfig.thinkingLevel,
                     fallbackPolicy: currentConfig.fallbackPolicy,
@@ -295,6 +304,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         audioByteCount: Int,
         terms: [String],
         customPrompt: String,
+        recordingContext: String,
         timeOffsetSeconds: Double,
         thinkingLevel: GeminiThinkingLevel,
         fallbackPolicy: CloudFallbackPolicy,
@@ -305,21 +315,26 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             preferredModelID: preferredModelID, fallbackPolicy: fallbackPolicy,
             serviceName: "Gemini", logger: logger
         ) { modelID, retryCount, fallbackReason in
-            return try await self.generateTranscript(
-                requestedModelID: preferredModelID,
-                effectiveModelID: modelID,
-                retryCount: retryCount,
-                fallbackReason: fallbackReason,
-                preparedAudio: preparedAudio,
-                apiKey: apiKey,
-                audioByteCount: audioByteCount,
-                terms: terms,
-                customPrompt: customPrompt,
-                timeOffsetSeconds: timeOffsetSeconds,
-                thinkingLevel: thinkingLevel,
-                workingDirectory: workingDirectory,
-                logger: logger
-            )
+            do {
+                return try await self.generateTranscript(
+                    requestedModelID: preferredModelID,
+                    effectiveModelID: modelID,
+                    retryCount: retryCount,
+                    fallbackReason: fallbackReason,
+                    preparedAudio: preparedAudio,
+                    apiKey: apiKey,
+                    audioByteCount: audioByteCount,
+                    terms: terms,
+                    customPrompt: customPrompt,
+                    recordingContext: recordingContext,
+                    timeOffsetSeconds: timeOffsetSeconds,
+                    thinkingLevel: thinkingLevel,
+                    workingDirectory: workingDirectory,
+                    logger: logger
+                )
+            } catch {
+                throw CloudRecordingContext.redactedError(error, context: recordingContext)
+            }
         }
     }
 
@@ -415,6 +430,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         audioByteCount: Int,
         terms: [String],
         customPrompt: String,
+        recordingContext: String,
         timeOffsetSeconds: Double,
         thinkingLevel: GeminiThinkingLevel,
         workingDirectory: URL?,
@@ -441,6 +457,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                 timeOffsetSeconds: timeOffsetSeconds
             ),
             thinkingLevel: thinkingLevel,
+            recordingContext: recordingContext,
             workingDirectory: workingDirectory,
             logger: logger
         )
@@ -458,6 +475,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         systemInstructionText: String,
         userPromptText: String,
         thinkingLevel: GeminiThinkingLevel,
+        recordingContext: String = "",
         workingDirectory: URL?,
         logger: ((_ level: String, _ message: String) -> Void)?
     ) async throws -> CloudTranscriptionResult {
@@ -548,6 +566,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         let text = try parseCandidateText(
             from: data,
             httpStatusCode: httpResponse.statusCode,
+            recordingContextBlock: try CloudRecordingContext.referenceBlock(recordingContext),
             logger: logger
         )
         let metadata = GeminiResponseMetadataParser.makeMetadata(
@@ -871,6 +890,6 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         logger: ((_ level: String, _ message: String) -> Void)? = nil
     ) throws -> String {
         try GeminiResponseParser.transcript(from: data, errors: GoogleAIStudioError.self,
-            httpStatusCode: httpStatusCode, logger: logger)
+            httpStatusCode: httpStatusCode, recordingContextBlock: recordingContextBlock, logger: logger)
     }
 }

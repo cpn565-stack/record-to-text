@@ -272,6 +272,9 @@ public final class TranscriptionEngine {
         persistCompletion: ((PipelineResult) async -> Bool)? = nil,
         update: @escaping (PipelineUpdate) -> Void
     ) async throws -> PipelineResult {
+        if job.snapshot.backendType != .localQwen {
+            _ = try CloudRecordingContext.validated(job.snapshot.cloudRecordingContext)
+        }
         cancellationLock.withLock {
             cancellationRequested = false
             activeCloudNetwork = nil
@@ -1355,6 +1358,7 @@ public final class TranscriptionEngine {
                         GeminiTranscriptPrompt.promptByAppendingSpeakerContinuity(job.snapshot.prompt, roster: speakerRoster),
                         startSeconds: timeOffset, endSeconds: timeEnd
                     ),
+                recordingContext: job.snapshot.cloudRecordingContext,
                 timeOffsetSeconds: timeOffset,
                 workingDirectory: workingDirectory,
                 logger: { level, message in
@@ -1475,6 +1479,7 @@ public final class TranscriptionEngine {
                         GeminiTranscriptPrompt.promptByAppendingSpeakerContinuity(job.snapshot.prompt, roster: speakerRoster),
                         startSeconds: timeOffset, endSeconds: timeEnd
                     ),
+                recordingContext: job.snapshot.cloudRecordingContext,
                 timeOffsetSeconds: timeOffset,
                 workingDirectory: workingDirectory,
                 logger: { level, message in
@@ -2067,7 +2072,9 @@ public final class TranscriptionEngine {
                 let contractText = try OutputContractValidator.validate(
                     text: result.text,
                     path: transcriptURL.path,
-                    prompt: job.snapshot.prompt
+                    canonicalPrompt: job.snapshot.prompt,
+                    terms: job.snapshot.terms,
+                    recordingContextBlock: try CloudRecordingContext.referenceBlock(job.snapshot.cloudRecordingContext)
                 )
                 let checked = TranscriptTimestampValidator.validate(text: contractText,
                     startSeconds: record.startSeconds, endSeconds: record.endSeconds)
@@ -2300,8 +2307,10 @@ public final class TranscriptionEngine {
             if record.status == .blockedBySafety {
                 return Self.cloudSafetyGapMarker(for: record)
             }
-            return try TextFileValidator.readNonEmptyUTF8(
-                at: URL(fileURLWithPath: record.outputPath)
+            return try OutputContractValidator.readTranscript(
+                at: URL(fileURLWithPath: record.outputPath),
+                canonicalPrompt: job.snapshot.prompt, terms: job.snapshot.terms,
+                recordingContextBlock: try CloudRecordingContext.referenceBlock(job.snapshot.cloudRecordingContext)
             )
         }
         let segmentMetadata = mergeableSegments.compactMap(\.cloudMetadata)
@@ -2315,7 +2324,9 @@ public final class TranscriptionEngine {
         let validatedRaw = try OutputContractValidator.validate(
             text: mergedText,
             path: cloudRawURL.path,
-            prompt: job.snapshot.prompt
+            canonicalPrompt: job.snapshot.prompt,
+            terms: job.snapshot.terms,
+            recordingContextBlock: try CloudRecordingContext.referenceBlock(job.snapshot.cloudRecordingContext)
         )
         try AtomicFileWriter.writeText(validatedRaw, to: cloudRawURL)
 
@@ -2343,7 +2354,9 @@ public final class TranscriptionEngine {
         )
         let finalTranscribedText = try OutputContractValidator.readTranscript(
             at: cloudTraditionalURL,
-            prompt: job.snapshot.prompt
+            canonicalPrompt: job.snapshot.prompt,
+            terms: job.snapshot.terms,
+            recordingContextBlock: try CloudRecordingContext.referenceBlock(job.snapshot.cloudRecordingContext)
         )
 
         try Task.checkCancellation()

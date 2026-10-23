@@ -1,5 +1,11 @@
 # 下一次接續
 
+## 2026-10-23：雲端錄音背景 build 16
+
+[雲端轉錄錄音背景規格](cloud-recording-context-spec-2026-10-23.md) 已在分支 `codex/cloud-recording-context` 實作，工作樹尚未 commit。可留空的雲端背景在加入佇列時寫入 snapshot；分段、重試與續跑沿用原背景，只有「使用目前設定」重建才捕捉新草稿，本機不套用。回吐檢查在 Markdown 清理前比對原始背景包裝；錯誤與診斷會先拿掉背景原文。
+
+`SKIP_APP_BUNDLE=1 REQUIRE_XCTEST=1 scripts/run-checks.sh` 於 2026-10-23 22:10 通過：Swift 568 項、1 項預設跳過、0 失敗，含 Python、self-test 與 10 個 pipeline 情境。已以 Apple Silicon release、ad-hoc 簽章安裝 `/Applications/record-to-text.app` 0.2.1（16）。執行檔 SHA-256 `cf2b10c86ba440f3598a84ad14af0339fbd71f6e2e0e897b12cf8a2ce7768457`，與 `dist/record-to-text.app` 一致。測試包為 `dist/record-to-text-0.2.1-build16-development.dmg`，DMG 未用 Developer ID 簽署，不是公證發行版。build 15 備份在 `dist/install-backups/before-recording-context-build16-20261023.noindex/record-to-text.app`。未做規格第 11 節的音訊 A/B，不能把功能可用說成辨識變準。
+
 ## 2026-10-17：build 14–15 Vertex 串流回應實作與 thinking 期間保活修正
 
 已依 [Vertex AI 串流回應修復規格](vertex-streaming-response-spec-2026-10-17.md) 完成實作（build 14），並針對真實 20 分鐘訪談錄音在 `gemini-4-argon`／`gemini-3.8-flash`（`thinkingLevel=high`）深度思考階段可能長達 80–130 秒、導致本機代理（如 `127.0.0.1:7890`）因約 60 秒無回應位元組而主動斷線（`NSURLErrorDomain -1005`）的問題，在 build 15 為 Vertex SSE 請求啟用 `thinkingConfig.includeThoughts = true`。

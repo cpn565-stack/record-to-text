@@ -181,6 +181,7 @@ final class LocalV2IntegrationTests: XCTestCase {
         source: URL,
         terms: [String] = ["詞庫"],
         silence: Bool = false,
+        context: String = "",
         slice: TranscriptionSourceSlice? = nil
     ) -> TranscriptionJob {
         TranscriptionJob(
@@ -192,6 +193,7 @@ final class LocalV2IntegrationTests: XCTestCase {
                 glossaryName: nil,
                 terms: terms,
                 prompt: "會議逐字稿",
+                cloudRecordingContext: context,
                 outputLocationMode: .fixedDirectory,
                 outputDirectory: root.path,
                 keepRawTranscript: false,
@@ -884,5 +886,40 @@ private func XCTAssertThrowsErrorAsync(
         XCTFail("expected an error", file: file, line: line)
     } catch {
         messageHandler(error)
+    }
+}
+
+
+extension LocalV2IntegrationTests {
+    func testCloudContextNeverChangesLocalRequestOrInferenceIdentity() async throws {
+        let modelID = "mlx-community/Qwen3-ASR-0.6B-8bit"
+        let revision = "rev-integration"
+        let engine = try await makeEngine(modelID: modelID, revision: revision)
+        let source = root.appendingPathComponent("context-fixture.wav")
+        try await synthesizeWAV(seconds: 2, at: source)
+        var requests: [ASRRequest] = []
+        var inference: [LocalInferenceIdentity] = []
+        for context in ["", String(repeating: "PRIVATE_CONTEXT", count: 50) + "\0"] {
+            let job = makeJob(modelID: modelID, revision: revision, source: source, context: context)
+            var logs: [String] = []
+            _ = try await engine.run(job: job, offline: true, allowMissingPrompt: true, persistCompletion: { _ in false }) {
+                if case let .log(_, text) = $0 { logs.append(text) }
+            }
+            let work = FileManager.default.temporaryDirectory.appendingPathComponent("record-to-text/\(job.id.uuidString)")
+            defer { try? FileManager.default.removeItem(at: work) }
+            let requestData = try Data(contentsOf: work.appendingPathComponent("request.json"))
+            XCTAssertFalse(String(decoding: requestData, as: UTF8.self).contains("PRIVATE_CONTEXT"))
+            let request = try JSONDecoder().decode(ASRRequest.self, from: requestData)
+            requests.append(request)
+            let directory = try XCTUnwrap(request.checkpointV2?.directory)
+            let identity = try JSONDecoder().decode(LocalIdentityDocument.self,
+                from: Data(contentsOf: URL(fileURLWithPath: directory).appendingPathComponent("identity.json")))
+            inference.append(identity.inference)
+            XCTAssertFalse(logs.joined().contains("PRIVATE_CONTEXT"))
+        }
+        XCTAssertEqual(requests[0].prompt, requests[1].prompt)
+        XCTAssertEqual(requests[0].terms, requests[1].terms)
+        XCTAssertEqual(requests[0].maximumTokens, requests[1].maximumTokens)
+        XCTAssertEqual(inference[0], inference[1])
     }
 }

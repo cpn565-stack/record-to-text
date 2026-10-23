@@ -56,6 +56,22 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var googleAIStudioCredentialStorageState:
         GoogleAIStudioCredentialStorageState = .absent
 
+    /// Session-only draft; jobs persist their own immutable value.
+    @Published var cloudRecordingContextDraft = "" {
+        didSet { recordingContextDraftRevision &+= 1 }
+    }
+    private var recordingContextDraftRevision: UInt64 = 0
+    private struct IntakeContext {
+        let settings: AppSettings
+        let prompt: PromptBuildResult
+        let glossaryID: String?
+        let glossaryName: String?
+        let recordingContext: String
+        let draftRevision: UInt64
+    }
+    private var pendingDuplicateIntake: IntakeContext?
+    private let outputDirectoryChooser: (() -> URL?)?
+
     @Published var alert: UserFacingAlert?
     @Published var isPromptPreviewPresented = false
     @Published var isGlossaryManagerPresented = false
@@ -142,9 +158,11 @@ final class AppViewModel: ObservableObject {
         settingsSaveOverride: ((AppSettings) throws -> Void)? = nil,
         jobLedgerSaveOverride: ((JobLedgerCollection) throws -> Void)? = nil,
         engineFactory: ((ResolvedRuntime) -> TranscriptionEngine)? = nil,
-        queueSleep: QueueCompletionSleepCoordinator? = nil
+        queueSleep: QueueCompletionSleepCoordinator? = nil,
+        outputDirectoryChooser: (() -> URL?)? = nil
     ) {
         self.paths = paths
+        self.outputDirectoryChooser = outputDirectoryChooser
         self.queueSleep = queueSleep ?? QueueCompletionSleepCoordinator()
         self.engineFactory = engineFactory
         self.fileManager = fileManager
@@ -481,8 +499,34 @@ final class AppViewModel: ObservableObject {
         !modelDownloadPhase.isBusy && !isSelectedModelCached
     }
 
+    var recordingContextCount: Int {
+        CloudRecordingContext.normalized(cloudRecordingContextDraft).unicodeScalars.count
+    }
+
+    var recordingContextErrorMessage: String? {
+        guard settings.backendType != .localQwen else { return nil }
+        do { _ = try CloudRecordingContext.validated(cloudRecordingContextDraft); return nil }
+        catch { return error.localizedDescription }
+    }
+
     var promptPreview: String {
-        (try? buildPrompt().prompt) ?? ""
+        do {
+            let result = try buildPrompt()
+            guard settings.backendType != .localQwen else { return result.prompt }
+            return try GeminiTranscriptPrompt.preview(terms: result.terms,
+                canonicalPrompt: result.prompt, context: cloudRecordingContextDraft)
+        } catch { return error.localizedDescription }
+    }
+
+    func promptPreview(for snapshot: JobSnapshot) -> String {
+        guard snapshot.backendType != .localQwen else {
+            let context = snapshot.cloudRecordingContext.isEmpty ? "未填寫" : "本機不套用\n\(snapshot.cloudRecordingContext)"
+            return "\(snapshot.prompt)\n\n錄音背景：\(context)"
+        }
+        do {
+            return try GeminiTranscriptPrompt.preview(terms: snapshot.terms,
+                canonicalPrompt: snapshot.prompt, context: snapshot.cloudRecordingContext)
+        } catch { return error.localizedDescription }
     }
 
     var promptTermCount: Int {
@@ -1173,9 +1217,12 @@ final class AppViewModel: ObservableObject {
             )
         }
 
-        enqueueValidatedFiles(accepted)
+        guard !accepted.isEmpty || !duplicates.isEmpty,
+              let intake = captureIntakeContext() else { return }
+        enqueueValidatedJobs(accepted.map { ($0, nil) }, intake: intake)
 
         if !duplicates.isEmpty {
+            pendingDuplicateIntake = intake
             pendingDuplicateURLs = duplicates
             isDuplicateConfirmationPresented = true
         }
@@ -1185,10 +1232,13 @@ final class AppViewModel: ObservableObject {
         let duplicates = pendingDuplicateURLs
         pendingDuplicateURLs.removeAll()
         isDuplicateConfirmationPresented = false
-        addFiles(duplicates, allowingDuplicates: true)
+        let intake = pendingDuplicateIntake
+        pendingDuplicateIntake = nil
+        enqueueValidatedJobs(duplicates.map { ($0, nil) }, intake: intake)
     }
 
     func discardDuplicateFiles() {
+        pendingDuplicateIntake = nil
         pendingDuplicateURLs.removeAll()
         isDuplicateConfirmationPresented = false
     }
@@ -1845,72 +1895,74 @@ final class AppViewModel: ObservableObject {
 
     // MARK: - Queue implementation
 
-    private func enqueueValidatedFiles(_ urls: [URL]) {
-        enqueueValidatedJobs(
-            urls.map { (url: $0, sourceSlice: Optional<TranscriptionSourceSlice>.none) }
-        )
+    private func captureIntakeContext() -> IntakeContext? {
+        do {
+            let prompt = try buildPrompt()
+            let context = settings.backendType == .localQwen ? ""
+                : try CloudRecordingContext.validated(cloudRecordingContextDraft)
+            return IntakeContext(settings: settings, prompt: prompt,
+                glossaryID: selectedGlossary?.id, glossaryName: selectedGlossary?.name,
+                recordingContext: context, draftRevision: recordingContextDraftRevision)
+        } catch {
+            alert = UserFacingAlert(title: "轉錄提示無法套用", message: error.localizedDescription)
+            return nil
+        }
     }
 
     private func enqueueValidatedJobs(
-        _ entries: [(url: URL, sourceSlice: TranscriptionSourceSlice?)]
+        _ entries: [(url: URL, sourceSlice: TranscriptionSourceSlice?)],
+        intake captured: IntakeContext? = nil
     ) {
-        guard !entries.isEmpty else {
-            return
-        }
-
-        let promptResult: PromptBuildResult
-        do {
-            promptResult = try buildPrompt()
-        } catch {
-            alert = UserFacingAlert(
-                title: "專有名詞無法套用",
-                message: error.localizedDescription
-            )
-            return
-        }
+        guard !entries.isEmpty, let intake = captured ?? captureIntakeContext() else { return }
+        let batchSettings = intake.settings
+        let promptResult = intake.prompt
 
         let outputDirectory: String
-        if settings.outputLocationMode == .askEveryTime {
-            guard let selected = chooseDirectory(
-                title: "選擇這批錄音的輸出資料夾",
-                initialPath: settings.lastOutputDirectory ?? settings.defaultOutputDirectory
-            ) else {
+        if batchSettings.outputLocationMode == .askEveryTime {
+            let selection: URL?
+            if let outputDirectoryChooser { selection = outputDirectoryChooser() }
+            else {
+                selection = chooseDirectory(title: "選擇這批錄音的輸出資料夾",
+                    initialPath: batchSettings.lastOutputDirectory ?? batchSettings.defaultOutputDirectory)
+            }
+            guard let selected = selection else {
                 return
             }
             outputDirectory = selected.path
             setSetting(\.lastOutputDirectory, to: selected.path as String?)
         } else {
-            outputDirectory = settings.defaultOutputDirectory
+            outputDirectory = batchSettings.defaultOutputDirectory
         }
 
         for entry in entries {
             let url = entry.url
             let sourceSlice = entry.sourceSlice
             let snapshot = JobSnapshot(
-                modelID: settings.selectedModelID,
-                modelRevision: selectedModelRevision,
-                glossaryID: selectedGlossary?.id,
-                glossaryName: selectedGlossary?.name,
+                modelID: batchSettings.selectedModelID,
+                modelRevision: ASRModelDescriptor.revision(forModelID: batchSettings.selectedModelID),
+                glossaryID: intake.glossaryID,
+                glossaryName: intake.glossaryName,
                 terms: promptResult.terms,
                 prompt: promptResult.prompt,
-                outputLocationMode: settings.outputLocationMode,
+                cloudRecordingContext: intake.recordingContext,
+                outputLocationMode: batchSettings.outputLocationMode,
                 outputDirectory: outputDirectory,
-                keepRawTranscript: settings.keepRawTranscript,
-                outputFilenameSuffix: settings.resolvedOutputFilenameSuffix,
-                rawFilenameSuffix: settings.resolvedRawFilenameSuffix,
-                backendType: settings.backendType,
-                googleAIStudioModelID: settings.googleAIStudioModelID,
-                vertexAIProjectID: settings.vertexAIProjectID,
-                vertexAILocation: settings.vertexAILocation,
-                vertexAIModelID: settings.vertexAIModelID,
-                vertexAIGCSBucket: settings.vertexAIGCSBucket,
-                vertexAIIncludeSummary: settings.vertexAIIncludeSummary,
-                geminiThinkingLevel: settings.geminiThinkingLevel,
-                cloudFallbackPolicy: settings.cloudFallbackPolicy,
+                keepRawTranscript: batchSettings.keepRawTranscript,
+                outputFilenameSuffix: batchSettings.resolvedOutputFilenameSuffix,
+                rawFilenameSuffix: batchSettings.resolvedRawFilenameSuffix,
+                backendType: batchSettings.backendType,
+                googleAIStudioModelID: batchSettings.googleAIStudioModelID,
+                vertexAIProjectID: batchSettings.vertexAIProjectID,
+                vertexAILocation: batchSettings.vertexAILocation,
+                vertexAIModelID: batchSettings.vertexAIModelID,
+                vertexAIGCSBucket: batchSettings.vertexAIGCSBucket,
+                vertexAIIncludeSummary: batchSettings.vertexAIIncludeSummary,
+                geminiThinkingLevel: batchSettings.geminiThinkingLevel,
+                cloudFallbackPolicy: batchSettings.cloudFallbackPolicy,
                 silenceAwareCloudSegmentation:
-                    settings.silenceAwareCloudSegmentation,
+                    batchSettings.silenceAwareCloudSegmentation,
                 localSilenceAwareSegmentation:
-                    settings.localSilenceAwareSegmentation
+                    batchSettings.localSilenceAwareSegmentation
             )
             var job = TranscriptionJob(
                 sourcePath: url.standardizedFileURL.path,
@@ -1925,6 +1977,10 @@ final class AppViewModel: ObservableObject {
             jobs.append(job)
         }
 
+        if batchSettings.backendType != .localQwen,
+           recordingContextDraftRevision == intake.draftRevision {
+            cloudRecordingContextDraft = ""
+        }
         pruneHistoryIfNeeded()
         persistJobs()
         // Jobs stay queued until the user presses「開始轉文字」.

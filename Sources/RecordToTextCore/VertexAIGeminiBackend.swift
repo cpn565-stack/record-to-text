@@ -153,6 +153,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         mimeType: String = "audio/mp3",
         terms: [String] = [],
         customPrompt: String = "",
+        recordingContext: String = "",
         timeOffsetSeconds: Double = 0,
         workingDirectory: URL? = nil,
         logger: ((_ level: String, _ message: String) -> Void)? = nil
@@ -165,9 +166,16 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             return try await CloudBudgetContext.$current.withValue(budget) {
                 try await CloudNetworkContext.$current.withValue(context) {
                     try await CloudNetworkContext.$segmentAttempts.withValue(CloudModelAttempts()) {
-                        try await self.transcribeDetailed(audioData: audioData, mimeType: mimeType, terms: terms, customPrompt: customPrompt, timeOffsetSeconds: timeOffsetSeconds, workingDirectory: workingDirectory, logger: logger)
+                        try await self.transcribeDetailed(audioData: audioData, mimeType: mimeType, terms: terms, customPrompt: customPrompt, recordingContext: recordingContext, timeOffsetSeconds: timeOffsetSeconds, workingDirectory: workingDirectory, logger: logger)
                     }
                 }
+            }
+        }
+        let customPrompt = try GeminiTranscriptPrompt.promptByPrependingRecordingContext(
+            customPrompt, context: recordingContext, terms: terms)
+        let logger = logger.map { destination in
+            { (level: String, message: String) in
+                destination(level, CloudRecordingContext.redactedDiagnostic(message, context: recordingContext))
             }
         }
         let currentConfig = getConfiguration()
@@ -227,6 +235,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                     audioByteCount: audioData.count,
                     terms: terms,
                     customPrompt: customPrompt,
+                    recordingContext: recordingContext,
                     timeOffsetSeconds: timeOffsetSeconds,
                     thinkingLevel: currentConfig.thinkingLevel,
                     fallbackPolicy: currentConfig.fallbackPolicy,
@@ -296,6 +305,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         audioByteCount: Int,
         terms: [String],
         customPrompt: String,
+        recordingContext: String,
         timeOffsetSeconds: Double,
         thinkingLevel: GeminiThinkingLevel,
         fallbackPolicy: CloudFallbackPolicy,
@@ -306,25 +316,30 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             preferredModelID: preferredModelID, fallbackPolicy: fallbackPolicy,
             serviceName: "Vertex Gemini", logger: logger
         ) { modelID, retryCount, fallbackReason in
-            let generated = try await self.generateTranscript(
-                requestedModelID: preferredModelID,
-                effectiveModelID: modelID,
-                retryCount: retryCount,
-                fallbackReason: fallbackReason,
-                projectID: projectID,
-                location: location,
-                preparedAudio: preparedAudio,
-                accessToken: accessToken,
-                authService: authService,
-                inputByteCount: audioByteCount,
-                terms: terms,
-                customPrompt: customPrompt,
-                timeOffsetSeconds: timeOffsetSeconds,
-                thinkingLevel: thinkingLevel,
-                workingDirectory: workingDirectory,
-                logger: logger
-            )
-            return generated.result
+            do {
+                let generated = try await self.generateTranscript(
+                    requestedModelID: preferredModelID,
+                    effectiveModelID: modelID,
+                    retryCount: retryCount,
+                    fallbackReason: fallbackReason,
+                    projectID: projectID,
+                    location: location,
+                    preparedAudio: preparedAudio,
+                    accessToken: accessToken,
+                    authService: authService,
+                    inputByteCount: audioByteCount,
+                    terms: terms,
+                    customPrompt: customPrompt,
+                    recordingContext: recordingContext,
+                    timeOffsetSeconds: timeOffsetSeconds,
+                    thinkingLevel: thinkingLevel,
+                    workingDirectory: workingDirectory,
+                    logger: logger
+                )
+                return generated.result
+            } catch {
+                throw CloudRecordingContext.redactedError(error, context: recordingContext)
+            }
         }
     }
 
@@ -438,6 +453,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         inputByteCount: Int,
         terms: [String],
         customPrompt: String,
+        recordingContext: String,
         timeOffsetSeconds: Double,
         thinkingLevel: GeminiThinkingLevel,
         workingDirectory: URL?,
@@ -472,6 +488,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             requestDescription: "轉錄",
             maximumOutputTokens: GeminiGenerationConfig.transcriptionOutputTokens(modelID: effectiveModelID),
             thinkingLevel: thinkingLevel,
+            recordingContext: recordingContext,
             workingDirectory: workingDirectory,
             logger: logger
         )
@@ -573,6 +590,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         requestDescription: String,
         maximumOutputTokens: Int,
         thinkingLevel: GeminiThinkingLevel,
+        recordingContext: String = "",
         workingDirectory: URL?,
         logger: ((_ level: String, _ message: String) -> Void)?
     ) async throws -> (result: CloudTranscriptionResult, accessToken: String) {
@@ -702,6 +720,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         let text = try parseCandidateText(
             from: data,
             httpStatusCode: httpResponse.statusCode,
+            recordingContextBlock: try CloudRecordingContext.referenceBlock(recordingContext),
             logger: logger
         )
         let metadata = GeminiResponseMetadataParser.makeMetadata(
@@ -912,6 +931,6 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         logger: ((_ level: String, _ message: String) -> Void)? = nil
     ) throws -> String {
         try GeminiResponseParser.transcript(from: data, errors: VertexAIError.self,
-            httpStatusCode: httpStatusCode, collapseBlankLines: true, logger: logger)
+            httpStatusCode: httpStatusCode, collapseBlankLines: true, recordingContextBlock: recordingContextBlock, logger: logger)
     }
 }

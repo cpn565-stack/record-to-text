@@ -20,6 +20,33 @@ public enum OutputContractValidationError: LocalizedError, Equatable {
 public enum OutputContractValidator {
     @discardableResult
     public static func readTranscript(
+        at url: URL, canonicalPrompt: String, terms: [String], recordingContextBlock: String
+    ) throws -> String {
+        try validate(text: TextFileValidator.readNonEmptyUTF8(at: url), path: url.path,
+                     canonicalPrompt: canonicalPrompt, terms: terms, recordingContextBlock: recordingContextBlock)
+    }
+
+    /// Cloud callers supply each source separately, so context cannot become glossary terms.
+    @discardableResult
+    public static func validate(
+        text: String, path: String, canonicalPrompt: String,
+        terms: [String], recordingContextBlock: String
+    ) throws -> String {
+        _ = try validate(text: text, path: path)
+        let withoutHeadings = text.replacingOccurrences(
+            of: #"(?m)^\[\d{2,}:\d{2}(?::\d{2})? - \d{2,}:\d{2}(?::\d{2})?\][\t ]*$"#,
+            with: "", options: .regularExpression)
+        let normalized = removingWhitespace(from: withoutHeadings)
+        let block = removingWhitespace(from: recordingContextBlock)
+        if hasPromptEcho(text: withoutHeadings, prompt: canonicalPrompt, explicitTerms: terms)
+            || (!block.isEmpty && (normalized.hasPrefix(block) || normalized.hasSuffix(block))) {
+            throw OutputContractValidationError.promptEcho(path)
+        }
+        return text
+    }
+
+    @discardableResult
+    public static func readTranscript(
         at url: URL,
         prompt: String? = nil
     ) throws -> String {
@@ -45,7 +72,7 @@ public enum OutputContractValidator {
         return text
     }
 
-    private static func hasPromptEcho(text: String, prompt: String) -> Bool {
+    private static func hasPromptEcho(text: String, prompt: String, explicitTerms: [String]? = nil) -> Bool {
         // App-generated time headings must not hide a leading prompt/glossary echo.
         let text = text.replacingOccurrences(
             of: #"(?m)^\[\d{2,}:\d{2}:\d{2} - \d{2,}:\d{2}:\d{2}\][\t ]*$"#,
@@ -54,7 +81,8 @@ public enum OutputContractValidator {
         )
         let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedPrompt.isEmpty else {
-            return false
+            return (explicitTerms?.count ?? 0) >= 2
+                && hasLeadingGlossaryEcho(text: text, terms: explicitTerms ?? [])
         }
 
         let promptLines = trimmedPrompt
@@ -88,7 +116,7 @@ public enum OutputContractValidator {
             return true
         }
 
-        let glossaryTerms = linesAfterGlossaryMarker(in: promptLines)
+        let glossaryTerms = explicitTerms ?? linesAfterGlossaryMarker(in: promptLines)
         guard glossaryTerms.count >= 2 else {
             return false
         }

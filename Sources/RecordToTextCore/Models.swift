@@ -575,6 +575,7 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
         case glossaryName
         case terms
         case prompt
+        case cloudRecordingContext
         case outputLocationMode
         case outputDirectory
         case keepRawTranscript
@@ -610,6 +611,7 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
     public let glossaryName: String?
     public let terms: [String]
     public let prompt: String
+    public let cloudRecordingContext: String
     public let outputLocationMode: OutputLocationMode
     public let outputDirectory: String
     public let keepRawTranscript: Bool
@@ -638,6 +640,7 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
         glossaryName: String?,
         terms: [String],
         prompt: String,
+        cloudRecordingContext: String = "",
         outputLocationMode: OutputLocationMode,
         outputDirectory: String,
         keepRawTranscript: Bool,
@@ -663,6 +666,7 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
         self.glossaryName = glossaryName
         self.terms = terms
         self.prompt = prompt
+        self.cloudRecordingContext = cloudRecordingContext
         self.outputLocationMode = outputLocationMode
         self.outputDirectory = outputDirectory
         self.keepRawTranscript = keepRawTranscript
@@ -697,6 +701,7 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
         glossaryName = try container.decodeIfPresent(String.self, forKey: .glossaryName)
         terms = try container.decode([String].self, forKey: .terms)
         prompt = try container.decode(String.self, forKey: .prompt)
+        cloudRecordingContext = try container.decodeIfPresent(String.self, forKey: .cloudRecordingContext) ?? ""
         outputLocationMode = try container.decode(
             OutputLocationMode.self,
             forKey: .outputLocationMode
@@ -749,6 +754,7 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
         try container.encodeIfPresent(glossaryName, forKey: .glossaryName)
         try container.encode(terms, forKey: .terms)
         try container.encode(prompt, forKey: .prompt)
+        try container.encode(cloudRecordingContext, forKey: .cloudRecordingContext)
         try container.encode(outputLocationMode, forKey: .outputLocationMode)
         try container.encode(outputDirectory, forKey: .outputDirectory)
         try container.encode(keepRawTranscript, forKey: .keepRawTranscript)
@@ -785,6 +791,7 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
             glossaryName: glossaryName,
             terms: terms,
             prompt: prompt,
+            cloudRecordingContext: cloudRecordingContext,
             outputLocationMode: outputLocationMode,
             outputDirectory: outputDirectory,
             keepRawTranscript: keepRawTranscript,

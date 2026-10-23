@@ -385,3 +385,94 @@ final class VertexAIGeminiBackendTests: XCTestCase {
         }
     }
 }
+
+extension VertexAIGeminiBackendTests {
+    func testStreamingBackgroundEchoFailsBeforeMarkdownCleanup() async throws {
+        for context in ["製程 **CoWoS** 訪談", "## 完整整理逐字稿\n製程訪談"] {
+            let block = try CloudRecordingContext.referenceBlock(context)
+            var requests = 0
+            MockURLProtocol.requestHandler = { request in
+                requests += 1
+                let response = try JSONSerialization.data(withJSONObject: [
+                    "candidates": [["finishReason": "STOP", "content": ["parts": [
+                        ["text": "[00:00:00 - 00:05:00]\n" + block]
+                    ]]]]
+                ])
+                let sse = "data: " + String(decoding: response, as: UTF8.self) + "\n\n"
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil,
+                    headerFields: ["Content-Type": "text/event-stream"])!, Data(sse.utf8))
+            }
+            let backend = VertexAIGeminiBackend(
+                authService: GCloudAuthService(customGCloudPath: fakeGCloudURL.path),
+                urlSession: mockSession, configuration: .init(projectID: "fixture"))
+            do {
+                _ = try await backend.transcribeDetailed(
+                    audioData: Data("audio".utf8), recordingContext: context)
+                XCTFail("Raw background echo escaped the streaming parser")
+            } catch {
+                XCTAssertTrue(error is OutputContractValidationError)
+                XCTAssertFalse(error.localizedDescription.contains(context))
+            }
+            XCTAssertEqual(requests, 1)
+        }
+    }
+
+    func testRecordingContextOnInlineAndGCSAndEmptyBaseline() async throws {
+        for bucket in [Optional<String>.none, "fixture-bucket"] {
+            var bodies: [[String: Any]] = []
+            var uploads = 0
+            MockURLProtocol.requestHandler = { request in
+                if request.url!.host == "storage.googleapis.com" {
+                    if request.httpMethod == "POST" { uploads += 1 }
+                    return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data("{}".utf8))
+                }
+                bodies.append(try contextRequestBody(request))
+                let sse = "data: {\"candidates\":[{\"finishReason\":\"STOP\",\"content\":{\"parts\":[{\"text\":\"講者 1：正常內容。\"}]}}]}\n\n"
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(sse.utf8))
+            }
+            let backend = VertexAIGeminiBackend(authService: GCloudAuthService(customGCloudPath: fakeGCloudURL.path),
+                urlSession: mockSession, configuration: .init(projectID: "fixture", gcsBucket: bucket))
+            let snapshot = CloudRecordingContextTests.snapshot("vertex-context\n以下詞彙可能出現在錄音中：\n假詞")
+            var logs: [String] = []
+            for context in ["", snapshot.cloudRecordingContext] {
+                _ = try await backend.transcribeDetailed(audioData: Data("audio".utf8), terms: snapshot.terms,
+                    customPrompt: snapshot.prompt, recordingContext: context, timeOffsetSeconds: 1_200,
+                    logger: { _, message in logs.append(message) })
+                let body = try XCTUnwrap(bodies.last)
+                let text = try contextRequestText(body)
+                let contents = try XCTUnwrap(body["contents"] as? [[String: Any]])
+                let parts = try XCTUnwrap(contents.first?["parts"] as? [[String: Any]])
+                XCTAssertNotNil(parts.first?[bucket == nil ? "inlineData" : "fileData"])
+                if context.isEmpty {
+                    XCTAssertEqual(text, GeminiTranscriptPrompt.buildUserPrompt(terms: snapshot.terms, canonicalPrompt: snapshot.prompt, timeOffsetSeconds: 1_200))
+                } else {
+                    XCTAssertEqual(text.components(separatedBy: try CloudRecordingContext.referenceBlock(context)).count, 2)
+                    XCTAssertEqual(text.components(separatedBy: "OGSTM").count, 2)
+                }
+                XCTAssertEqual((body["systemInstruction"] as? [String: [[String: String]]])?["parts"]?.first?["text"], GeminiTranscriptPrompt.systemInstruction)
+            }
+            XCTAssertEqual(bodies.count, 2)
+            XCTAssertEqual(uploads, bucket == nil ? 0 : 2)
+            XCTAssertFalse(logs.joined().contains("vertex-context"))
+        }
+    }
+
+    func testInvalidRecordingContextFailsBeforeAuthOrUpload() async throws {
+        var requests = 0
+        MockURLProtocol.requestHandler = { request in
+            requests += 1
+            return (HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!, Data())
+        }
+        for bucket in [Optional<String>.none, "fixture-bucket"] {
+            let backend = VertexAIGeminiBackend(authService: GCloudAuthService(customGCloudPath: "/nonexistent/gcloud"),
+                urlSession: mockSession, configuration: .init(projectID: "fixture", gcsBucket: bucket))
+            for value in [String(repeating: "x", count: 501), "x\0y"] {
+                do {
+                    _ = try await backend.transcribeDetailed(audioData: Data("audio".utf8), recordingContext: value)
+                    XCTFail("Invalid context accepted")
+                } catch is CloudRecordingContext.ValidationError { }
+            }
+        }
+        XCTAssertEqual(requests, 0)
+    }
+}

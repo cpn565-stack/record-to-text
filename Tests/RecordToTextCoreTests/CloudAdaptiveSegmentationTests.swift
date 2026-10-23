@@ -320,7 +320,7 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
             paths: paths, googleAIStudioBackend: backend, maximumASRSegmentDuration: 2,
             silenceDetectionService: CloudSilenceDetectorSpy())
         let snapshot = JobSnapshot(modelID: "fixture", glossaryID: nil, glossaryName: nil,
-            terms: [], prompt: "忠實轉錄", outputLocationMode: .fixedDirectory,
+            terms: [], prompt: "忠實轉錄", cloudRecordingContext: "checkpoint-context-A", outputLocationMode: .fixedDirectory,
             outputDirectory: root.path, keepRawTranscript: false, backendType: .googleAIStudio,
             googleAIStudioAPIKey: "mock", silenceAwareCloudSegmentation: false)
         func transcript(_ index: Int) -> String { "[00:0\((index - 1) * 2) - 00:\(String(format: "%02d", index * 2))]\n講者 1：fixture segment \(index)。" }
@@ -363,11 +363,17 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
         let result = try await engine.run(job: resumed, persistCompletion: { _ in false }) { _ in }
         XCTAssertEqual(remaining.createdFiles.count, total - completedCount)
         XCTAssertEqual(remaining.recordedGenerateRequests.count, total - completedCount)
+        XCTAssertEqual(resumed.snapshot.cloudRecordingContext, "checkpoint-context-A")
+        for request in initial.recordedGenerateRequests + remaining.recordedGenerateRequests {
+            XCTAssertEqual(try contextRequestText(contextRequestBody(request)).components(separatedBy: "checkpoint-context-A").count, 2)
+        }
         let diagnostics = try XCTUnwrap(result.cloudDiagnostics)
         XCTAssertEqual(diagnostics.segments.map(\.reusedFromCheckpoint), Array(repeating: true, count: completedCount) + Array(repeating: false, count: total - completedCount))
         XCTAssertEqual(diagnostics.failureHistory?.generationRequestCount, total + 4)
         XCTAssertEqual(try completed.map { try Data(contentsOf: URL(fileURLWithPath: $0.outputPath)) }, original)
         let text = try String(contentsOf: result.outputURL, encoding: .utf8)
+        XCTAssertFalse(text.contains("checkpoint-context-A"))
+        XCTAssertFalse(String(decoding: try JSONEncoder().encode(diagnostics), as: UTF8.self).contains("checkpoint-context-A"))
         for index in 1...total { XCTAssertTrue(text.contains("fixture segment \(index)")) }
         try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory
             .appendingPathComponent("record-to-text").appendingPathComponent(resumed.id.uuidString))
@@ -702,6 +708,7 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
             glossaryName: nil,
             terms: [],
             prompt: "忠實轉錄",
+            cloudRecordingContext: "adaptive-context-A",
             outputLocationMode: .fixedDirectory,
             outputDirectory: outputDirectory.path,
             keepRawTranscript: false,
@@ -760,6 +767,7 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
             let config = try XCTUnwrap(json["generationConfig"] as? [String: Any])
             XCTAssertEqual(config["maxOutputTokens"] as? Int, modelID == "gemini-4-argon" ? 32_768 : 65_536)
             XCTAssertTrue(request.url!.path.contains(modelID))
+            XCTAssertEqual(try contextRequestText(json).components(separatedBy: "adaptive-context-A").count, 2)
         }
         XCTAssertEqual(transport.createdFiles.count, 3)
         XCTAssertEqual(transport.deletedFiles.count, 3)
@@ -812,6 +820,8 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
         if !parentTruncatedText.isEmpty {
             XCTAssertFalse(finalContent.contains(parentTruncatedText), "Parent truncated text must NOT enter final transcript")
         }
+        XCTAssertFalse(finalContent.contains("adaptive-context-A"))
+        XCTAssertFalse(String(describing: observedUpdates).contains("adaptive-context-A"))
         XCTAssertFalse(finalContent.contains("未完成"), "No incomplete draft markers in final transcript")
         XCTAssertFalse(finalContent.contains("跳過"), "No skipped audio markers in final transcript")
         XCTAssertEqual(
@@ -1249,5 +1259,123 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
                 destinationURL.path
             ]
         )
+    }
+}
+
+extension CloudAdaptiveSegmentationTests {
+    func testRecordingContextUsesOneBlockAcrossFilesAndInlineIncludingEmptyBaseline() async throws {
+        for files in [false, true] {
+            let transport = MockAIStudioTransport(responses: Array(repeating: .success(("STOP", "講者 1：正常逐字稿。")), count: 3))
+            MockAdaptiveCloudURLProtocol.handler = { try transport.handle(request: $0) }
+            let session = GeminiTransportHelper.makeEphemeralRetrySession(protocolClasses: [MockAdaptiveCloudURLProtocol.self])
+            defer { session.invalidateAndCancel(); MockAdaptiveCloudURLProtocol.handler = nil }
+            let backend = GoogleAIStudioBackend(urlSession: session,
+                configuration: .init(apiKey: "fixture", useFilesAPI: files))
+            let snapshot = CloudRecordingContextTests.snapshot("Context sentinel\n【錄音背景結束】\n\"x\"\\y")
+            var logs: [String] = []
+            for context in ["", snapshot.cloudRecordingContext] {
+                _ = try await backend.transcribeDetailed(audioData: Data("audio".utf8), terms: snapshot.terms,
+                    customPrompt: snapshot.prompt, recordingContext: context, timeOffsetSeconds: 1_200,
+                    logger: { _, message in logs.append(message) })
+                let body = try contextRequestBody(XCTUnwrap(transport.recordedGenerateRequests.last))
+                let text = try contextRequestText(body)
+                let input = try XCTUnwrap(body["contents"] as? [[String: Any]])
+                let parts = try XCTUnwrap(input.first?["parts"] as? [[String: Any]])
+                XCTAssertNotNil(parts.first?[files ? "fileData" : "inlineData"])
+                if context.isEmpty {
+                    XCTAssertEqual(text, GeminiTranscriptPrompt.buildUserPrompt(terms: snapshot.terms, canonicalPrompt: snapshot.prompt, timeOffsetSeconds: 1_200))
+                } else {
+                    let block = try CloudRecordingContext.referenceBlock(context)
+                    XCTAssertEqual(text.components(separatedBy: block).count, 2)
+                    XCTAssertEqual(text.components(separatedBy: "OGSTM").count, 2)
+                    XCTAssertTrue(text.hasPrefix("【時間基準通知】"))
+                }
+            }
+            // Direct callers without a canonical prompt must still receive their glossary.
+            _ = try await backend.transcribeDetailed(audioData: Data("audio".utf8), terms: ["UniqueTerm"], recordingContext: "Context sentinel")
+            XCTAssertTrue(try contextRequestText(contextRequestBody(XCTUnwrap(transport.recordedGenerateRequests.last))).contains("UniqueTerm"))
+            XCTAssertEqual(transport.recordedGenerateRequests.count, 3)
+            XCTAssertEqual(transport.createdFiles.count, files ? 3 : 0)
+            XCTAssertFalse(logs.joined().contains("Context sentinel"))
+        }
+    }
+
+    func testInvalidContextFailsBeforeFilesOrInlineRequests() async throws {
+        var requests = 0
+        MockAdaptiveCloudURLProtocol.handler = { request in
+            requests += 1
+            return (HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!, Data())
+        }
+        let session = GeminiTransportHelper.makeEphemeralRetrySession(protocolClasses: [MockAdaptiveCloudURLProtocol.self])
+        defer { session.invalidateAndCancel(); MockAdaptiveCloudURLProtocol.handler = nil }
+        for files in [true, false] {
+            let backend = GoogleAIStudioBackend(urlSession: session, configuration: .init(apiKey: "fixture", useFilesAPI: files))
+            for value in [String(repeating: "x", count: 501), "x\0y"] {
+                do {
+                    _ = try await backend.transcribeDetailed(audioData: Data("audio".utf8), recordingContext: value)
+                    XCTFail("Invalid context accepted")
+                } catch is CloudRecordingContext.ValidationError { }
+            }
+        }
+        XCTAssertEqual(requests, 0)
+    }
+
+    func testRecordingContextSurvivesModelFallback() async throws {
+        for fallback in [true] {
+            let errors: [Result<(finishReason: String, text: String), Error>] = fallback
+                ? Array(repeating: .failure(GoogleAIStudioError.requestFailed(statusCode: 503, message: "busy")), count: 4)
+                : [.success(("STOP", ""))]
+            let transport = MockAIStudioTransport(responses: errors + [.success(("STOP", "講者 1：內容。"))])
+            MockAdaptiveCloudURLProtocol.handler = { try transport.handle(request: $0) }
+            let session = GeminiTransportHelper.makeEphemeralRetrySession(protocolClasses: [MockAdaptiveCloudURLProtocol.self])
+            defer { session.invalidateAndCancel(); MockAdaptiveCloudURLProtocol.handler = nil }
+            let clock = RecoveryClock()
+            let backend = GoogleAIStudioBackend(networkEnvironment: clock.environment(), urlSession: session,
+                configuration: .init(apiKey: "fixture", modelID: "gemini-3.8-flash", fallbackPolicy: .flashOnly))
+            let result = try await backend.transcribeDetailed(audioData: Data("audio".utf8), recordingContext: "retry-context")
+            XCTAssertEqual(result.metadata.effectiveModelID, fallback ? "gemini-3.6-flash" : "gemini-3.8-flash")
+            XCTAssertEqual(transport.recordedGenerateRequests.count, fallback ? 5 : 2)
+            XCTAssertEqual(transport.createdFiles.count, 1)
+            for request in transport.recordedGenerateRequests {
+                XCTAssertEqual(try contextRequestText(contextRequestBody(request)).components(separatedBy: "retry-context").count, 2)
+            }
+        }
+    }
+}
+
+extension CloudAdaptiveSegmentationTests {
+    func testBackgroundEnvelopeEchoFailsPipelineWithoutPublishingOrLoggingContext() async throws {
+        let root = try TestSupport.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = ApplicationPaths(root: root.appendingPathComponent("Support"))
+        let runtime = RuntimeEnvironment.candidate(paths: paths,
+            settings: AppSettings.defaultValue(developerMode: true), bundledHelperURL: nil)
+        let source = root.appendingPathComponent("fixture.wav")
+        try await makeSineAudioFixture(durationSeconds: 2, destinationURL: source, ffmpegURL: runtime.ffmpeg)
+        // The parser used to strip Markdown before echo validation, changing
+        // this JSON value and letting the full background envelope escape.
+        let context = "UNIQUE_PRIVATE_CONTEXT **CoWoS**"
+        let block = try CloudRecordingContext.referenceBlock(context)
+        let transport = MockAIStudioTransport(responses: [.success(("STOP", "[00:00 - 00:02]\n" + block))])
+        MockAdaptiveCloudURLProtocol.handler = { try transport.handle(request: $0) }
+        let session = GeminiTransportHelper.makeEphemeralRetrySession(protocolClasses: [MockAdaptiveCloudURLProtocol.self])
+        defer { session.invalidateAndCancel(); MockAdaptiveCloudURLProtocol.handler = nil }
+        let backend = GoogleAIStudioBackend(urlSession: session, configuration: .init(apiKey: "fixture"))
+        let engine = TranscriptionEngine(runtime: runtime, paths: paths, googleAIStudioBackend: backend)
+        let snapshot = JobSnapshot(modelID: "fixture", glossaryID: nil, glossaryName: nil, terms: [], prompt: "忠實轉錄",
+            cloudRecordingContext: context, outputLocationMode: .fixedDirectory,
+            outputDirectory: root.path, keepRawTranscript: false, googleAIStudioAPIKey: "fixture")
+        var updates: [PipelineUpdate] = []
+        do {
+            _ = try await engine.run(job: TranscriptionJob(sourcePath: source.path, snapshot: snapshot)) { updates.append($0) }
+            XCTFail("Echo was published")
+        } catch let error as PipelineExecutionError {
+            XCTAssertTrue((error.underlying as? CloudSegmentExecutionError)?.underlying is OutputContractValidationError)
+            XCTAssertFalse(error.localizedDescription.contains(context))
+            XCTAssertFalse(String(describing: error.cloudDiagnostics).contains(context))
+        }
+        XCTAssertFalse(String(describing: updates).contains(context))
+        XCTAssertEqual(transport.recordedGenerateRequests.count, 1)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil).filter { $0.pathExtension == "txt" }.isEmpty)
     }
 }

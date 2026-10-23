@@ -5,6 +5,31 @@ import Foundation
 /// Speaker names remain evidence-gated: the model may use a real name only when
 /// the audio identifies that person or the canonical prompt/glossary supplies it.
 public enum GeminiTranscriptPrompt {
+    public static func promptByPrependingRecordingContext(
+        _ canonicalPrompt: String, context: String, terms: [String] = []
+    ) throws -> String {
+        let block = try CloudRecordingContext.referenceBlock(context)
+        guard !block.isEmpty else { return canonicalPrompt }
+        let prompt = canonicalPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? glossaryReference(terms) : canonicalPrompt
+        return "\(block)\n\n\(prompt)"
+    }
+
+    /// Uses the request composer; dynamic segment details are intentionally absent.
+    public static func preview(terms: [String], canonicalPrompt: String, context: String) throws -> String {
+        let prompt = try promptByPrependingRecordingContext(canonicalPrompt, context: context, terms: terms)
+        return """
+        【固定轉錄規則】
+        \(systemInstruction)
+
+        【轉錄提示】
+        \(buildUserPrompt(terms: terms, canonicalPrompt: prompt, timeOffsetSeconds: 0))
+
+        錄音背景：\(CloudRecordingContext.normalized(context).isEmpty ? "未填寫" : "如上方參考區塊")
+        片段時間與講者參考會在處理時附加。
+        """
+    }
+
     public static let systemInstruction = """
     你是一位專業的高精度語音逐字稿轉錄專家。請仔細聆聽這段音訊，直接將其轉錄為排版乾淨整齊的「純文字逐字稿 (Plain Text Transcript)」。請忠實保留音訊中實際聽到的原意、語序、口語重複與不完整語句，不要摘要、改寫、刪除或補充。
 
@@ -60,14 +85,17 @@ public enum GeminiTranscriptPrompt {
             // Do not append `terms` again or the glossary is duplicated.
             parts.append(trimmedPrompt)
         } else if !terms.isEmpty {
-            let termsFormatted = terms.map { "- \($0)" }.joined(separator: "\n")
-            parts.append(
-                "以下詞彙可能出現在錄音中，也可能包含講者姓名；只有音訊內容相符時才採用，不得自行加入：\n\(termsFormatted)"
-            )
+            parts.append(glossaryReference(terms))
         }
 
         parts.append("請直接開始轉錄上述音訊。")
         return parts.joined(separator: "\n\n")
+    }
+
+    private static func glossaryReference(_ terms: [String]) -> String {
+        guard !terms.isEmpty else { return "" }
+        let formatted = terms.map { "- \($0)" }.joined(separator: "\n")
+        return "以下詞彙可能出現在錄音中，也可能包含講者姓名；只有音訊內容相符時才採用，不得自行加入：\n\(formatted)"
     }
 
     public static func promptByAppendingSpeakerContinuity(

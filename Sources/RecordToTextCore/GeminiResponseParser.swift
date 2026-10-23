@@ -36,6 +36,7 @@ enum GeminiResponseParser {
         errors: Failure.Type,
         httpStatusCode: Int,
         collapseBlankLines: Bool = false,
+        recordingContextBlock: String = "",
         logger: ((_ level: String, _ message: String) -> Void)?
     ) throws -> String {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -47,6 +48,7 @@ enum GeminiResponseParser {
             errors: errors,
             httpStatusCode: httpStatusCode,
             collapseBlankLines: collapseBlankLines,
+            recordingContextBlock: recordingContextBlock,
             logger: logger
         )
     }
@@ -57,6 +59,7 @@ enum GeminiResponseParser {
         errors: Failure.Type,
         httpStatusCode: Int,
         collapseBlankLines: Bool = false,
+        recordingContextBlock: String = "",
         logger: ((_ level: String, _ message: String) -> Void)?
     ) throws -> String {
         func warn(_ reason: String) {
@@ -97,6 +100,14 @@ enum GeminiResponseParser {
         let text = (parts ?? []).compactMap { part -> String? in
             part["thought"] as? Bool == true ? nil : part["text"] as? String
         }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
+        if !recordingContextBlock.isEmpty {
+            // Markdown cleanup can alter JSON string values or remove a prefix
+            // containing the envelope. Reject the original echo before cleanup.
+            try OutputContractValidator.validate(
+                text: text, path: "雲端回應", canonicalPrompt: "", terms: [],
+                recordingContextBlock: recordingContextBlock
+            )
+        }
         let sanitized = sanitize(text, collapseBlankLines: collapseBlankLines)
         if truncated {
             warn("MAX_TOKENS")

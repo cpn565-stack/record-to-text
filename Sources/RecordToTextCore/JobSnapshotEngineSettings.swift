@@ -22,7 +22,7 @@ public extension JobSnapshot {
             modelID: settings.selectedModelID,
             modelRevision: ASRModelDescriptor.revision(forModelID: settings.selectedModelID),
             language: language, glossaryID: glossaryID, glossaryName: glossaryName,
-            terms: terms, prompt: prompt, outputLocationMode: outputLocationMode,
+            terms: terms, prompt: prompt, cloudRecordingContext: cloudRecordingContext, outputLocationMode: outputLocationMode,
             outputDirectory: outputDirectory, keepRawTranscript: keepRawTranscript,
             outputFilenameSuffix: outputFilenameSuffix, rawFilenameSuffix: rawFilenameSuffix,
             backendType: settings.backendType, googleAIStudioAPIKey: nil,

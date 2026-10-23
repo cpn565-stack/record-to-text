@@ -256,13 +256,13 @@ struct MainView: View {
 
                 Spacer()
 
-                Text("詞庫於加入時鎖定；模型可於開始前切換")
+                Text("詞庫與背景於加入時固定；模型可於開始前切換")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityHint("展開後可調整專案詞庫與本次補充詞彙")
+        .accessibilityHint("展開後可調整專案詞庫、本次補充詞彙與雲端錄音背景")
     }
 
     private var terminologyEditor: some View {
@@ -316,6 +316,44 @@ struct MainView: View {
                     .foregroundStyle(.secondary)
             }
 
+            if viewModel.settings.backendType != .localQwen {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("錄音背景（選填）").font(.subheadline.weight(.medium))
+                        Spacer()
+                        Text("\(viewModel.recordingContextCount) / 500")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(viewModel.recordingContextErrorMessage == nil ? Color.secondary : .red)
+                    }
+                    ZStack(alignment: .topLeading) {
+                        TextEditor(text: $viewModel.cloudRecordingContextDraft)
+                            .font(.body)
+                            .scrollContentBackground(.hidden)
+                            .padding(8)
+                            .accessibilityLabel("錄音背景（選填）")
+                        if viewModel.cloudRecordingContextDraft.isEmpty {
+                            Text("這是一場半導體封裝製程訪談，主要討論先進封裝與量產良率，包含中英文術語。")
+                                .font(.body).foregroundStyle(.tertiary)
+                                .padding(.horizontal, 13).padding(.vertical, 8)
+                                .allowsHitTesting(false)
+                                .accessibilityHidden(true)
+                        }
+                    }
+                    .frame(height: 96)
+                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                    }
+                    Text("簡述主題或情境，專有名詞請填在詞彙欄。背景會隨音訊送至所選雲端服務。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if let error = viewModel.recordingContextErrorMessage {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption).foregroundStyle(.red)
+                    }
+                }
+            }
+
             if let error = viewModel.promptErrorMessage {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
@@ -324,9 +362,10 @@ struct MainView: View {
                 Button {
                     viewModel.isPromptPreviewPresented = true
                 } label: {
-                    Label("預覽實際送入模型的 Prompt", systemImage: "doc.text.magnifyingglass")
+                    Label("預覽轉錄提示", systemImage: "doc.text.magnifyingglass")
                 }
                 .buttonStyle(.link)
+                .disabled(viewModel.recordingContextErrorMessage != nil)
             }
         }
     }
@@ -816,6 +855,7 @@ private struct JobRowView: View {
     @State private var trackedSegment: Int?
     @State private var currentSegmentStartedAt = Date()
     @State private var cloudResumeIsAvailable = false
+    @State private var isPromptPresented = false
 
     var body: some View {
         rowContent
@@ -842,6 +882,7 @@ private struct JobRowView: View {
             }
         }
         .contextMenu {
+            Button("檢視轉錄提示") { isPromptPresented = true }
             if job.stage == .completed {
                 Button("打開文字檔") {
                     viewModel.openOutput(for: job)
@@ -869,6 +910,10 @@ private struct JobRowView: View {
                     isDeleteJobPresented = true
                 }
             }
+        }
+        .sheet(isPresented: $isPromptPresented) {
+            PromptPreviewView(prompt: viewModel.promptPreview(for: job.snapshot),
+                termCount: job.snapshot.terms.count, isJobSnapshot: true)
         }
         .confirmationDialog(
             "刪除這筆工作的復原資料？",
@@ -1623,14 +1668,17 @@ private struct PromptPreviewView: View {
     @Environment(\.dismiss) private var dismiss
     let prompt: String
     let termCount: Int
+    var isJobSnapshot = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Prompt 預覽")
+                    Text(isJobSnapshot ? "工作轉錄提示" : "轉錄提示預覽")
                         .font(.title2.weight(.semibold))
-                    Text("這段內容會隨工作 Snapshot 鎖定，共 \(termCount) 個詞彙。")
+                    Text(isJobSnapshot
+                         ? "顯示加入時固定的內容，共 \(termCount) 個詞彙。"
+                         : "詞庫與背景於加入時固定，共 \(termCount) 個詞彙。")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
