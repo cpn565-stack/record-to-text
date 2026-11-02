@@ -2191,14 +2191,12 @@ public final class TranscriptionEngine {
 
                 let terminalError = CloudOutputTruncatedError(
                     partialText: truncation.partialText,
-                    finishMessage: [
-                        truncation.finishMessage,
-                        String(format:
+                    finishMessage: truncation.finishMessage,
+                    localDetail: String(format:
                             "已停止自動重試：目前片段 %.1f 秒、切分深度 %d；最多切分 %d 層，子段不得短於 %.0f 秒。",
                             record.durationSeconds, record.splitDepth ?? 0,
                             CloudAdaptiveSegmentPlanner.productionMaximumSplitDepth,
                             cloudAdaptiveMinimumChildDuration)
-                    ].compactMap { $0 }.joined(separator: "；")
                 )
                 captureFailure(terminalError, outcome: .failed)
                 try? segmentManifest.mark(

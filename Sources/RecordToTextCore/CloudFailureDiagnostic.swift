@@ -40,6 +40,9 @@ public struct CloudFailureDiagnostic: Codable, Equatable, Sendable {
     public let errorChain: [ErrorCode]
     public let httpStatus: Int?
     public let timeoutSource: TimeoutSource?
+    public let finishReason: String?
+    public let promptBlockReason: String?
+    public let generationSendCount: Int?
 
     public var isTransientNetworkFailure: Bool {
         [.connectionLost, .offline, .dnsFailure, .hostUnreachable, .urlSessionTimeout,
@@ -59,8 +62,19 @@ public struct CloudFailureDiagnostic: Codable, Equatable, Sendable {
         case .tlsFailure: return "無法與 Google 建立安全連線。"
         case .rateLimited: return "Google 請求或配額已達限制。"
         case .serverError: return "Google 服務暫時無法完成請求。"
-        case .emptyResponse: return "Google 未提供可用的逐字稿文字。"
-        case .contentBlocked: return "Google 未允許處理本片段。"
+        case .emptyResponse:
+            if let count = generationSendCount {
+                return CloudEmptyResponseExhausted(sendCount: count).localizedDescription
+            }
+            return "Google 未提供可用的逐字稿文字。"
+        case .contentBlocked:
+            if let reason = promptBlockReason {
+                if GeminiDiagnosticCode.safety.contains(reason) {
+                    return "Google 內容安全政策攔截（\(reason)）。"
+                }
+                return "Google 未產生本片段逐字稿，未提供具體原因（\(reason)）。"
+            }
+            return "Google 未允許處理本片段。"
         case .invalidResponse: return "Google 回應內容無法使用。"
         case .incompleteStream: return "Google 串流回應未完整結束。"
         case .transportFailure: return "本機傳輸通道失敗。"
@@ -73,11 +87,17 @@ public struct CloudFailureDiagnostic: Codable, Equatable, Sendable {
         var parts = ["stage=\(stage.rawValue)", "category=\(category.rawValue)"]
         if let httpStatus { parts.append("HTTP=\(httpStatus)") }
         if let timeoutSource { parts.append("timeout=\(timeoutSource.rawValue)") }
+        if let finishReason { parts.append("finishReason=\(finishReason)") }
+        if let promptBlockReason { parts.append("promptBlockReason=\(promptBlockReason)") }
+        if let generationSendCount { parts.append("generationSendLimit=\(generationSendCount)") }
         parts += errorChain.map { "\($0.domain):\($0.code)" }
         return parts.joined(separator: "；")
     }
 
     public static func classify(_ error: Error, stage: CloudDiagnosticStage = .unknown) -> Self {
+        if let empty = error as? CloudEmptyResponseExhausted {
+            return .init(category: .emptyResponse, stage: stage, finishReason: "STOP", generationSendCount: empty.sendCount)
+        }
         if let service = error as? CloudServiceRecoveryExhausted { return .http(429, stage: service.recovery.stage) }
         if let http = error as? CloudHTTPFailure { return .http(http.status, stage: http.stage) }
         if let streamError = error as? GeminiStreamServerError { return .http(streamError.statusCode, stage: stage) }
@@ -139,8 +159,13 @@ public struct CloudFailureDiagnostic: Codable, Equatable, Sendable {
             case let .requestFailed(status, _): return http(status, stage: stage)
             case .rateLimited, .quotaExceeded: return http(429, stage: stage)
             case .authenticationFailed: return .init(category: .authUnavailable, stage: .auth)
-            case .emptyCompletedResponse: return .init(category: .emptyResponse, stage: stage)
-            case .prohibitedContent, .promptBlocked: return .init(category: .contentBlocked, stage: stage)
+            case .emptyCompletedResponse: return .init(category: .emptyResponse, stage: stage, finishReason: "STOP")
+            case let .promptBlocked(block): return .init(category: .contentBlocked, stage: stage,
+                httpStatus: block.httpStatusCode, promptBlockReason: block.blockReason)
+            case .prohibitedContent: return .init(category: .contentBlocked, stage: stage)
+            case let .incompleteResponse(reason, _):
+                return .init(category: .invalidResponse, stage: stage,
+                             finishReason: reason == "MISSING_FINISH_REASON" ? nil : reason)
             case .cancelled: return .init(category: .cancelled, stage: stage)
             case .transportMessageTooLarge: return .init(category: .transportFailure, stage: stage)
             default: return .init(category: .invalidResponse, stage: stage)
@@ -151,8 +176,14 @@ public struct CloudFailureDiagnostic: Codable, Equatable, Sendable {
             case let .requestFailed(status, _): return http(status, stage: stage)
             case .rateLimited, .quotaExceeded: return http(429, stage: stage)
             case .emptyResponse: return .init(category: .emptyResponse, stage: stage)
+            case .emptyCompletedResponse: return .init(category: .emptyResponse, stage: stage, finishReason: "STOP")
             case .missingAPIKey, .invalidAPIKey: return .init(category: .authentication, stage: .auth)
-            case .prohibitedContent, .promptBlocked: return .init(category: .contentBlocked, stage: stage)
+            case let .promptBlocked(block): return .init(category: .contentBlocked, stage: stage,
+                httpStatus: block.httpStatusCode, promptBlockReason: block.blockReason)
+            case .prohibitedContent: return .init(category: .contentBlocked, stage: stage)
+            case let .incompleteResponse(reason, _):
+                return .init(category: .invalidResponse, stage: stage,
+                             finishReason: reason == "MISSING_FINISH_REASON" ? nil : reason)
             case .cancelled: return .init(category: .cancelled, stage: stage)
             case .transportMessageTooLarge: return .init(category: .transportFailure, stage: stage)
             default: return .init(category: .invalidResponse, stage: stage)
@@ -169,9 +200,13 @@ public struct CloudFailureDiagnostic: Codable, Equatable, Sendable {
     }
 
     init(category: Category, stage: CloudDiagnosticStage, errorChain: [ErrorCode] = [],
-         httpStatus: Int? = nil, timeoutSource: TimeoutSource? = nil) {
+         httpStatus: Int? = nil, timeoutSource: TimeoutSource? = nil,
+         finishReason: String? = nil, promptBlockReason: String? = nil, generationSendCount: Int? = nil) {
         self.category = category; self.stage = stage; self.errorChain = errorChain
         self.httpStatus = httpStatus; self.timeoutSource = timeoutSource
+        self.finishReason = GeminiDiagnosticCode.sanitized(finishReason)
+        self.promptBlockReason = GeminiDiagnosticCode.sanitized(promptBlockReason)
+        self.generationSendCount = generationSendCount
     }
 }
 
@@ -185,5 +220,22 @@ public struct CloudSegmentExecutionError: LocalizedError {
         let message = [.unknown, .invalidResponse].contains(diagnostic.category)
             ? underlying.localizedDescription : diagnostic.userMessage
         return "第 \(segmentIndex)/\(segmentCount) 段失敗：\(message)"
+    }
+}
+
+// Normalize persisted provider codes as well as newly collected responses.
+extension CloudFailureDiagnostic {
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            category: try values.decode(Category.self, forKey: .category),
+            stage: try values.decode(CloudDiagnosticStage.self, forKey: .stage),
+            errorChain: try values.decode([ErrorCode].self, forKey: .errorChain),
+            httpStatus: try values.decodeIfPresent(Int.self, forKey: .httpStatus),
+            timeoutSource: try values.decodeIfPresent(TimeoutSource.self, forKey: .timeoutSource),
+            finishReason: try values.decodeIfPresent(String.self, forKey: .finishReason),
+            promptBlockReason: try values.decodeIfPresent(String.self, forKey: .promptBlockReason),
+            generationSendCount: try values.decodeIfPresent(Int.self, forKey: .generationSendCount)
+        )
     }
 }

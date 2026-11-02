@@ -12,7 +12,9 @@ protocol GeminiResponseError: Error {
 }
 
 extension GoogleAIStudioError: GeminiResponseError {
-    static func emptyTranscript(finishReason: String) -> Self { .emptyResponse }
+    static func emptyTranscript(finishReason: String) -> Self {
+        finishReason == "STOP" ? .emptyCompletedResponse : .emptyResponse
+    }
 }
 
 extension VertexAIError: GeminiResponseError {
@@ -62,13 +64,17 @@ enum GeminiResponseParser {
         recordingContextBlock: String = "",
         logger: ((_ level: String, _ message: String) -> Void)?
     ) throws -> String {
+        let block = GeminiPromptFeedbackParser.diagnosticsIfBlocked(from: json, httpStatusCode: httpStatusCode)
+        let candidate = (json["candidates"] as? [[String: Any]])?.first
+        CloudDiagnosticContext.current?.recordGenerationResponse(
+            finishReason: candidate?["finishReason"] as? String,
+            promptBlockReason: block?.blockReason
+        )
         func warn(_ reason: String) {
             logger?("warning", GeminiResponseInventory.summary(
                 from: json, reason: reason, rawByteCount: rawByteCount))
         }
-        if let diagnostics = GeminiPromptFeedbackParser.diagnosticsIfBlocked(
-            from: json, httpStatusCode: httpStatusCode
-        ) {
+        if let diagnostics = block {
             logger?("warning", diagnostics.logSummary)
             throw Failure.promptBlocked(diagnostics)
         }

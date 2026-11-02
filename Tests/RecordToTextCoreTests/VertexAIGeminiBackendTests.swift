@@ -113,7 +113,7 @@ final class VertexAIGeminiBackendTests: XCTestCase {
         do {
             _ = try await backend.transcribe(audioData: Data("audio".utf8))
             XCTFail("Empty transcript accepted")
-        } catch is VertexAIError { }
+        } catch let error as CloudEmptyResponseExhausted { XCTAssertEqual(error.sendCount, 4) }
         XCTAssertEqual(requests, GeminiTransportHelper.RetryPolicy.maximumAttempts)
     }
 

@@ -136,17 +136,18 @@ public struct CloudTranscriptionResult: Equatable, Sendable {
 public struct CloudOutputTruncatedError: LocalizedError, Equatable, Sendable {
     public let partialText: String
     public let finishMessage: String?
+    let localDetail: String?
 
-    public init(partialText: String, finishMessage: String? = nil) {
+    public init(partialText: String, finishMessage: String? = nil, localDetail: String? = nil) {
         self.partialText = partialText
         self.finishMessage = finishMessage
+        self.localDetail = localDetail
     }
 
     public var errorDescription: String? {
-        let detail = finishMessage?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let suffix = detail.flatMap { $0.isEmpty ? nil : "：\($0)" } ?? ""
-        return "Gemini 輸出達 maxOutputTokens，逐字稿可能被截斷\(suffix)。這份部分文字不會當成正式完成稿。"
+        // Provider finishMessage may quote submitted audio context or prompt.
+        let detail = localDetail.map { "\($0)" } ?? ""
+        return "Gemini 輸出達 maxOutputTokens，逐字稿可能被截斷。這份部分文字不會當成正式完成稿。\(detail)"
     }
 }
 

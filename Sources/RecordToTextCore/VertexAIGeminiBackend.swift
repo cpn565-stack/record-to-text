@@ -28,22 +28,20 @@ public enum VertexAIError: LocalizedError, Equatable {
             let sizeMB = Double(sizeBytes) / (1024 * 1024)
             let limitMB = Double(limitBytes) / (1024 * 1024)
             return "音檔過大（\(String(format: "%.1f", sizeMB)) MB），超過直接傳輸上限（\(String(format: "%.1f", limitMB)) MB）。請設定 GCS Bucket 或縮短音檔長度。"
-        case let .requestFailed(statusCode, message):
-            let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
-            return "Vertex AI 請求失敗（HTTP \(statusCode)）：\(trimmed)"
-        case let .rateLimited(message, retryAfterSeconds):
+        case let .requestFailed(statusCode, _):
+            return "Vertex AI 請求失敗（HTTP \(statusCode)）。"
+        case let .rateLimited(_, retryAfterSeconds):
             let delay = retryAfterSeconds.map { "，建議至少等待 \(String(format: "%.1f", $0)) 秒" } ?? ""
-            return "Vertex AI 暫時達到速率限制\(delay)：\(message)"
-        case let .quotaExceeded(message):
-            return "Vertex AI 當日配額已用完，短時間重試不會成功：\(message)"
-        case let .prohibitedContent(message):
-            return "Google 內容安全政策攔截：\(message)"
+            return "Vertex AI 暫時達到速率限制\(delay)。"
+        case .quotaExceeded:
+            return "Vertex AI 當日配額已用完，短時間重試不會成功。"
+        case .prohibitedContent:
+            return "Google 內容安全政策攔截。"
         case let .promptBlocked(diagnostics):
             return diagnostics.userFacingMessage
-        case let .incompleteResponse(finishReason, message):
-            let detail = message?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let suffix = detail.map { "：\($0)" } ?? ""
-            return "Vertex AI 回應未正常完成（\(finishReason)）\(suffix)。為避免輸出不完整逐字稿，本次工作已停止。"
+        case let .incompleteResponse(finishReason, _):
+            let code = GeminiDiagnosticCode.sanitized(finishReason) ?? "UNKNOWN"
+            return "Vertex AI 回應未正常完成（\(code)）。為避免輸出不完整逐字稿，本次工作已停止。"
         case .emptyCompletedResponse:
             return "Vertex AI 回報完成（STOP），但未提供逐字稿文字。已完成片段會保留，可稍後重試未完成片段。"
         case .emptyResponse:
@@ -244,6 +242,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                 )
             } catch {
                 var failure = error
+                let priorStage = CloudBudgetContext.current?.stage
                 do {
                     if !rebuilt, case let .requestFailed(statusCode, _) = error as? VertexAIError,
                        [400, 403, 404, 410].contains(statusCode), let bucket = preparedAudio.gcsBucket,
@@ -256,6 +255,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                             workingDirectory: workingDirectory, logger: logger)
                         continue
                     }
+                    if let priorStage { CloudBudgetContext.current?.restoreStage(priorStage) }
                 } catch { failure = error }
                 await deletePreparedGCSObject(
                     preparedAudio,

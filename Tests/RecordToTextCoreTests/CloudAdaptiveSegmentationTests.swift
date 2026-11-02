@@ -299,6 +299,119 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
         try await assertCheckpointResume(service: true)
     }
 
+    func testEmptyStopExhaustionPreservesCheckpointAndResumesOnlyUnfinishedSegments() async throws {
+        let root = try TestSupport.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = ApplicationPaths(root: root.appendingPathComponent("Support"))
+        try paths.createDirectories()
+        let runtime = RuntimeEnvironment.candidate(paths: paths,
+            settings: AppSettings.defaultValue(developerMode: true), bundledHelperURL: nil)
+        let source = root.appendingPathComponent("fixture.wav")
+        try await makeSineAudioFixture(durationSeconds: 6, destinationURL: source, ffmpegURL: runtime.ffmpeg)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockAdaptiveCloudURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel(); MockAdaptiveCloudURLProtocol.handler = nil }
+        let clock = RecoveryClock()
+        let backend = GoogleAIStudioBackend(urlSession: session,
+            configuration: .init(apiKey: "synthetic-test-key", modelID: "gemini-3.8-flash", fallbackPolicy: .flashOnly))
+        let engine = TranscriptionEngine(cloudNetworkEnvironment: clock.environment(), runtime: runtime,
+            paths: paths, googleAIStudioBackend: backend, maximumASRSegmentDuration: 2,
+            silenceDetectionService: CloudSilenceDetectorSpy())
+        let snapshot = JobSnapshot(modelID: "fixture", glossaryID: nil, glossaryName: nil,
+            terms: [], prompt: "忠實轉錄", cloudRecordingContext: "synthetic-resume-context",
+            outputLocationMode: .fixedDirectory, outputDirectory: root.path, keepRawTranscript: false,
+            backendType: .googleAIStudio, googleAIStudioAPIKey: "synthetic-test-key",
+            googleAIStudioModelID: "gemini-3.8-flash", cloudFallbackPolicy: .flashOnly,
+            silenceAwareCloudSegmentation: false)
+        func transcript(_ index: Int) -> String {
+            "[00:0\((index - 1) * 2) - 00:0\(index * 2)]\n講者 1：fixture segment \(index)。"
+        }
+        let initial = MockAIStudioTransport(responses: [.success(("STOP", transcript(1)))]
+            + Array(repeating: .success(("STOP", "")), count: 4))
+        MockAdaptiveCloudURLProtocol.handler = { try initial.handle(request: $0) }
+        var originalJob = TranscriptionJob(sourcePath: source.path, snapshot: snapshot)
+        var recovery: URL?
+        do {
+            _ = try await engine.run(job: originalJob) { _ in }
+            XCTFail("An empty segment must not publish a finished transcript")
+        } catch let error as PipelineExecutionError {
+            let segment = try XCTUnwrap(error.underlying as? CloudSegmentExecutionError)
+            XCTAssertEqual(segment.segmentIndex, 2)
+            XCTAssertEqual((segment.underlying as? CloudEmptyResponseExhausted)?.sendCount, 4)
+            XCTAssertEqual(error.failureDiagnostic?.category, .emptyResponse)
+            XCTAssertEqual(error.failureDiagnostic?.finishReason, "STOP")
+            XCTAssertTrue(error.localizedDescription.contains("4 次發送上限"))
+            XCTAssertTrue(error.localizedDescription.contains("最後一次"))
+            XCTAssertNil(error.networkRecovery)
+            XCTAssertNil(error.serviceRecovery)
+            recovery = error.recoveryDirectory
+            originalJob.stage = .failed
+            originalJob.cloudDiagnostics = error.cloudDiagnostics
+            originalJob.failure = .init(stage: .transcribing, userMessage: error.localizedDescription,
+                technicalDetails: "synthetic empty STOP", recoverable: true,
+                recoveryDirectory: error.recoveryDirectory?.path)
+        }
+        XCTAssertEqual(initial.recordedGenerateRequests.count, 5, "One successful send plus four empty sends")
+        XCTAssertEqual(initial.createdFiles.count, 2, "Retries reuse the second segment's uploaded audio")
+        XCTAssertTrue(initial.recordedGenerateRequests.allSatisfy {
+            $0.url?.path.hasSuffix("gemini-3.8-flash:generateContent") == true
+        }, "Empty STOP must not trigger model fallback")
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "txt" }.isEmpty)
+
+        let directory = try XCTUnwrap(recovery)
+        let manifestURL = directory.appendingPathComponent(RecoveryScanner.segmentManifestFileName)
+        let manifest = try JSONDecoder().decode(AudioSegmentManifest.self, from: Data(contentsOf: manifestURL))
+        XCTAssertEqual(manifest.segments.map(\.status), [.completed, .failed, .planned])
+        XCTAssertEqual(manifest.segments.map(\.completedEventCount), [1, 0, 0])
+        XCTAssertEqual(manifest.segments[1].diagnostic?.generationRequestCount, 4)
+        XCTAssertEqual(manifest.segments[1].diagnostic?.attempts?.filter { $0.stage == .generation }.map(\.finishReason),
+                       Array(repeating: "STOP", count: 4))
+        let originalHistory = try XCTUnwrap(manifest.failureHistory)
+        XCTAssertEqual(originalHistory.generationRequestCount, 5)
+        XCTAssertEqual(originalHistory.events.filter { $0.recoveryStopReason == nil }.count, 4)
+        XCTAssertEqual(originalHistory.events.filter { $0.recoveryStopReason == .attemptsExhausted }.count, 1)
+        XCTAssertTrue(originalHistory.events.allSatisfy { $0.finishReason == "STOP" && $0.segmentIndex == 2 })
+        let roundTripped = try JSONDecoder().decode(AudioSegmentManifest.self, from: JSONEncoder().encode(manifest))
+        XCTAssertEqual(roundTripped, manifest, "Response reasons and original event times survive persisted recovery")
+        let completed = manifest.segments[0]
+        let originalText = try Data(contentsOf: URL(fileURLWithPath: completed.outputPath))
+        let partialText = try String(contentsOf: directory.appendingPathComponent("partial-transcript.txt"), encoding: .utf8)
+        XCTAssertTrue(partialText.contains("fixture segment 1"))
+        XCTAssertFalse(partialText.contains("fixture segment 2"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: manifest.segments[1].outputPath),
+                       "An empty result must not become a successful checkpoint file")
+
+        let remaining = MockAIStudioTransport(responses: [2, 3].map { .success(("STOP", transcript($0))) })
+        MockAdaptiveCloudURLProtocol.handler = { try remaining.handle(request: $0) }
+        var resumed = try CloudJobContinuation.make(from: originalJob, paths: paths)
+        XCTAssertNil(resumed.snapshot.googleAIStudioAPIKey)
+        resumed.snapshot = resumed.snapshot.withGoogleAIStudioAPIKey("synthetic-test-key")
+        defer {
+            try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory
+                .appendingPathComponent("record-to-text").appendingPathComponent(resumed.id.uuidString))
+        }
+        let result = try await engine.run(job: resumed, persistCompletion: { _ in false }) { _ in }
+        XCTAssertEqual(remaining.recordedGenerateRequests.count, 2)
+        XCTAssertEqual(remaining.createdFiles.count, 2)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: completed.outputPath)), originalText)
+        let diagnostics = try XCTUnwrap(result.cloudDiagnostics)
+        XCTAssertEqual(diagnostics.segments.map(\.reusedFromCheckpoint), [true, false, false])
+        XCTAssertTrue(diagnostics.segments.allSatisfy { $0.outcome == .completed && $0.failure == nil })
+        let resumedHistory = try XCTUnwrap(diagnostics.failureHistory)
+        XCTAssertEqual(resumedHistory.events, originalHistory.events, "Resuming must not recreate or retimestamp past failures")
+        XCTAssertEqual(resumedHistory.generationRequestCount, 7, "Reused output adds no generation sends")
+        XCTAssertTrue(diagnostics.debugSummary.contains("費用為估算，失敗或重試請求可能未完整列入。"))
+        XCTAssertEqual(result.cloudSegmentMetadata.map(\.retryCount), [0, 0, 0],
+                       "Historical failed sends must not become new successful retries")
+        let finalText = try String(contentsOf: result.outputURL, encoding: .utf8)
+        for index in 1...3 {
+            XCTAssertEqual(finalText.components(separatedBy: "fixture segment \(index)").count, 2)
+        }
+        XCTAssertFalse(finalText.contains("synthetic-resume-context"))
+    }
+
     private func assertCheckpointResume(service: Bool) async throws {
         let completedCount = service ? 3 : 2
         let total = service ? 5 : 3
@@ -459,13 +572,18 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
         let backend = GoogleAIStudioBackend(networkEnvironment: RecoveryClock().environment(), urlSession: session,
             configuration: .init(apiKey: "mock", modelID: "gemini-3.8-flash"))
         let collector = CloudDiagnosticCollector()
+        let recordingContext = "network-retry-context"
         let text = try await CloudDiagnosticContext.$current.withValue(collector) {
-            try await backend.transcribe(audioData: Data("audio".utf8))
+            try await backend.transcribeDetailed(audioData: Data("audio".utf8), recordingContext: recordingContext)
         }
-        XCTAssertEqual(text, "完整逐字稿")
+        XCTAssertEqual(text.text, "完整逐字稿")
         XCTAssertEqual(transport.recordedGenerateRequests.count, 2)
         XCTAssertEqual(transport.createdFiles.count, 1)
         XCTAssertEqual(transport.deletedFiles.count, 1)
+        for request in transport.recordedGenerateRequests {
+            let prompt = try contextRequestText(contextRequestBody(request))
+            XCTAssertEqual(prompt.components(separatedBy: recordingContext).count, 2)
+        }
         let diagnostic = collector.snapshot(start: 0, end: 4, outcome: .completed, preparation: nil, cloud: nil)
         XCTAssertEqual(diagnostic.retryReasons, [.network, .transportReset])
         XCTAssertTrue(diagnostic.stageTimings.contains { $0.stage == .backoff && $0.seconds > 0 })
@@ -951,7 +1069,13 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
             XCTAssertEqual(manifest.segments[1].completedEventCount, 0)
             XCTAssertEqual(manifest.segments[1].splitDepth, 1)
             XCTAssertTrue(manifest.segments[1].failureMessage?.contains("400") == true)
-            XCTAssertTrue(manifest.segments[1].failureMessage?.contains("Invalid argument") == true)
+            XCTAssertFalse(manifest.segments[1].failureMessage?.contains("Invalid argument") == true)
+            XCTAssertEqual(manifest.segments[1].diagnostic?.failure?.stage, .generation)
+            XCTAssertEqual(manifest.segments[1].diagnostic?.failure?.httpStatus, 400)
+            XCTAssertNil(manifest.segments[1].diagnostic?.attempts?.last(where: { $0.stage == .poll })?.errorCategory)
+            XCTAssertEqual(manifest.failureHistory?.events.count, 2, "One parent MAX_TOKENS event plus one child HTTP 400 event")
+            XCTAssertEqual(manifest.failureHistory?.events.last?.failure.stage, .generation)
+            XCTAssertEqual(manifest.failureHistory?.events.last?.httpStatus, 400)
 
             // 3. Assert partial transcript in recovery contains completed child and NOT parent truncated text
             let partialTranscriptURL = recoveryDir.appendingPathComponent("partial-transcript.txt")

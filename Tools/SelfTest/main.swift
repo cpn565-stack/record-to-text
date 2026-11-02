@@ -1836,11 +1836,11 @@ tests.check(
             && diagnostics.promptTokenCount == 9999
             && diagnostics.audioTokenCount == 9800
             && diagnostics.safetyRatings.contains(where: { $0.category == "HARM_CATEGORY_HARASSMENT" })
-            && description.contains("HTTP 200")
-            && description.contains("promptFeedback.blockReason=OTHER")
+            && description.contains("未提供具體原因（OTHER）")
             && !description.contains("HTTP 400")
             && !description.contains("內容安全政策攔截")
-            && diagnostics.logSummary.contains("responseId=resp-blocked-1")
+            && diagnostics.logSummary.contains("responseIdPresent=true")
+            && !diagnostics.logSummary.contains("resp-blocked-1")
             && diagnostics.logSummary.contains("audioTokenCount=9800")
             && studioError.errorDescription == vertexError.errorDescription
     }(),
@@ -1979,11 +1979,12 @@ tests.check(
         )
         return summary.contains("no_candidates")
             && summary.contains("candidateCount=0")
-            && summary.contains("responseId=resp-empty-1")
+            && summary.contains("responseIdPresent=true")
+            && !summary.contains("resp-empty-1")
             && summary.contains("thoughtsTokenCount=34")
             && summary.contains("rawBytes=88")
     }(),
-    "empty Gemini response inventory captures responseId and token counts"
+    "empty Gemini response inventory captures responseId presence and token counts"
 )
 
 tests.check(

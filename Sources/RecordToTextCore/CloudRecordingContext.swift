@@ -78,19 +78,13 @@ extension CloudRecordingContext {
 
     static func redactedError(_ error: Error, context: String) -> Error {
         guard !normalized(context).isEmpty else { return error }
-        func clean(_ text: String) -> String { redactedDiagnostic(text, context: context) }
+        // Provider prose can quote any substring of submitted data. Whole-line
+        // replacement cannot protect that case; retain only typed error metadata.
+        func clean(_ text: String) -> String { "[服務錯誤原文已隱藏]" }
         func cleanReason(_ reason: String) -> String {
-            // These values drive retry/safety handling. A context coincidentally
-            // equal to a protocol token must not change that classification.
-            let protocolReasons: Set<String> = [
-                "STOP", "MAX_TOKENS", "SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST",
-                "IMAGE_SAFETY", "SPII", "MODEL_ARMOR", "RECITATION", "OTHER",
-                "BLOCK_REASON_UNSPECIFIED", "FINISH_REASON_UNSPECIFIED", "MISSING_FINISH_REASON",
-                "LANGUAGE", "MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL", "TOO_MANY_TOOL_CALLS",
-                "IMAGE_PROHIBITED_CONTENT", "IMAGE_OTHER", "NO_IMAGE"
-            ]
-            return protocolReasons.contains(reason.trimmingCharacters(in: .whitespacesAndNewlines).uppercased())
-                ? reason : clean(reason)
+            // Keep the original protocol value for classification. Presentation
+            // and persistence independently map unknown values to UNKNOWN.
+            reason
         }
         func block(_ d: GeminiPromptBlockDiagnostics) -> GeminiPromptBlockDiagnostics {
             .init(httpStatusCode: d.httpStatusCode, blockReason: cleanReason(d.blockReason),
@@ -101,7 +95,8 @@ extension CloudRecordingContext {
                 promptTokenCount: d.promptTokenCount, audioTokenCount: d.audioTokenCount)
         }
         if let error = error as? CloudOutputTruncatedError {
-            return CloudOutputTruncatedError(partialText: error.partialText, finishMessage: error.finishMessage.map(clean))
+            return CloudOutputTruncatedError(partialText: error.partialText, finishMessage: error.finishMessage.map(clean),
+                                             localDetail: error.localDetail)
         }
         if let error = error as? GoogleAIStudioError {
             switch error {

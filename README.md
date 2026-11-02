@@ -95,7 +95,7 @@ open /path/to/record-to-text.app
 
 | 項目 | 約略大小 |
 | --- | --- |
-| 目前開發用 `.app` | 約 130 MB（含 ffmpeg／ffprobe） |
+| 目前開發用 `.app` | 檔案內容約 136 MiB；APFS 壓縮後磁碟占用約 64 MiB（含完整 ffmpeg／ffprobe） |
 | 本機 Python + mlx-audio 環境 | 約 **0.5 GB** |
 | ffmpeg + OpenCC（Homebrew） | 約 **數十 MB** |
 | 預設 8-bit 模型 | 約 **2.3 GB** |
@@ -193,6 +193,17 @@ scripts/build-app.sh
 ```text
 dist/record-to-text.app
 ```
+
+打包預設使用 macOS 透明檔案壓縮，保留全部編解碼器、資源與執行檔內容；磁碟占用取決於目的地檔案系統。可用 `COMPACT_APP=0 scripts/build-app.sh` 關閉。正式簽章流程若重寫檔案，可在完成簽章後對暫存 App 執行 `scripts/compact-app.sh dist/record-to-text.app`。
+
+開發目錄清理先預覽，再移至垃圾桶：
+
+```bash
+python3 -B scripts/clean-development.py
+python3 -B scripts/clean-development.py --apply
+```
+
+範圍只有 `.build`、音訊工具下載壓縮包，以及同版本較舊 build 的 DMG／App 備份；保留目前產物、原始碼、測試、文件、歷史轉錄成果、模型與工作復原資料。下次編譯會重建快取；清空垃圾桶後才釋放這部分磁碟空間。
 
 ### 不依賴 Xcode 的檢查
 

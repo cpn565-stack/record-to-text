@@ -37,6 +37,7 @@ public final class CloudSegmentBudget: @unchecked Sendable {
     private var depth = 0
     private var activeStage = "preparing"
     public var stage: String { lock.withLock { activeStage } }
+    func restoreStage(_ stage: String) { lock.withLock { activeStage = stage } }
     public init(rootSegmentID: UUID = UUID(), limit: Duration = .seconds(900),
                 now: @escaping @Sendable () -> ContinuousClock.Instant = { .now },
                 sleeper: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },

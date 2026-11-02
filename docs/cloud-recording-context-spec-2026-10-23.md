@@ -1,6 +1,6 @@
 # 雲端轉錄錄音背景規格
 
-日期：2026-10-23。狀態：功能已實作並安裝為 0.2.1（16），工作樹未 commit；音訊 A/B 尚未做，效益仍待驗證。下文是實作契約，不是事後改寫的規格。
+日期：2026-10-23。狀態：功能已實作並安裝為 0.2.1（16）；程式提交為 `7bd8021`，後續只補重試請求的測試斷言與驗證紀錄。音訊 A/B 尚未做，效益仍待驗證。下文是實作契約，不是事後改寫的規格。
 
 ## 1 目的與範圍
 
@@ -159,6 +159,8 @@
 C06–C09 使用攔截請求的 backend／pipeline fixture 驗證，不只直接測字串 helper。UI 驗收涵蓋雲端顯示、本機隱藏、鍵盤輸入、批次加入、錯誤恢復、清空及唯讀工作檢視。這些檢查證明資料流與功能契約，不代表模型必然遵循背景限制。
 
 實作完成後執行相關 Swift 測試，再執行專案既有 `SKIP_APP_BUNDLE=1 scripts/run-checks.sh`；XCTest 因缺少完整 Xcode 而跳過時不得記為通過。build、版本遞增及安裝屬後續實作交付，不列為本次規格完成證據。
+
+2026-10-24 使用完整 Xcode 重跑 `SKIP_APP_BUNDLE=1 REQUIRE_XCTEST=1 scripts/run-checks.sh` 通過：Python 134 項、XCTest 568 項（1 項離線模型 smoke test 因未提供模型／音訊／Python 路徑而跳過）、self-test 72 項、10 個 pipeline 情境，0 失敗。另直接攔截請求驗證 AI Studio 網路重試，以及 AI Studio／Vertex 429 重試的每個生成請求都只帶同一份背景。`SKIP_APP_BUNDLE=1` 表示本輪未重建 App；build 16 安裝紀錄見 [`NEXT_STEPS.md`](NEXT_STEPS.md)。沒有發送真實 Google API 請求，品質試驗仍待合法授權的測試音訊與人工核對稿。
 
 ## 11 雲端品質試驗
 

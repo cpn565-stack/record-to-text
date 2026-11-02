@@ -1,5 +1,12 @@
 import Foundation
 
+struct CloudEmptyResponseExhausted: LocalizedError {
+    let sendCount: Int
+    var errorDescription: String? {
+        "本片段已達 \(sendCount) 次發送上限，最後一次仍未取得逐字稿，已停止自動重試。"
+    }
+}
+
 /// Owns generation service retries and the user's optional model fallback.
 /// Transport recovery remains in GeminiTransportHelper; both consume the same
 /// per-segment/model task quota and root deadline.
@@ -96,14 +103,17 @@ enum GeminiGenerationRetry {
                     guard let retry else { throw error }
                     guard attempt < policy.maximumAttempts, quota.count < policy.maximumAttempts else {
                         if retry.reason == .emptyResponse {
-                            logger?("warning", "Vertex Gemini 連續嘗試後仍回傳 STOP 空內容，已達最多 \(policy.maximumAttempts) 次嘗試；停止自動重試並保留已完成片段。")
+                            let exhausted = CloudEmptyResponseExhausted(sendCount: max(attempt, quota.count))
+                            logger?("warning", exhausted.localizedDescription)
+                            throw exhausted
                         }
                         throw error
                     }
                     let delay = policy.backoffSeconds(forAttempt: attempt, retryAfterSeconds: retry.retryAfterSeconds)
                     try CloudBudgetContext.validateBackoff(seconds: delay)
                     CloudDiagnosticContext.current?.retry(retry.reason)
-                    logger?("info", "\(serviceName) \(modelID) \(retry.message)，\(String(format: "%.1f", delay)) 秒後進行第 \(attempt + 1) 次嘗試。")
+                    let sends = max(attempt, quota.count)
+                    logger?("info", "\(serviceName) \(modelID) \(retry.message)，約 \(String(format: "%.1f", delay)) 秒後重試（已發送 \(sends)／\(policy.maximumAttempts) 次）。")
                     try await CloudBudgetContext.backoff(seconds: delay)
                     attempt += 1
                 }
@@ -115,6 +125,7 @@ enum GeminiGenerationRetry {
         switch error {
         case let error as GoogleAIStudioError:
             switch error {
+            case .emptyCompletedResponse: return .init(reason: .emptyResponse)
             case let .rateLimited(_, delay): return .init(reason: .rateLimited, retryAfterSeconds: delay)
             case let .requestFailed(status, _) where GeminiTransportHelper.RetryPolicy.isRetryableStatusCode(status):
                 return .init(reason: .serverError)

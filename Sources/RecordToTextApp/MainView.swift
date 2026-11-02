@@ -1564,6 +1564,7 @@ enum JobDebugClipboard {
     static func dump(_ summary: RecentJobSummary) -> String {
         ["record-to-text 完成工作診斷", "版本：\(bundleVersionLabel)",
          "工作：\(summary.id.uuidString)",
+         "狀態：\(summary.stage == .completed ? summary.resolvedOutputCompleteness.completionLabel : summary.stage.displayName)",
          summary.cloudDiagnostics?.debugSummary ?? "（舊工作未保存分段診斷）"].joined(separator: "\n")
     }
 
@@ -1618,7 +1619,7 @@ enum JobDebugClipboard {
             "來源：\(job.sourcePath)",
             "後端：\(job.snapshot.backendType.displayName)",
             "模型：\(job.cloudModelSummary ?? job.snapshot.requestedModelID)",
-            "狀態：\(job.stage.displayName)"
+            "狀態：\(job.stage == .completed ? job.resolvedOutputCompleteness.completionLabel : job.stage.displayName)"
         ]
         if let failure = job.failure {
             lines.append("失敗：\(failure.userMessage)")

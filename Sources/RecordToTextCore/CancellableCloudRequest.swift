@@ -84,11 +84,12 @@ final class CancellableCloudRequest: @unchecked Sendable {
                         return
                     }
                     networkContext?.setReceivingResponse(false)
-                    diagnosticCollector?.requestStarted(
+                    let diagnosticID = diagnosticCollector?.requestStarted(
                         stage: resolvedStage,
                         responseMode: responseMode,
                         sendSequence: sendSequence
                     )
+                    taskDelegate.bindDiagnosticAttempt(diagnosticID)
                     task.resume()
                 }
             }
@@ -122,6 +123,7 @@ final class CloudRequestTaskDelegate: NSObject, URLSessionDataDelegate, @uncheck
     private let lock = NSRecursiveLock()
     private let startedAt: ContinuousClock.Instant
 
+    private var diagnosticAttemptID: UUID?
     private var waitID: UUID?
     private var monitor: Task<Void, Never>?
     private var connectivityStopped = false
@@ -184,6 +186,10 @@ final class CloudRequestTaskDelegate: NSObject, URLSessionDataDelegate, @uncheck
         }
     }
 
+    func bindDiagnosticAttempt(_ id: UUID?) {
+        lock.withLock { diagnosticAttemptID = id }
+    }
+
     private func now() -> ContinuousClock.Instant {
         context?.environment.now() ?? .now
     }
@@ -201,8 +207,13 @@ final class CloudRequestTaskDelegate: NSObject, URLSessionDataDelegate, @uncheck
             monitor = Task { [weak self] in
                 while let self, !Task.isCancelled {
                     do {
-                        try context.check()
-                        context.publish(.waiting)
+                        let active = try self.lock.withLock {
+                            guard !self.connectivityStopped, !self.finished, self.waitID != nil else { return false }
+                            try context.check()
+                            context.publish(.waiting)
+                            return true
+                        }
+                        guard active else { return }
                         try await Task.sleep(for: .milliseconds(100))
                     } catch is CancellationError { return }
                     catch {
@@ -245,8 +256,8 @@ final class CloudRequestTaskDelegate: NSObject, URLSessionDataDelegate, @uncheck
         lock.withLock {
             guard !finished else { return }
             receivedResponse = response
-            if let http = response as? HTTPURLResponse {
-                collector?.updateCurrentAttempt(httpStatus: http.statusCode)
+            if let http = response as? HTTPURLResponse, let diagnosticAttemptID {
+                collector?.updateCurrentAttempt(attemptID: diagnosticAttemptID, httpStatus: http.statusCode)
             }
         }
         completionHandler(.allow)
@@ -325,7 +336,9 @@ final class CloudRequestTaskDelegate: NSObject, URLSessionDataDelegate, @uncheck
                 }
                 usedProxy = lastTx.isProxyConnection
             }
+            guard let diagnosticAttemptID else { return }
             collector?.updateCurrentAttempt(
+                attemptID: diagnosticAttemptID,
                 networkProtocol: networkProtocol,
                 usedProxy: usedProxy
             )
@@ -416,10 +429,14 @@ final class CloudRequestTaskDelegate: NSObject, URLSessionDataDelegate, @uncheck
     }
 
     private func flushDiagnosticsLocked() {
+        // Cancellation can finish a task before it claims a send / gets an ID.
+        // Such a task must never overwrite the previous request's diagnostics.
+        guard let diagnosticAttemptID else { return }
         let httpStatus = (receivedResponse as? HTTPURLResponse)?.statusCode
         let sseEvents = responseMode == .geminiSSE ? (accumulator?.sseEventCount ?? 0) : nil
         let finishReason = accumulator?.finishReason
         collector?.updateCurrentAttempt(
+            attemptID: diagnosticAttemptID,
             httpStatus: httpStatus,
             finishReason: finishReason,
             uploadCompletedSeconds: uploadCompletedSeconds,

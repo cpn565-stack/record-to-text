@@ -11,6 +11,7 @@ public enum GoogleAIStudioError: LocalizedError, Equatable {
     case promptBlocked(GeminiPromptBlockDiagnostics)
     case incompleteResponse(finishReason: String, message: String?)
     case emptyResponse
+    case emptyCompletedResponse
     case invalidJSONResponse
     case audioPayloadTooLarge(sizeBytes: Int, limitBytes: Int)
     case transportMessageTooLarge
@@ -23,26 +24,26 @@ public enum GoogleAIStudioError: LocalizedError, Equatable {
         switch self {
         case .missingAPIKey:
             return "尚未設定 Google AI Studio API Key。請至設定頁面填入 API Key。"
-        case let .invalidAPIKey(reason):
-            return "Google AI Studio API Key 無效：\(reason)"
-        case let .requestFailed(statusCode, message):
-            let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
-            return "Google AI Studio 請求失敗（HTTP \(statusCode)）：\(trimmed)"
-        case let .rateLimited(message, retryAfterSeconds):
+        case .invalidAPIKey:
+            return "Google AI Studio API Key 無效，請檢查設定與使用權限。"
+        case let .requestFailed(statusCode, _):
+            return "Google AI Studio 請求失敗（HTTP \(statusCode)）。"
+        case let .rateLimited(_, retryAfterSeconds):
             let delay = retryAfterSeconds.map { "，建議至少等待 \(String(format: "%.1f", $0)) 秒" } ?? ""
-            return "Google AI Studio 暫時達到速率限制\(delay)：\(message)"
-        case let .quotaExceeded(message):
-            return "Google AI Studio 當日配額已用完，短時間重試不會成功：\(message)"
-        case let .prohibitedContent(message):
-            return "Google 內容安全政策攔截：\(message)"
+            return "Google AI Studio 暫時達到速率限制\(delay)。"
+        case .quotaExceeded:
+            return "Google AI Studio 當日配額已用完，短時間重試不會成功。"
+        case .prohibitedContent:
+            return "Google 內容安全政策攔截。"
         case let .promptBlocked(diagnostics):
             return diagnostics.userFacingMessage
-        case let .incompleteResponse(finishReason, message):
-            let detail = message?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let suffix = detail.map { "：\($0)" } ?? ""
-            return "Google AI Studio 回應未正常完成（\(finishReason)）\(suffix)。為避免輸出不完整逐字稿，本次工作已停止。"
+        case let .incompleteResponse(finishReason, _):
+            let code = GeminiDiagnosticCode.sanitized(finishReason) ?? "UNKNOWN"
+            return "Google AI Studio 回應未正常完成（\(code)）。為避免輸出不完整逐字稿，本次工作已停止。"
         case .emptyResponse:
             return "Google AI Studio 未回傳任何文字內容或候選結果。"
+        case .emptyCompletedResponse:
+            return "Google 已結束本次生成，但沒有產生逐字稿文字。"
         case .invalidJSONResponse:
             return "Google AI Studio 回傳的資料無法解讀為有效 JSON。"
         case let .audioPayloadTooLarge(sizeBytes, limitBytes):
@@ -51,8 +52,8 @@ public enum GoogleAIStudioError: LocalizedError, Equatable {
             return "音檔過大（\(String(format: "%.1f", sizeMB)) MB），超過直接傳輸上限（\(String(format: "%.1f", limitMB)) MB）。"
         case .transportMessageTooLarge:
             return "連到 Google 的傳輸通道失敗（本機無法送出這包資料）。這不是音檔超過 Gemini 時長上限。請重試；若持續發生，需要改為先上傳音檔再轉錄。"
-        case let .fileUploadFailed(message):
-            return "Google AI Studio 音訊上傳失敗：\(message)"
+        case .fileUploadFailed:
+            return "Google AI Studio 音訊上傳失敗。"
         case .filesAPIUnsupported:
             return "目前服務不支援 Files API。"
         case .fileProcessingTimedOut:
@@ -249,6 +250,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                 )
             } catch {
                 var failure = error
+                let priorStage = CloudBudgetContext.current?.stage
                 do {
                     if !rebuilt, case let .requestFailed(statusCode, _) = error as? GoogleAIStudioError,
                        [400, 403, 404, 410].contains(statusCode), let name = preparedAudio.uploadedFileName,
@@ -259,6 +261,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                             mimeType: mimeType, useFilesAPI: true, workingDirectory: workingDirectory, logger: logger)
                         continue
                     }
+                    if let priorStage { CloudBudgetContext.current?.restoreStage(priorStage) }
                 } catch { failure = error }
                 await deletePreparedRemoteFile(
                     preparedAudio,

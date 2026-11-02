@@ -12,9 +12,18 @@ public struct GeminiSafetyRating: Equatable, Sendable {
     }
 
     public var compactDescription: String {
-        var parts = [category]
+        let knownCategories: Set<String> = [
+            "HARM_CATEGORY_UNSPECIFIED", "HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH",
+            "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT", "HARM_CATEGORY_CIVIC_INTEGRITY",
+            "HARM_CATEGORY_IMAGE_HATE", "HARM_CATEGORY_IMAGE_DANGEROUS_CONTENT",
+            "HARM_CATEGORY_IMAGE_HARASSMENT", "HARM_CATEGORY_IMAGE_SEXUALLY_EXPLICIT"
+        ]
+        let normalizedCategory = category.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        var parts = [knownCategories.contains(normalizedCategory) ? normalizedCategory : "UNKNOWN"]
         if let probability, !probability.isEmpty {
-            parts.append(probability)
+            let normalized = probability.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            parts.append(["HARM_PROBABILITY_UNSPECIFIED", "NEGLIGIBLE", "LOW", "MEDIUM", "HIGH"].contains(normalized)
+                         ? normalized : "UNKNOWN")
         }
         if let blocked {
             parts.append(blocked ? "blocked=true" : "blocked=false")
@@ -58,26 +67,15 @@ public struct GeminiPromptBlockDiagnostics: Equatable, Sendable {
     }
 
     public var isExplicitSafetyPolicy: Bool {
-        [
-            "SAFETY",
-            "PROHIBITED_CONTENT",
-            "BLOCKLIST",
-            "IMAGE_SAFETY",
-            "SPII",
-            "MODEL_ARMOR"
-        ].contains(normalizedBlockReason)
+        GeminiDiagnosticCode.safety.contains(normalizedBlockReason)
     }
 
     public var userFacingMessage: String {
-        let extra = blockReasonMessage
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .flatMap { $0.isEmpty ? nil : $0 }
+        let code = GeminiDiagnosticCode.sanitized(blockReason) ?? "UNKNOWN"
         if isExplicitSafetyPolicy {
-            let suffix = extra.map { "：\($0)" } ?? ""
-            return "Google 內容安全政策攔截：\(blockReason)\(suffix)"
+            return "Google 內容安全政策攔截（\(code)）。"
         }
-        let unknownDetail = extra.map { "：\($0)" } ?? "（Google 未提供具體原因）"
-        return "Google 已接受請求（HTTP \(httpStatusCode)），但未產生逐字稿：promptFeedback.blockReason=\(blockReason)\(unknownDetail)"
+        return "Google 未產生本片段逐字稿，未提供具體原因（\(code)）。"
     }
 
     public var logSummary: String {
@@ -85,10 +83,10 @@ public struct GeminiPromptBlockDiagnostics: Equatable, Sendable {
             ? "-"
             : safetyRatings.map(\.compactDescription).joined(separator: ",")
         return [
-            "Gemini promptFeedback 攔截：blockReason=\(blockReason)",
+            "Gemini promptFeedback 攔截：blockReason=\(GeminiDiagnosticCode.sanitized(blockReason) ?? "UNKNOWN")",
             "HTTP \(httpStatusCode)",
-            "responseId=\(responseID ?? "-")",
-            "modelVersion=\(modelVersion ?? "-")",
+            "responseIdPresent=\(responseID != nil)",
+            "modelVersionPresent=\(modelVersion != nil)",
             "promptTokenCount=\(promptTokenCount.map(String.init) ?? "-")",
             "audioTokenCount=\(audioTokenCount.map(String.init) ?? "-")",
             "safetyRatings=\(ratings)"
@@ -237,27 +235,27 @@ public enum GeminiResponseInventory {
         reason: String,
         rawByteCount: Int? = nil
     ) -> String {
-        let keys = json.keys.sorted().joined(separator: ",")
+        let keys = knownKeys(in: json, allowed: ["candidates", "promptFeedback", "usageMetadata", "modelVersion", "responseId", "createTime"])
         let promptFeedback = json["promptFeedback"] as? [String: Any]
         let feedbackKeys = promptFeedback.map {
-            $0.keys.sorted().joined(separator: ",")
+            knownKeys(in: $0, allowed: ["blockReason", "blockReasonMessage", "safetyRatings"])
         } ?? "-"
-        let blockReason = promptFeedback.flatMap {
+        let blockReason = GeminiDiagnosticCode.sanitized(promptFeedback.flatMap {
             GeminiPromptFeedbackParser.blockReasonString(from: $0)
-        } ?? "-"
+        }) ?? "-"
         let candidates = json["candidates"] as? [[String: Any]] ?? []
         let usage = json["usageMetadata"] as? [String: Any]
         let candidateShape = candidates.first.map(describeCandidate) ?? "-"
         return [
-            "Gemini 回應無法形成逐字稿：\(reason)",
+            "Gemini 回應無法形成逐字稿：\(safeInventoryReason(reason))",
             "rawBytes=\(rawByteCount.map(String.init) ?? "-")",
             "keys=\(keys.isEmpty ? "-" : keys)",
             "promptFeedback.keys=\(feedbackKeys)",
             "blockReason=\(blockReason)",
             "candidateCount=\(candidates.count)",
             "firstCandidate=\(candidateShape)",
-            "responseId=\(json["responseId"] as? String ?? "-")",
-            "modelVersion=\(json["modelVersion"] as? String ?? "-")",
+            "responseIdPresent=\(json["responseId"] is String)",
+            "modelVersionPresent=\(json["modelVersion"] is String)",
             "promptTokenCount=\(stringify(usage?["promptTokenCount"]))",
             "candidatesTokenCount=\(stringify(usage?["candidatesTokenCount"]))",
             "thoughtsTokenCount=\(stringify(usage?["thoughtsTokenCount"]))",
@@ -266,7 +264,7 @@ public enum GeminiResponseInventory {
     }
 
     private static func describeCandidate(_ candidate: [String: Any]) -> String {
-        let finish = candidate["finishReason"] as? String ?? "-"
+        let finish = GeminiDiagnosticCode.sanitized(candidate["finishReason"] as? String) ?? "-"
         let content = candidate["content"] as? [String: Any]
         let parts = content?["parts"] as? [[String: Any]] ?? []
         let partShapes = parts.map(describePart).joined(separator: "|")
@@ -274,7 +272,10 @@ public enum GeminiResponseInventory {
     }
 
     private static func describePart(_ part: [String: Any]) -> String {
-        var flags: [String] = part.keys.sorted()
+        var flags: [String] = [knownKeys(in: part, allowed: [
+            "text", "thought", "thoughtSignature", "inlineData", "fileData", "functionCall",
+            "functionResponse", "executableCode", "codeExecutionResult", "videoMetadata"
+        ])]
         if let thought = part["thought"] as? Bool {
             flags.append(thought ? "thought=true" : "thought=false")
         }
@@ -288,9 +289,17 @@ public enum GeminiResponseInventory {
         if let number = value as? NSNumber {
             return String(number.intValue)
         }
-        if let value {
-            return String(describing: value)
-        }
         return "-"
+    }
+
+    private static func safeInventoryReason(_ reason: String) -> String {
+        let localReasons: Set<String> = ["no_candidates", "missing_finish_reason", "missing_candidate_parts", "empty_transcript_text"]
+        return localReasons.contains(reason) ? reason : GeminiDiagnosticCode.sanitized(reason) ?? "UNKNOWN"
+    }
+
+    private static func knownKeys(in object: [String: Any], allowed: Set<String>) -> String {
+        var keys = object.keys.filter { allowed.contains($0) }.sorted()
+        if object.keys.contains(where: { !allowed.contains($0) }) { keys.append("UNKNOWN") }
+        return keys.joined(separator: ",")
     }
 }

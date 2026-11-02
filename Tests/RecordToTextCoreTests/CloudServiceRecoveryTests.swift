@@ -11,11 +11,12 @@ final class CloudServiceRecoveryTests: XCTestCase {
         return URLSession(configuration: configuration)
     }
     private func transcribe(_ type: ASRBackendType, clock: RecoveryClock, session: URLSession,
-                            fallback: CloudFallbackPolicy = .disabled) async throws -> CloudTranscriptionResult {
+                            fallback: CloudFallbackPolicy = .disabled,
+                            recordingContext: String = "") async throws -> CloudTranscriptionResult {
         if type == .googleAIStudio {
             return try await GoogleAIStudioBackend(networkEnvironment: clock.environment(), urlSession: session,
                 configuration: .init(apiKey: "fixture", modelID: "gemini-3.8-flash", useFilesAPI: false, fallbackPolicy: fallback))
-                .transcribeDetailed(audioData: Data("fixture".utf8))
+                .transcribeDetailed(audioData: Data("fixture".utf8), recordingContext: recordingContext)
         }
         let root = try TestSupport.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -25,7 +26,7 @@ final class CloudServiceRecoveryTests: XCTestCase {
         return try await VertexAIGeminiBackend(networkEnvironment: clock.environment(),
             authService: GCloudAuthService(customGCloudPath: gcloud.path), urlSession: session,
             configuration: .init(projectID: "fixture-project", modelID: "gemini-3.8-flash", fallbackPolicy: fallback))
-            .transcribeDetailed(audioData: Data("fixture".utf8))
+            .transcribeDetailed(audioData: Data("fixture".utf8), recordingContext: recordingContext)
     }
 
     func testBothBackendsCoolDownThirtyAndSixtySecondsThenSucceed() async throws {
@@ -33,14 +34,21 @@ final class CloudServiceRecoveryTests: XCTestCase {
             let clock = RecoveryClock(), session = session()
             defer { session.invalidateAndCancel(); RecoveryURLProtocol.handler = nil }
             let sends = RecoveryValue<[Double]>([])
-            RecoveryURLProtocol.handler = { _ in
+            let context = "429 retry context"
+            var generationPrompts: [String] = []
+            RecoveryURLProtocol.handler = { request in
+                generationPrompts.append(try contextRequestText(contextRequestBody(request)))
                 sends.value.append(clock.seconds)
                 return sends.value.count < 3 ? (429, self.busy) : (200, type == .vertexAI ? self.vertexSuccess : self.success)
             }
-            let result = try await transcribe(type, clock: clock, session: session)
+            let result = try await transcribe(type, clock: clock, session: session, recordingContext: context)
             XCTAssertEqual(sends.value, [0, 30, 90])
             XCTAssertEqual(result.metadata.retryCount, 2)
             XCTAssertEqual(result.text, "完整測試逐字稿")
+            XCTAssertEqual(generationPrompts.count, 3)
+            for prompt in generationPrompts {
+                XCTAssertEqual(prompt.components(separatedBy: context).count, 2)
+            }
         }
     }
 

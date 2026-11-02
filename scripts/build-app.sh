@@ -9,6 +9,7 @@ VERSION="${VERSION:-${MARKETING_VERSION}}"
 BUILD_NUMBER="${BUILD_NUMBER:-${DEFAULT_BUILD_NUMBER}}"
 UNIVERSAL="${UNIVERSAL:-0}"
 ADHOC_SIGN="${ADHOC_SIGN:-1}"
+COMPACT_APP="${COMPACT_APP:-1}"
 BUILD_DIR="${PROJECT_DIR}/.build"
 DIST_DIR="${PROJECT_DIR}/dist"
 APP_PATH="${DIST_DIR}/record-to-text.app"
@@ -80,6 +81,10 @@ if [[ "${ADHOC_SIGN}" == "1" ]]; then
   codesign --force --sign - "${HELPERS_DIR}/ffmpeg"
   codesign --force --sign - "${HELPERS_DIR}/ffprobe"
   codesign --force --sign - "${APP_PATH}"
+fi
+
+if [[ "${COMPACT_APP}" == "1" ]]; then
+  "${SCRIPT_DIR}/compact-app.sh" "${APP_PATH}"
 fi
 
 print "Built ${APP_PATH}"

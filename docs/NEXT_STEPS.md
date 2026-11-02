@@ -1,10 +1,58 @@
 # 下一次接續
 
+## 2026-10-30：App 與開發目錄無損精簡
+
+保留全部功能。已安裝 App、dist App 及重新打包的 DMG 均沿用原 Build 17 的全部 11 個檔案，逐檔 SHA-256 一致；以 APFS 透明壓縮將 App 磁碟占用從 135.8 MiB 降至 63.9 MiB，檔案內容仍約 136 MiB。這次沒有重新編譯或納入較新的診斷修補，版本與執行檔雜湊維持下節 Build 17 紀錄。
+
+開發目錄從約 1.4 GiB 降至約 228 MiB。編譯快取、舊 build 10／16 DMG 與三份舊 App 備份合計約 1,067 MiB 移至垃圾桶，可還原；清空垃圾桶後才釋放此部分空間。保留全部原始碼、測試、文件、歷史轉錄／復原證據、目前產物、模型及工作資料。runtime 音訊工具同樣只做無損壓縮，126.4 MiB → 60.9 MiB。
+
+`build-app.sh` 預設在簽章後執行 `compact-app.sh`，可用 `COMPACT_APP=0` 關閉；`clean-development.py` 預設只預覽，`--apply` 才移到垃圾桶。清理拒絕 Git 追蹤內容，保留目前／較新 build 與其他版本；下次編譯會重建快取。
+
+驗證：App 與掛載 DMG 的檔案內容、資源、權限、簽章通過；WAV、MP3、M4A、FLAC、OGG、MP4 → 16 kHz 單聲道 → 24 kbps MP3 及靜音偵測通過；編解碼器、filter、format、protocol 清單不變；四份 Python helper 可解析。正常退出／重開後 19 筆工作身分與狀態保留（12 完成、5 失敗、2 中斷），未自動送出工作。清理腳本的預覽、受追蹤檔案保護及資料保留以暫存 fixture 驗證；未使用私人音訊或真實 Google API。
+
+目前 DMG SHA-256：`2bf38522ae423262b017c32545846526428982f45d5148f69db70341985576bf`。空間、備份位置與驗證紀錄：`dist/footprint-2026-10-30.json`。下節較早的 DMG 雜湊與備份路徑屬歷史紀錄。
+
+## 2026-10-29：AI Studio 空回應復原實作交接
+
+目前分支 `codex/ai-studio-empty-response-recovery` 接續 [AI Studio 空回應復原與雲端診斷規格](ai-studio-empty-response-recovery-spec-2026-10-29.md)，工作樹為 0.2.1（17），變更尚未提交。AI Studio 明確 STOP 但正文空白時，沿用同一模型與已準備音訊，在既有每片段／模型最多 4 次的實際生成額度及原 root deadline 內重試；網路／限流與空 STOP 共用額度。安全攔截與 OTHER 不走空結果重試。增加生成回應的固定代碼診斷、失敗後續跑與費用估算提示；回應未知代碼顯示 UNKNOWN，錯誤與日誌避免顯示服務自由文字，包含部分引用背景的 HTTP 錯誤。未發送真實音訊或 Google API。
+
+2026-10-29 驗證與建置：`SKIP_APP_BUNDLE=1 REQUIRE_XCTEST=1 scripts/run-checks.sh` 通過，Swift 592 項、1 項因未提供本機模型與音訊 smoke-test 參數而跳過、0 失敗；Python 134 項、72 項 self-test、10 個 pipeline 情境通過。Swift release 編譯與 `scripts/verify-release.sh` 通過，App 為 ad-hoc 簽章的 Apple Silicon 測試版，DMG 未公證。Build 17：`dist/record-to-text.app`、`dist/record-to-text-0.2.1-build17-development.dmg` 及 `.sha256`；App 執行檔 SHA-256 `e91f70f4bfbaa15a404476d0b0875bda3995d325b975616e2fe44f1732d486e8`，DMG SHA-256 `6c868f3b5e19f7f2d515ae6e548bba8e938c907597613073bd2b70e69e896480`。原 dist Build 16 備份在 `dist/install-backups/before-ai-studio-build17-20261029.noindex/record-to-text.app`；依使用者要求已正常退出舊版並安裝、啟動 `/Applications/record-to-text.app` Build 17；安裝後執行檔雜湊與 dist 一致、簽章驗證通過。原安裝版 Build 16 在 `dist/install-backups/installed-before-build17-20261029.noindex/record-to-text.app`。升級前後 journal 均為 22 筆（10 完成、10 失敗、2 中斷），未自動啟動工作。未執行真實模型 smoke test，也未呼叫真實 Google API。
+
+原錄音背景驗收仍有完整背景回吐漏擋，以及重複檔案確認期間切換後端的狀態一致性待處理；Vertex 活躍串流的 300 秒請求期限亦屬獨立待辦。上述問題未隨本版全部修復，實際內容攔截是否發生仍由 Google 決定。背景對辨識品質的 A/B 仍未完成。
+
+## 2026-10-29：AI Studio 空回應復原規格
+
+[AI Studio 空回應復原與雲端診斷補強規格](ai-studio-empty-response-recovery-spec-2026-10-29.md) 已撰寫；後續實作狀態見上節。必要性列 P1，建議下一個維護版完成「明確空 STOP 的有限重試＋unary JSON 原因代碼＋錯誤摘要」。沿用每 segment/model 最多 4 次實際生成及原 root budget；網路、429、空結果共用額度，明確 Google 攔截不重試。規格包含 T01–T15 驗收、資料相容性、費用估算界線及隱私要求。代理 SSE、合蓋提示、來源失效與 Vertex 活躍串流 300 秒期限分開立案。
+
+## 2026-10-29：最近雲端執行錯誤分類
+
+已核對本機 journal／recovery、安裝版及系統睡眠紀錄，見 [10/28–29 調查](cloud-run-diagnosis-2026-10-29.md)。截至 13:58 的保留資料，去除沿用與終止摘要重複後有 19 次異常操作：8 次 Google prompt 攔截、5 次空回應、4 次同片段代理路徑斷線、1 次睡眠期間上傳初始化逾時、1 次來源路徑失效。這不是完整失敗率；歷史成功清單只有 10 筆。
+
+確認 App 既有缺口：AI Studio 空 STOP 被歸為一般 emptyResponse 而直接停止，Vertex 同型結果則有重試；unary JSON 的 finishReason 也未寫入結構化診斷。相關兩項既有離線測試通過，尚未修改程式或安裝版本。多份 Google 攔截工作背景為空，不能歸因為新增背景功能的普遍回歸。長達近一小時的等待已對上合蓋／DarkWake，該工作之後續跑三段完整成功；不是 Google 連續推論近一小時。優先補 AI Studio 空 STOP 復原與診斷，再評估代理／串流相容性。
+
+## 2026-10-24：Vertex SAFETY 攔截調查
+
+兩份 Vertex `gemini-3.8-flash` 錄音均在第 2 段收到 Google `promptFeedback.blockReason=SAFETY`；第 1、3 段及復原檢查點保留。安全設定與 Flash 的 300 秒請求期限均未在 build 16 改變，但兩份工作都有相同的非空背景，尚無真實有／無背景對照可排除提示影響。調查細節與重送界線見 [調查紀錄](vertex-safety-diagnosis-2026-10-24.md)。
+
+已修正複製診斷只寫「完成」而遺失 `hasGaps` 標籤的顯示問題，改為「完成（含缺口）」，涵蓋工作及最近工作。相關 20 項 XCTest 通過，0 跳過、0 失敗；本輪未重建安裝包、重啟 App 或發送 Google API 請求。此修正與測試／文件仍在工作樹。
+
+後續兩份成功案例補充：皆為三段完整 `STOP`，沒有安全缺口。其一第一次請求在 291.79 秒開始回傳正式文字，卻在 300.60 秒被 App 固定期限取消（已收到 133 個 SSE 事件），重送後成功。這確認既有 Flash 300 秒單次期限會中止仍有進度的 Vertex 串流，與 Google `SAFETY` 為不同問題；不是 build 16 才新增的期限。等待策略尚未修改，詳見調查紀錄。成功工作摘要未保存背景，不能推定四份背景皆相同。
+
+第三次回報再增加兩份完整成功：一份兩段各一次成功；另一份第 1 段先收到 HTTP 429，冷卻 35.87 秒後同模型重送成功，後兩段也完成。這次是服務端限流／容量或配額相關拒絕，現有冷卻機制正常處理，沒有安全缺口或 300 秒逾時。六份累計 17 段、15 完成／2 安全攔截，20 次生成發送（另含 2 次逾時重送及 1 次 429 重送）。新增紀錄只做唯讀核對與文件更新，未重送或修改等待政策。
+
+第四次回報的第七份錄音：第 2 段第一次為 `STOP` 但正文為空，短暫等待後同模型重試成功；第 3 段另被 `SAFETY` 攔截，缺少最後約 5 分 25 秒，第 1、2 段文字與復原檢查點仍在。空回應／thought／串流累積相關 4 項既有測試通過；原始 SSE 未保存，僅能說目前未發現 parser 回歸證據。七份累計 20 段、17 完成／3 安全攔截，24 次生成發送（2 逾時、1 次 429、1 次空回應的重送）。本輪未修改轉錄程式或安裝版本。
+
+兩個缺口工作手動重送後仍為 `SAFETY`：本次各只發送缺段，先在約 7 秒出現 `-1005`（記錄 `h3`），等待約 20 秒重建 session 後以 `h2` 收到新的 Google 攔截回應。snapshot 與原工作相同，完成片段確實沿用；歷史錯誤／用量統計包含前次資料，不能視為本輪新增費用。沒有 300 秒逾時，不宜再盲目同條件重送。已在本機 `Repair-Exports/blocked-segments-20261024-xcg8i7pz/` 準備約 5 分 25 秒及 19 分 59 秒兩個缺口 WAV，附時間偏移 manifest；來源雜湊未變，尚未辨識／合併／上傳。完整資訊見調查紀錄的「相同設定手動重送後仍攔截」。
+
+AI Studio 對照更新：錄音 B 的三段一次完成，原本 Vertex 反覆被擋的第 2 段在 AI Studio 成功；錄音 G 則前兩段完成、第 3 段回傳 HTTP 200、`promptFeedback.blockReason=OTHER`，缺最後約 5 分 25 秒。`OTHER` 是 Google 未提供具體原因的攔截，App 依既有規則列為失敗、保留兩個完成檢查點，不能冒稱明確安全政策或完整成功。G 兩份 snapshot 的提示、詞庫、背景均不同（77／83 scalars），不是 backend 單變因對照；不能再泛稱 AI Studio 一定能解決或只屬 Vertex 問題。詳見調查紀錄的「AI Studio 對照：一份完整，一份仍失敗」。本輪未上傳、重送或更動失敗規則。
+
 ## 2026-10-23：雲端錄音背景 build 16
 
-[雲端轉錄錄音背景規格](cloud-recording-context-spec-2026-10-23.md) 已在分支 `codex/cloud-recording-context` 實作，工作樹尚未 commit。可留空的雲端背景在加入佇列時寫入 snapshot；分段、重試與續跑沿用原背景，只有「使用目前設定」重建才捕捉新草稿，本機不套用。回吐檢查在 Markdown 清理前比對原始背景包裝；錯誤與診斷會先拿掉背景原文。
+[雲端轉錄錄音背景規格](cloud-recording-context-spec-2026-10-23.md) 已在分支 `codex/cloud-recording-context` 實作並提交為 `7bd8021`。可留空的雲端背景在加入佇列時寫入 snapshot；分段、重試與續跑沿用原背景，只有「使用目前設定」重建才捕捉新草稿，本機不套用。回吐檢查在 Markdown 清理前比對原始背景包裝；錯誤與診斷會先拿掉背景原文。
 
 `SKIP_APP_BUNDLE=1 REQUIRE_XCTEST=1 scripts/run-checks.sh` 於 2026-10-23 22:10 通過：Swift 568 項、1 項預設跳過、0 失敗，含 Python、self-test 與 10 個 pipeline 情境。已以 Apple Silicon release、ad-hoc 簽章安裝 `/Applications/record-to-text.app` 0.2.1（16）。執行檔 SHA-256 `cf2b10c86ba440f3598a84ad14af0339fbd71f6e2e0e897b12cf8a2ce7768457`，與 `dist/record-to-text.app` 一致。測試包為 `dist/record-to-text-0.2.1-build16-development.dmg`，DMG 未用 Developer ID 簽署，不是公證發行版。build 15 備份在 `dist/install-backups/before-recording-context-build16-20261023.noindex/record-to-text.app`。未做規格第 11 節的音訊 A/B，不能把功能可用說成辨識變準。
+
+2026-10-24 重新執行 `SKIP_APP_BUNDLE=1 REQUIRE_XCTEST=1 scripts/run-checks.sh` 通過：Python 134 項、Swift 568 項（1 項本機模型 smoke test 因未提供素材而跳過）、self-test 72 項、10 個 pipeline 情境，0 失敗；`git diff --check` 亦通過。本輪跳過 App bundle 建置，沒有重裝或新增測試包。追加的請求攔截斷言確認兩個雲端 backend 的 429 重試及 AI Studio 網路重試沿用相同背景。仍未呼叫真實 Google API 或執行錄音 A/B。
 
 ## 2026-10-17：build 14–15 Vertex 串流回應實作與 thinking 期間保活修正
 

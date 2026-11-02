@@ -32,6 +32,7 @@ public struct CloudAttemptDiagnostic: Codable, Equatable, Sendable {
     public var httpStatus: Int?
     public var errorCategory: CloudFailureDiagnostic.Category?
     public var finishReason: String?
+    public var promptBlockReason: String?
     public var uploadCompletedSeconds: Double?
     public var firstResponseByteSeconds: Double?
     public var firstTextDeltaSeconds: Double?
@@ -49,6 +50,7 @@ public struct CloudAttemptDiagnostic: Codable, Equatable, Sendable {
         httpStatus: Int? = nil,
         errorCategory: CloudFailureDiagnostic.Category? = nil,
         finishReason: String? = nil,
+        promptBlockReason: String? = nil,
         uploadCompletedSeconds: Double? = nil,
         firstResponseByteSeconds: Double? = nil,
         firstTextDeltaSeconds: Double? = nil,
@@ -64,7 +66,8 @@ public struct CloudAttemptDiagnostic: Codable, Equatable, Sendable {
         self.sendSequence = sendSequence
         self.httpStatus = httpStatus
         self.errorCategory = errorCategory
-        self.finishReason = Self.sanitizeIdentifier(finishReason, maxLength: 64)
+        self.finishReason = GeminiDiagnosticCode.sanitized(finishReason)
+        self.promptBlockReason = GeminiDiagnosticCode.sanitized(promptBlockReason)
         self.uploadCompletedSeconds = Self.finiteNonNegative(uploadCompletedSeconds)
         self.firstResponseByteSeconds = Self.finiteNonNegative(firstResponseByteSeconds)
         self.firstTextDeltaSeconds = Self.finiteNonNegative(firstTextDeltaSeconds)
@@ -182,13 +185,18 @@ public struct CloudJobDiagnostics: Codable, Equatable, Sendable {
                 "\($0.timestamp.ISO8601Format())；root=\($0.rootSegmentID?.uuidString ?? "unknown")；segment=\($0.segmentIndex ?? 0)；attempt=\($0.attempt)；path=\($0.path?.rawValue ?? "unknown")；wait=\($0.networkWaitSeconds ?? 0)；sessionReset=\($0.sessionWasReset ?? false)；resultUnknown=\($0.resultUnknown)；" + $0.failure.debugSummary
                     + ($0.responseMode.map { "；mode=\($0.rawValue)" } ?? "")
                     + ($0.sendSequence.map { "；send=\($0)" } ?? "")
-                    + ($0.finishReason.map { "；finishReason=\($0)" } ?? "")
+                    + ($0.promptBlockReason != $0.failure.promptBlockReason ? ($0.promptBlockReason.map { "；promptBlockReason=\($0)" } ?? "") : "")
+                    + ($0.finishReason != $0.failure.finishReason ? ($0.finishReason.map { "；finishReason=\($0)" } ?? "") : "")
                     + ($0.receivedByteCount.map { "；bytes=\($0)" } ?? "")
                     + ($0.sseEventCount.map { "；sseEvents=\($0)" } ?? "")
                     + ($0.recoveryStopReason.map { "；recoveryStopReason=\($0.rawValue)" } ?? "")
                     + ($0.serviceStopReason.map { "；serviceStopReason=\($0.rawValue)" } ?? "")
                     + ($0.serviceWaitSeconds.map { "；serviceWaitSeconds=\($0)" } ?? "")
             }
+        }
+        if segments.contains(where: { !$0.retryReasons.isEmpty || ($0.generationRequestCount ?? 0) > 1 })
+            || failureHistory?.events.contains(where: { $0.failure.stage == .generation }) == true {
+            lines.append("費用為估算，失敗或重試請求可能未完整列入。")
         }
         return lines.joined(separator: "\n")
     }
@@ -203,6 +211,7 @@ final class CloudDiagnosticCollector: @unchecked Sendable {
     private var attempt = 0
     private var stageAttempts: [CloudDiagnosticStage: Int] = [:]
     private var attempts: [CloudAttemptDiagnostic] = []
+    private var attemptIDs: [UUID] = []
     private var lastFailure: CloudFailureDiagnostic?
     private var lastRecoveryStopReason: CloudNetworkRecovery.StopReason?
     private var lastServiceStopReason: CloudServiceRecovery.StopReason?
@@ -228,13 +237,16 @@ final class CloudDiagnosticCollector: @unchecked Sendable {
         lock.withLock { modelID = safe }
     }
 
-    func requestStarted(stage: CloudDiagnosticStage, responseMode: CloudResponseMode? = nil, sendSequence: Int? = nil) {
+    @discardableResult
+    func requestStarted(stage: CloudDiagnosticStage, responseMode: CloudResponseMode? = nil, sendSequence: Int? = nil) -> UUID {
         lock.withLock {
             stageAttempts[stage, default: 0] += 1
             attempt = stageAttempts[stage, default: 0]
-            lastFailure = nil
-            lastRecoveryStopReason = nil
-            lastServiceStopReason = nil
+            if lastFailure?.stage == stage || stage == .generation {
+                lastFailure = nil
+                lastRecoveryStopReason = nil
+                lastServiceStopReason = nil
+            }
             if stage == .generation { generationRequestCount += 1; history?.generationStarted() }
             let resolvedSequence = sendSequence ?? (stage == .generation ? generationRequestCount : attempt)
             let entry = CloudAttemptDiagnostic(
@@ -243,17 +255,23 @@ final class CloudDiagnosticCollector: @unchecked Sendable {
                 responseMode: responseMode,
                 sendSequence: resolvedSequence
             )
+            let id = UUID()
             attempts.append(entry)
+            attemptIDs.append(id)
             if attempts.count > 32 {
+                attemptIDs.removeFirst(attempts.count - 32)
                 attempts.removeFirst(attempts.count - 32)
             }
+            return id
         }
     }
 
     func updateCurrentAttempt(
+        attemptID: UUID? = nil,
         httpStatus: Int? = nil,
         errorCategory: CloudFailureDiagnostic.Category? = nil,
         finishReason: String? = nil,
+        promptBlockReason: String? = nil,
         uploadCompletedSeconds: Double? = nil,
         firstResponseByteSeconds: Double? = nil,
         firstTextDeltaSeconds: Double? = nil,
@@ -265,11 +283,18 @@ final class CloudDiagnosticCollector: @unchecked Sendable {
     ) {
         lock.withLock {
             guard !attempts.isEmpty else { return }
-            let idx = attempts.count - 1
+            let idx: Int
+            if let attemptID {
+                guard let match = attemptIDs.firstIndex(of: attemptID) else { return }
+                idx = match
+            } else { idx = attempts.count - 1 }
             if let httpStatus { attempts[idx].httpStatus = httpStatus }
             if let errorCategory { attempts[idx].errorCategory = errorCategory }
-            if let finishReason = CloudAttemptDiagnostic.sanitizeIdentifier(finishReason, maxLength: 64) {
+            if let finishReason = GeminiDiagnosticCode.sanitized(finishReason) {
                 attempts[idx].finishReason = finishReason
+            }
+            if let block = GeminiDiagnosticCode.sanitized(promptBlockReason) {
+                attempts[idx].promptBlockReason = block
             }
             if let v = CloudAttemptDiagnostic.finiteNonNegative(uploadCompletedSeconds) {
                 attempts[idx].uploadCompletedSeconds = v
@@ -292,6 +317,16 @@ final class CloudDiagnosticCollector: @unchecked Sendable {
         }
     }
 
+    /// Called synchronously by the generation parser, after transport completion and
+    /// before the retry layer records a failure. Upload/poll JSON is never eligible.
+    func recordGenerationResponse(finishReason: String?, promptBlockReason: String?) {
+        let id = lock.withLock {
+            attempts.lastIndex(where: { $0.stage == .generation }).map { attemptIDs[$0] }
+        }
+        guard let id else { return }
+        updateCurrentAttempt(attemptID: id, finishReason: finishReason, promptBlockReason: promptBlockReason)
+    }
+
     @discardableResult
     func failure(_ error: Error, stage: CloudDiagnosticStage) -> CloudFailureDiagnostic {
         if let pipeline = error as? PipelineExecutionError {
@@ -303,7 +338,8 @@ final class CloudDiagnosticCollector: @unchecked Sendable {
                 serviceStopReason: (segment.underlying as? CloudServiceRecoveryExhausted)?.recovery.stopReason)
         }
         return failure(CloudFailureDiagnostic.classify(error, stage: stage), recoveryStopReason:
-            (error as? CloudNetworkRecoveryExhausted)?.recovery.stopReason,
+            (error as? CloudNetworkRecoveryExhausted)?.recovery.stopReason
+                ?? (error is CloudEmptyResponseExhausted ? .attemptsExhausted : nil),
             serviceStopReason: (error as? CloudServiceRecoveryExhausted)?.recovery.stopReason)
     }
 
@@ -330,20 +366,21 @@ final class CloudDiagnosticCollector: @unchecked Sendable {
             lastRecoveryStopReason = stopReason
             lastServiceStopReason = serviceStop
             var latestAttempt: CloudAttemptDiagnostic?
-            if !attempts.isEmpty {
-                let idx = attempts.count - 1
+            if let idx = attempts.lastIndex(where: { $0.stage == diagnostic.stage })
+                ?? (diagnostic.stage == .unknown ? attempts.indices.last : nil) {
                 attempts[idx].errorCategory = diagnostic.category
                 if attempts[idx].httpStatus == nil {
                     attempts[idx].httpStatus = diagnostic.httpStatus
                 }
                 latestAttempt = attempts[idx]
             }
+            let resolvedAttempt = stageAttempts[diagnostic.stage] ?? attempt
             history?.record(.init(
                 timestamp: Date(),
                 rootSegmentID: rootSegmentID,
                 segmentIndex: segmentIndex,
                 modelID: modelID,
-                attempt: attempt,
+                attempt: resolvedAttempt,
                 completedSegmentCount: completedSegmentCount,
                 rootRemainingSeconds: rootRemainingSeconds,
                 resultUnknown: generationRequestCount > 0 && diagnostic.isTransientNetworkFailure,
@@ -357,7 +394,8 @@ final class CloudDiagnosticCollector: @unchecked Sendable {
                 responseMode: latestAttempt?.responseMode,
                 sendSequence: latestAttempt?.sendSequence,
                 httpStatus: latestAttempt?.httpStatus ?? diagnostic.httpStatus,
-                finishReason: latestAttempt?.finishReason,
+                finishReason: latestAttempt?.finishReason ?? diagnostic.finishReason,
+                promptBlockReason: latestAttempt?.promptBlockReason ?? diagnostic.promptBlockReason,
                 uploadCompletedSeconds: latestAttempt?.uploadCompletedSeconds,
                 firstResponseByteSeconds: latestAttempt?.firstResponseByteSeconds,
                 firstTextDeltaSeconds: latestAttempt?.firstTextDeltaSeconds,
@@ -412,6 +450,7 @@ public struct CloudFailureEvent: Codable, Equatable, Sendable {
     public var sendSequence: Int?
     public var httpStatus: Int?
     public var finishReason: String?
+    public var promptBlockReason: String?
     public var uploadCompletedSeconds: Double?
     public var firstResponseByteSeconds: Double?
     public var firstTextDeltaSeconds: Double?
@@ -467,4 +506,66 @@ final class CloudFailureHistoryCollector: @unchecked Sendable {
 
 enum CloudDiagnosticContext {
     @TaskLocal static var current: CloudDiagnosticCollector?
+}
+
+// Normalize persisted provider codes as well as newly collected responses.
+extension CloudAttemptDiagnostic {
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            modelID: try values.decodeIfPresent(String.self, forKey: .modelID),
+            stage: try values.decode(CloudDiagnosticStage.self, forKey: .stage),
+            responseMode: try values.decodeIfPresent(CloudResponseMode.self, forKey: .responseMode),
+            sendSequence: try values.decodeIfPresent(Int.self, forKey: .sendSequence),
+            httpStatus: try values.decodeIfPresent(Int.self, forKey: .httpStatus),
+            errorCategory: try values.decodeIfPresent(CloudFailureDiagnostic.Category.self, forKey: .errorCategory),
+            finishReason: try values.decodeIfPresent(String.self, forKey: .finishReason),
+            promptBlockReason: try values.decodeIfPresent(String.self, forKey: .promptBlockReason),
+            uploadCompletedSeconds: try values.decodeIfPresent(Double.self, forKey: .uploadCompletedSeconds),
+            firstResponseByteSeconds: try values.decodeIfPresent(Double.self, forKey: .firstResponseByteSeconds),
+            firstTextDeltaSeconds: try values.decodeIfPresent(Double.self, forKey: .firstTextDeltaSeconds),
+            completedSeconds: try values.decodeIfPresent(Double.self, forKey: .completedSeconds),
+            receivedByteCount: try values.decodeIfPresent(Int.self, forKey: .receivedByteCount),
+            sseEventCount: try values.decodeIfPresent(Int.self, forKey: .sseEventCount),
+            networkProtocol: try values.decodeIfPresent(String.self, forKey: .networkProtocol),
+            usedProxy: try values.decodeIfPresent(Bool.self, forKey: .usedProxy)
+        )
+    }
+}
+
+// Normalize persisted provider codes as well as newly collected responses.
+extension CloudFailureEvent {
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            timestamp: try values.decode(Date.self, forKey: .timestamp),
+            rootSegmentID: try values.decodeIfPresent(UUID.self, forKey: .rootSegmentID),
+            segmentIndex: try values.decodeIfPresent(Int.self, forKey: .segmentIndex),
+            modelID: try values.decodeIfPresent(String.self, forKey: .modelID),
+            attempt: try values.decode(Int.self, forKey: .attempt),
+            completedSegmentCount: try values.decode(Int.self, forKey: .completedSegmentCount),
+            rootRemainingSeconds: try values.decodeIfPresent(Double.self, forKey: .rootRemainingSeconds),
+            resultUnknown: try values.decode(Bool.self, forKey: .resultUnknown),
+            failure: try values.decode(CloudFailureDiagnostic.self, forKey: .failure),
+            path: try values.decodeIfPresent(CloudNetworkPath.self, forKey: .path),
+            networkWaitSeconds: try values.decodeIfPresent(Double.self, forKey: .networkWaitSeconds),
+            sessionWasReset: try values.decodeIfPresent(Bool.self, forKey: .sessionWasReset),
+            recoveryStopReason: try values.decodeIfPresent(CloudNetworkRecovery.StopReason.self, forKey: .recoveryStopReason),
+            serviceStopReason: try values.decodeIfPresent(CloudServiceRecovery.StopReason.self, forKey: .serviceStopReason),
+            serviceWaitSeconds: try values.decodeIfPresent(Double.self, forKey: .serviceWaitSeconds),
+            responseMode: try values.decodeIfPresent(CloudResponseMode.self, forKey: .responseMode),
+            sendSequence: try values.decodeIfPresent(Int.self, forKey: .sendSequence),
+            httpStatus: try values.decodeIfPresent(Int.self, forKey: .httpStatus),
+            finishReason: GeminiDiagnosticCode.sanitized(try values.decodeIfPresent(String.self, forKey: .finishReason)),
+            promptBlockReason: GeminiDiagnosticCode.sanitized(try values.decodeIfPresent(String.self, forKey: .promptBlockReason)),
+            uploadCompletedSeconds: try values.decodeIfPresent(Double.self, forKey: .uploadCompletedSeconds),
+            firstResponseByteSeconds: try values.decodeIfPresent(Double.self, forKey: .firstResponseByteSeconds),
+            firstTextDeltaSeconds: try values.decodeIfPresent(Double.self, forKey: .firstTextDeltaSeconds),
+            completedSeconds: try values.decodeIfPresent(Double.self, forKey: .completedSeconds),
+            receivedByteCount: try values.decodeIfPresent(Int.self, forKey: .receivedByteCount),
+            sseEventCount: try values.decodeIfPresent(Int.self, forKey: .sseEventCount),
+            networkProtocol: try values.decodeIfPresent(String.self, forKey: .networkProtocol),
+            usedProxy: try values.decodeIfPresent(Bool.self, forKey: .usedProxy)
+        )
+    }
 }

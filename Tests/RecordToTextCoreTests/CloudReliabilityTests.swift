@@ -227,7 +227,7 @@ final class GeminiCloudResponseValidationTests: XCTestCase {
 
         for data in [noCandidates, noContent, whitespace] {
             XCTAssertThrowsError(try aiStudio.parseCandidateText(from: data)) {
-                XCTAssertEqual($0 as? GoogleAIStudioError, .emptyResponse)
+                XCTAssertEqual($0 as? GoogleAIStudioError, data == noCandidates ? .emptyResponse : .emptyCompletedResponse)
             }
             XCTAssertThrowsError(try vertex.parseCandidateText(from: data)) {
                 XCTAssertEqual($0 as? VertexAIError, data == noCandidates ? .emptyResponse : .emptyCompletedResponse)
@@ -267,9 +267,7 @@ final class GeminiCloudResponseValidationTests: XCTestCase {
             }
             XCTAssertEqual(diagnostics, expected)
             let description = (error as? LocalizedError)?.errorDescription ?? ""
-            XCTAssertTrue(description.contains("HTTP 200"))
-            XCTAssertTrue(description.contains("promptFeedback.blockReason=OTHER"))
-            XCTAssertTrue(description.contains("Google 未提供具體原因"))
+            XCTAssertTrue(description.contains("未提供具體原因（OTHER）"))
             XCTAssertFalse(description.contains("HTTP 400"))
             XCTAssertFalse(description.contains("內容安全政策攔截"))
         }
@@ -285,12 +283,13 @@ final class GeminiCloudResponseValidationTests: XCTestCase {
             }
             XCTAssertEqual(diagnostics, expected)
             let description = (error as? LocalizedError)?.errorDescription ?? ""
-            XCTAssertTrue(description.contains("HTTP 200"))
+            XCTAssertTrue(description.contains("未提供具體原因（OTHER）"))
             XCTAssertFalse(description.contains("內容安全政策攔截"))
         }
 
         XCTAssertEqual(logged, [expected.logSummary])
-        XCTAssertTrue(logged[0].contains("responseId=resp-blocked-1"))
+        XCTAssertTrue(logged[0].contains("responseIdPresent=true"))
+        XCTAssertFalse(logged[0].contains("resp-blocked-1"))
         XCTAssertTrue(logged[0].contains("audioTokenCount=9800"))
     }
 
