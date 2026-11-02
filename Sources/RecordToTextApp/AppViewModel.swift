@@ -56,18 +56,15 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var googleAIStudioCredentialStorageState:
         GoogleAIStudioCredentialStorageState = .absent
 
-    /// Session-only draft; jobs persist their own immutable value.
-    @Published var cloudRecordingContextDraft = "" {
-        didSet { recordingContextDraftRevision &+= 1 }
-    }
-    private var recordingContextDraftRevision: UInt64 = 0
+    /// Session-only draft, kept until the app quits so it need not be retyped
+    /// for each batch; jobs persist their own immutable value.
+    @Published var cloudRecordingContextDraft = ""
     private struct IntakeContext {
         let settings: AppSettings
         let prompt: PromptBuildResult
         let glossaryID: String?
         let glossaryName: String?
         let recordingContext: String
-        let draftRevision: UInt64
     }
     private var pendingDuplicateIntake: IntakeContext?
     private let outputDirectoryChooser: (() -> URL?)?
@@ -1902,7 +1899,7 @@ final class AppViewModel: ObservableObject {
                 : try CloudRecordingContext.validated(cloudRecordingContextDraft)
             return IntakeContext(settings: settings, prompt: prompt,
                 glossaryID: selectedGlossary?.id, glossaryName: selectedGlossary?.name,
-                recordingContext: context, draftRevision: recordingContextDraftRevision)
+                recordingContext: context)
         } catch {
             alert = UserFacingAlert(title: "轉錄提示無法套用", message: error.localizedDescription)
             return nil
@@ -1977,10 +1974,6 @@ final class AppViewModel: ObservableObject {
             jobs.append(job)
         }
 
-        if batchSettings.backendType != .localQwen,
-           recordingContextDraftRevision == intake.draftRevision {
-            cloudRecordingContextDraft = ""
-        }
         pruneHistoryIfNeeded()
         persistJobs()
         // Jobs stay queued until the user presses「開始轉文字」.

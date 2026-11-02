@@ -21,14 +21,14 @@ final class AppRecordingContextTests: XCTestCase {
         return (AppViewModel(paths: paths, credentialStore: ContextCredentialStore(), outputDirectoryChooser: choose), paths)
     }
 
-    func testBatchCapturesOnceClearsUsedDraftAndPersistsOnlySnapshots() async throws {
+    func testBatchCapturesOnceKeepsDraftForNextBatchAndPersistsOnlySnapshots() async throws {
         let (model, paths) = try fixture()
         await model.waitForCredentialLoading()
         model.cloudRecordingContextDraft = " \r\n背景 A\rB \n"
         XCTAssertEqual(model.recordingContextCount, 6)
         model.addFiles([paths.root.appendingPathComponent("a.wav"), paths.root.appendingPathComponent("b.wav")])
         XCTAssertEqual(model.jobs.map(\.snapshot.cloudRecordingContext), ["背景 A\nB", "背景 A\nB"])
-        XCTAssertEqual(model.cloudRecordingContextDraft, "")
+        XCTAssertEqual(model.cloudRecordingContextDraft, " \r\n背景 A\rB \n")
         model.cloudRecordingContextDraft = "新的草稿"
         XCTAssertFalse(model.promptPreview(for: model.jobs[0].snapshot).contains("新的草稿"))
         XCTAssertTrue(model.promptPreview.contains("新的草稿"))
@@ -47,7 +47,7 @@ final class AppRecordingContextTests: XCTestCase {
         try await restored.flushJobPersistence()
     }
 
-    func testInvalidDraftBlocksCloudButNotLocalAndLocalDoesNotClearIt() async throws {
+    func testInvalidDraftBlocksCloudButNotLocalAndLocalKeepsIt() async throws {
         let (model, paths) = try fixture()
         await model.waitForCredentialLoading()
         let source = paths.root.appendingPathComponent("a.wav")
@@ -132,7 +132,7 @@ final class AppRecordingContextTests: XCTestCase {
         XCTAssertNil(rebuilt.continuationParentJobID)
         let summary = RecentJobSummary(job: original)
         model.retryRecentJob(summary)
-        XCTAssertEqual(model.jobs.last?.snapshot.cloudRecordingContext, "")
+        XCTAssertEqual(model.jobs.last?.snapshot.cloudRecordingContext, "背景 B")
         let continuation = try CloudJobContinuation.make(from: original, paths: paths)
         XCTAssertEqual(continuation.snapshot.cloudRecordingContext, "背景 A")
         XCTAssertNotEqual(continuation.id, original.id)
@@ -216,7 +216,7 @@ extension AppRecordingContextTests {
         XCTAssertTrue(sent[1].contains("CONTEXT_A"))
         XCTAssertFalse(sent[1].contains("CONTEXT_B"))
         XCTAssertTrue(sent[2].contains("CONTEXT_B"))
-        XCTAssertFalse(sent[3].contains("recording_context"))
+        XCTAssertTrue(sent[3].contains("CONTEXT_B"))
         XCTAssertNil(model.jobs[2].continuationParentJobID)
         XCTAssertNil(model.jobs[3].resumeFromRecoveryDirectory)
         XCTAssertFalse(model.jobs.flatMap(\.logLines).joined().contains("CONTEXT_"))
