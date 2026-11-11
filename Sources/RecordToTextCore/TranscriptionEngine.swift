@@ -117,6 +117,7 @@ public final class TranscriptionEngine {
     private let backend: HelperASRBackend
     private let googleAIStudioBackend: GoogleAIStudioBackend
     private let vertexAIBackend: VertexAIGeminiBackend
+    private let usesCustomVertexAIBackend: Bool
     private let cloudSegmentBudgetLimit: Duration?
     private let cloudNetworkEnvironment: CloudNetworkEnvironment
     private let sleepPrevention: SleepPreventionService
@@ -259,6 +260,7 @@ public final class TranscriptionEngine {
         self.openCCService = OpenCCService(executableURL: runtime.opencc, runner: runner)
         self.backend = HelperASRBackend(runtime: runtime, paths: paths, runner: runner)
         self.googleAIStudioBackend = googleAIStudioBackend ?? GoogleAIStudioBackend()
+        self.usesCustomVertexAIBackend = vertexAIBackend != nil
         self.vertexAIBackend = vertexAIBackend ?? VertexAIGeminiBackend(authService: GCloudAuthService(runner: runner))
         self.sleepPrevention = sleepPrevention
         self.maximumASRSegmentDuration = maximumASRSegmentDuration
@@ -1392,10 +1394,12 @@ public final class TranscriptionEngine {
             job.snapshot.vertexAILocation
         )
 
-        vertexAIBackend.updateAuthentication(
-            customGCloudPath: runtime.gcloud?.path,
-            runner: runner
-        )
+        if !usesCustomVertexAIBackend || runtime.gcloud != nil {
+            vertexAIBackend.updateAuthentication(
+                customGCloudPath: runtime.gcloud?.path,
+                runner: runner
+            )
+        }
         vertexAIBackend.updateConfiguration(
             VertexAIGeminiBackend.Configuration(
                 projectID: job.snapshot.vertexAIProjectID,

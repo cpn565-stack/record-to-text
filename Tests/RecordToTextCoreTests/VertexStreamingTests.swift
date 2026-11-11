@@ -799,9 +799,12 @@ final class VertexStreamingTests: XCTestCase {
         let outputDirectory = root.appendingPathComponent("Output", isDirectory: true)
         try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
 
+        var runtimeSettings = AppSettings.defaultValue(developerMode: true)
+        runtimeSettings.backendType = .vertexAI
+        runtimeSettings.customGCloudPath = fakeGCloudURL.path
         let candidate = RuntimeEnvironment.candidate(
             paths: paths,
-            settings: AppSettings.defaultValue(developerMode: true),
+            settings: runtimeSettings,
             bundledHelperURL: nil
         )
         guard FileManager.default.isExecutableFile(atPath: candidate.ffmpeg.path),
@@ -888,6 +891,9 @@ final class VertexStreamingTests: XCTestCase {
         let manifestData = try Data(contentsOf: unwrappedRecovery.appendingPathComponent(RecoveryScanner.segmentManifestFileName))
         let manifest = try JSONDecoder().decode(AudioSegmentManifest.self, from: manifestData)
         XCTAssertEqual(manifest.segments.count, 2)
+        guard manifest.segments.count == 2 else {
+            return XCTFail("Expected 2 segments after adaptive split, got \(manifest.segments.count)")
+        }
         XCTAssertEqual(manifest.segments[0].status, .completed)
         XCTAssertEqual(manifest.segments[1].status, .failed)
         XCTAssertFalse(FileManager.default.fileExists(atPath: manifest.segments[1].outputPath), "Failed streaming segment must not write partial transcript to disk")

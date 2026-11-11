@@ -39,8 +39,20 @@ enum GoogleAIStudioCredentialStorageState: Equatable {
 final class AppViewModel: ObservableObject {
     @Published private(set) var settings: AppSettings
     @Published private(set) var glossaryCollection: GlossaryCollection
-    @Published private(set) var jobs: [TranscriptionJob] { didSet { refreshQueueSleep() } }
-    @Published private(set) var recentJobs: [RecentJobSummary]
+    @Published private(set) var jobs: [TranscriptionJob] {
+        didSet {
+            jobsMutationRevision &+= 1
+            refreshQueueSleep()
+        }
+    }
+    @Published private(set) var recentJobs: [RecentJobSummary] {
+        didSet {
+            recentJobsMutationRevision &+= 1
+        }
+    }
+    private var jobsMutationRevision: UInt64 = 0
+    private var recentJobsMutationRevision: UInt64 = 0
+    private var syncedRecentJobsState: (jobsRevision: UInt64, recentRevision: UInt64)?
     @Published private(set) var activeJobID: UUID? { didSet { refreshQueueSleep() } }
     @Published private(set) var environmentReport: EnvironmentReport?
     @Published private(set) var isSelectedModelCached = false
@@ -1271,12 +1283,13 @@ final class AppViewModel: ObservableObject {
 
     private var sleepIsBlocked: Bool {
         isTerminating || queueTask != nil || activeExecutionTask != nil || activeJobID != nil ||
-        hasQueuedJobs || queuePausedForRecovery || queuePausedForEnvironment || queuePausedForPromptConsent ||
+        persistenceSubmission != nil || pendingPersistenceSubmission != nil ||
+        durablePersistenceRevision < persistenceRevision ||
+        queuePausedForRecovery || queuePausedForEnvironment || queuePausedForPromptConsent ||
         isGoogleAIStudioCredentialLoading || isGoogleAIStudioCredentialSaving || modelDownloadPhase.isBusy ||
         fileOperations > 0 || isDuplicateConfirmationPresented || isPromptConsentPresented ||
         jobPersistenceError != nil || jobPersistenceLoadBlocked || jobPersistenceDeferred ||
-        persistenceSubmission != nil || pendingPersistenceSubmission != nil ||
-        durablePersistenceRevision < persistenceRevision
+        hasQueuedJobs
     }
     private func refreshQueueSleep() { queueSleep.refresh(jobs: jobs, blocked: sleepIsBlocked) }
 
@@ -2903,9 +2916,22 @@ final class AppViewModel: ObservableObject {
         // Force lazy initialization before advancing the first revision.
         let coordinator = jobPersistence
         persistenceRevision += 1
-        let terminal = jobs.filter { $0.stage.isTerminal }.map(RecentJobSummary.init(job:))
-        let terminalIDs = Set(terminal.map(\.id))
-        recentJobs = recentJobs.filter { !terminalIDs.contains($0.id) } + terminal
+        if syncedRecentJobsState?.jobsRevision != jobsMutationRevision
+            || syncedRecentJobsState?.recentRevision != recentJobsMutationRevision
+        {
+            var terminal: [RecentJobSummary] = []
+            terminal.reserveCapacity(jobs.count)
+            var terminalIDs = Set<UUID>(minimumCapacity: jobs.count)
+            for job in jobs where job.stage.isTerminal {
+                terminal.append(RecentJobSummary(job: job))
+                terminalIDs.insert(job.id)
+            }
+            let updatedRecent = recentJobs.filter { !terminalIDs.contains($0.id) } + terminal
+            if recentJobs != updatedRecent {
+                recentJobs = updatedRecent
+            }
+            syncedRecentJobsState = (jobsMutationRevision, recentJobsMutationRevision)
+        }
         let snapshot = PersistenceSnapshot(revision: persistenceRevision, jobs: jobs,
             recentJobs: recentJobs, recentHistoryLimit: max(settings.recentJobLimit, 0))
         let migrating = legacyLedgerCredentialMigrationPending

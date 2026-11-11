@@ -1118,6 +1118,7 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
 
     public init(job: TranscriptionJob) {
         let cloudMetadata = job.resolvedCloudSegmentMetadata
+        let completeness = job.resolvedOutputCompleteness
         self.init(
             id: job.id,
             sourcePath: job.sourcePath,
@@ -1133,8 +1134,10 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
                 ? nil
                 : CloudTranscriptionMetadataAggregator
                     .uniqueEffectiveModelIDs(cloudMetadata),
-            cloudUsage: CloudTranscriptionMetadataAggregator
-                .totalUsage(cloudMetadata),
+            cloudUsage: cloudMetadata.isEmpty
+                ? nil
+                : CloudTranscriptionMetadataAggregator
+                    .totalUsage(cloudMetadata),
             cloudRetryCount: cloudMetadata.isEmpty
                 ? nil
                 : CloudTranscriptionMetadataAggregator
@@ -1142,8 +1145,8 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
             cloudFallbackUsed: cloudMetadata.isEmpty
                 ? nil
                 : cloudMetadata.contains(where: \.usedFallback),
-            outputCompleteness: job.resolvedOutputCompleteness,
-            outputGapReason: job.resolvedOutputCompleteness == .hasGaps ? job.failure?.userMessage : nil,
+            outputCompleteness: completeness,
+            outputGapReason: completeness == .hasGaps ? job.failure?.userMessage : nil,
             cloudDiagnostics: job.cloudDiagnostics
         )
     }
