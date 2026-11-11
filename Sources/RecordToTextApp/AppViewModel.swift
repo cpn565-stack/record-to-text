@@ -510,6 +510,10 @@ final class AppViewModel: ObservableObject {
         do {
             let result = try buildPrompt()
             guard settings.backendType != .localQwen else { return result.prompt }
+            let model = settings.backendType == .vertexAI ? settings.vertexAIModelID : settings.googleAIStudioModelID
+            if model == "gemini-3.5-transcribe" {
+                return Self.transcribeModelPreview(terms: result.terms)
+            }
             return try GeminiTranscriptPrompt.preview(terms: result.terms,
                 canonicalPrompt: result.prompt, context: cloudRecordingContextDraft)
         } catch { return error.localizedDescription }
@@ -520,10 +524,18 @@ final class AppViewModel: ObservableObject {
             let context = snapshot.cloudRecordingContext.isEmpty ? "未填寫" : "本機不套用\n\(snapshot.cloudRecordingContext)"
             return "\(snapshot.prompt)\n\n錄音背景：\(context)"
         }
+        if snapshot.requestedModelID == "gemini-3.5-transcribe" {
+            return Self.transcribeModelPreview(terms: snapshot.terms)
+        }
         do {
             return try GeminiTranscriptPrompt.preview(terms: snapshot.terms,
                 canonicalPrompt: snapshot.prompt, context: snapshot.cloudRecordingContext)
         } catch { return error.localizedDescription }
+    }
+
+    private static func transcribeModelPreview(terms: [String]) -> String {
+        let vocabulary = terms.isEmpty ? "（未設定，將嘗試辨識講者）" : terms.joined(separator: "、")
+        return "Gemini 3.5 Transcribe 使用錄音及詞庫，不使用自訂提示、錄音背景或思考強度。\n\n詞庫：\(vocabulary)\n\n有詞庫時不區分講者；跨片段講者可能不一致。"
     }
 
     var promptTermCount: Int {

@@ -10,7 +10,7 @@ public enum GeminiGenerationConfig {
     /// https://ai.google.dev/gemini-api/docs/generate-content/long-decode
     public static func transcriptionOutputTokens(modelID: String) -> Int {
         switch modelID {
-        case "gemini-4-argon":
+        case "gemini-4-argon", "gemini-4-carbon":
             return 32_768
         case "gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash":
             return 65_536
@@ -20,12 +20,12 @@ public enum GeminiGenerationConfig {
     }
 
     public static func requestTimeout(modelID: String) -> TimeInterval {
-        modelID == "gemini-4-argon" ? 1_200 : 300
+        (modelID == "gemini-4-argon" || modelID == "gemini-4-carbon") ? 1_200 : 300
     }
 
     /// Includes preparation and retries; shared by all adaptive children.
     public static func segmentBudget(modelID: String) -> Duration {
-        modelID == "gemini-4-argon" ? .seconds(1_800) : .seconds(900)
+        (modelID == "gemini-4-argon" || modelID == "gemini-4-carbon") ? .seconds(1_800) : .seconds(900)
     }
 
     public static func make(
@@ -37,7 +37,7 @@ public enum GeminiGenerationConfig {
         var config: [String: Any] = [
             "maxOutputTokens": maxOutputTokens
         ]
-        if modelID.hasPrefix("gemini-3.") || modelID == "gemini-4-argon" {
+        if modelID.hasPrefix("gemini-3.") || modelID == "gemini-4-argon" || modelID == "gemini-4-carbon" {
             var thinkingConfig: [String: Any] = [
                 "thinkingLevel": thinkingLevel.rawValue
             ]

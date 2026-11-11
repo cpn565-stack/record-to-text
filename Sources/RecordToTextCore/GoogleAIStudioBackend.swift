@@ -13,11 +13,13 @@ public enum GoogleAIStudioError: LocalizedError, Equatable {
     case emptyResponse
     case emptyCompletedResponse
     case invalidJSONResponse
+    case invalidAudioReference
     case audioPayloadTooLarge(sizeBytes: Int, limitBytes: Int)
     case transportMessageTooLarge
     case fileUploadFailed(String)
     case filesAPIUnsupported
     case fileProcessingTimedOut
+    case tooManyVocabularyTerms(Int)
     case cancelled
 
     public var errorDescription: String? {
@@ -46,6 +48,8 @@ public enum GoogleAIStudioError: LocalizedError, Equatable {
             return "Google 已結束本次生成，但沒有產生逐字稿文字。"
         case .invalidJSONResponse:
             return "Google AI Studio 回傳的資料無法解讀為有效 JSON。"
+        case .invalidAudioReference:
+            return "無法建立 Google AI Studio 轉錄請求：音訊資料缺少檔案位置或格式。"
         case let .audioPayloadTooLarge(sizeBytes, limitBytes):
             let sizeMB = Double(sizeBytes) / (1024 * 1024)
             let limitMB = Double(limitBytes) / (1024 * 1024)
@@ -58,6 +62,8 @@ public enum GoogleAIStudioError: LocalizedError, Equatable {
             return "目前服務不支援 Files API。"
         case .fileProcessingTimedOut:
             return "Google AI Studio 檔案處理超時，請稍後重試。"
+        case let .tooManyVocabularyTerms(count):
+            return "此轉錄模型最多支援 1000 個詞庫項目；目前有 \(count) 個，請先縮減詞庫。"
         case .cancelled:
             return "轉錄程序已取消。"
         }
@@ -213,6 +219,11 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             }
         }
         let currentConfig = getConfiguration()
+        if currentConfig.modelID == "gemini-3.5-transcribe" {
+            logger?("info", "此模型使用專用語音轉錄，無法套用自訂提示與錄音背景；詞庫與講者區分無法同時使用。")
+            let vocabularyCount = terms.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.count
+            guard vocabularyCount <= 1000 else { throw GoogleAIStudioError.tooManyVocabularyTerms(vocabularyCount) }
+        }
 
         guard let apiKey = currentConfig.apiKey?
             .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -439,6 +450,15 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         workingDirectory: URL?,
         logger: ((_ level: String, _ message: String) -> Void)?
     ) async throws -> CloudTranscriptionResult {
+        if effectiveModelID == "gemini-3.5-transcribe" {
+            return try await sendTranscribeInteraction(
+                requestedModelID: requestedModelID, effectiveModelID: effectiveModelID,
+                retryCount: retryCount, fallbackReason: fallbackReason,
+                apiKey: apiKey, audioPart: preparedAudio, terms: terms,
+                timeOffsetSeconds: timeOffsetSeconds, thinkingLevel: thinkingLevel,
+                workingDirectory: workingDirectory, logger: logger
+            )
+        }
         let endpointString = "https://generativelanguage.googleapis.com/v1beta/models/\(effectiveModelID):generateContent"
         guard let endpointURL = URL(string: endpointString) else {
             throw GoogleAIStudioError.invalidJSONResponse
@@ -464,6 +484,171 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             workingDirectory: workingDirectory,
             logger: logger
         )
+    }
+
+    /// The Developer API transcription model uses Interactions, whose request
+    /// and response schemas differ from GenerateContent. It cannot combine
+    /// custom vocabulary with diarization or word timestamps.
+    static func transcribeInteractionBody(audioPart: [String: Any], terms: [String]) throws -> [String: Any] {
+        let input: [String: Any]
+        if let file = audioPart["fileData"] as? [String: Any],
+           let uri = file["fileUri"] as? String, !uri.isEmpty,
+           let mime = file["mimeType"] as? String, !mime.isEmpty {
+            // Interactions uses AudioContent for uploaded audio, not the
+            // GenerateContent fileData wrapper.
+            input = ["type": "audio", "uri": uri, "mime_type": mime]
+        } else if let inline = audioPart["inlineData"] as? [String: Any],
+                  let data = inline["data"] as? String, let mime = inline["mimeType"] as? String {
+            input = ["type": "audio", "data": data, "mime_type": mime]
+        } else {
+            throw GoogleAIStudioError.invalidAudioReference
+        }
+        let vocabulary = terms.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard vocabulary.count <= 1000 else { throw GoogleAIStudioError.tooManyVocabularyTerms(vocabulary.count) }
+        let transcription: [String: Any]
+        if vocabulary.isEmpty {
+            transcription = ["mode": ["type": "verbatim", "diarization_mode": "speaker"]]
+        } else {
+            // The Developer API's vocabulary example omits mode; verbatim is
+            // the documented default. A verbatim mode, when explicit, is an
+            // object rather than the string used by the older implementation.
+            transcription = ["custom_vocabulary": vocabulary]
+        }
+        return ["model": "models/gemini-3.5-transcribe", "input": [input],
+                "store": false, "generation_config": ["transcription_config": transcription]]
+    }
+
+    static func transcribeInteractionText(from data: Data, timeOffsetSeconds: Double = 0) throws -> String {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw GoogleAIStudioError.invalidJSONResponse
+        }
+        guard let status = json["status"] as? String else {
+            throw GoogleAIStudioError.incompleteResponse(finishReason: "MISSING_STATUS", message: nil)
+        }
+        guard status == "completed" else {
+            throw GoogleAIStudioError.incompleteResponse(finishReason: status.uppercased(), message: nil)
+        }
+        let steps = json["steps"] as? [[String: Any]] ?? []
+        let pieces = steps.filter { $0["type"] as? String == "model_output" }
+            .flatMap { $0["content"] as? [[String: Any]] ?? [] }
+            .filter { $0["type"] as? String == "text" }
+        let text = pieces.map { part -> String in
+            let original = part["text"] as? String ?? ""
+            return textWithSpeakerLabels(original, annotations: part["annotations"] as? [[String: Any]] ?? [],
+                                         timeOffsetSeconds: timeOffsetSeconds)
+        }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
+        // Interactions `completed` is not GenerateContent `finishReason=STOP`.
+        // Do not invent STOP or trigger the latter's empty-STOP retry policy.
+        guard !text.isEmpty else { throw GoogleAIStudioError.emptyResponse }
+        return text
+    }
+
+    /// Insert labels at validated UTF-8 byte offsets without reconstructing the
+    /// transcript from annotations: punctuation and unannotated text survive.
+    private static func textWithSpeakerLabels(_ text: String, annotations: [[String: Any]], timeOffsetSeconds: Double) -> String {
+        let bytes = Array(text.utf8)
+        var insertions: [(Int, String)] = []
+        var previous: String?
+        var lastPosition = 0
+        var usedTextAlignment = false
+        let separators = CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters).union(.symbols)
+        let words = annotations.filter { $0["type"] as? String == "word_info" }
+        guard !words.isEmpty else { return text }
+        for annotation in words {
+            guard let speaker = annotation["speaker"] as? String,
+                  speaker.range(of: #"^spk_[0-9]+$"#, options: .regularExpression) != nil else { return text }
+            let start: Int
+            let end: Int
+            if let first = annotation["start_index"] as? Int, let last = annotation["end_index"] as? Int {
+                start = first
+                end = last
+            } else {
+                // Google's REST example may omit byte offsets. Align every
+                // annotated word in sequence, accepting only punctuation and
+                // whitespace between words. Otherwise return the unaltered text.
+                guard let word = annotation["text"] as? String, !word.isEmpty,
+                      let suffix = String(bytes: bytes[lastPosition...], encoding: .utf8),
+                      let range = suffix.range(of: word) else { return text }
+                let gap = suffix[..<range.lowerBound]
+                guard gap.unicodeScalars.allSatisfy({ separators.contains($0) }) else { return text }
+                start = lastPosition + gap.utf8.count
+                end = start + word.utf8.count
+                usedTextAlignment = true
+            }
+            guard start >= lastPosition, end > start, end <= bytes.count,
+                  String(bytes: bytes[0..<start], encoding: .utf8) != nil,
+                  String(bytes: bytes[0..<end], encoding: .utf8) != nil else { return text }
+            if speaker != previous {
+                let seconds = timeOffsetSeconds.isFinite ? Int(max(0, timeOffsetSeconds)) : 0
+                let segmentStart = String(format: "%02d:%02d:%02d", seconds / 3600, (seconds / 60) % 60, seconds % 60)
+                insertions.append((start, "\n\n[片段 \(segmentStart)・講者 \(speaker.dropFirst(4))]："))
+                previous = speaker
+            }
+            lastPosition = end
+        }
+        if usedTextAlignment {
+            guard let tail = String(bytes: bytes[lastPosition...], encoding: .utf8),
+                  tail.unicodeScalars.allSatisfy({ separators.contains($0) }) else { return text }
+        }
+        guard !insertions.isEmpty else { return text }
+        var result = ""
+        var cursor = 0
+        for (position, label) in insertions {
+            guard let slice = String(bytes: bytes[cursor..<position], encoding: .utf8) else { return text }
+            result += slice + label
+            cursor = position
+        }
+        guard let tail = String(bytes: bytes[cursor...], encoding: .utf8) else { return text }
+        return result + tail
+    }
+
+    private func sendTranscribeInteraction(
+        requestedModelID: String, effectiveModelID: String, retryCount: Int,
+        fallbackReason: String?, apiKey: String, audioPart: [String: Any], terms: [String],
+        timeOffsetSeconds: Double, thinkingLevel: GeminiThinkingLevel, workingDirectory: URL?,
+        logger: ((_ level: String, _ message: String) -> Void)?
+    ) async throws -> CloudTranscriptionResult {
+        let body = try Self.transcribeInteractionBody(audioPart: audioPart, terms: terms)
+        let requestData = try JSONSerialization.data(withJSONObject: body)
+        let file = try GeminiTransportHelper.writeTemporaryRequestFile(data: requestData,
+            in: workingDirectory, prefix: "aistudio_transcribe")
+        defer { try? FileManager.default.removeItem(at: file) }
+        var request = URLRequest(url: URL(string: "https://generativelanguage.googleapis.com/v1beta/interactions")!)
+        request.httpMethod = "POST"
+        request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
+        request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = GeminiGenerationConfig.requestTimeout(modelID: effectiveModelID)
+        let started = Date()
+        let (data, response) = try await sendWithPOSIXRetry(request: request, fileURL: file,
+            session: urlSession, logger: logger)
+        guard response.statusCode == 200 else {
+            let message = GeminiResponseParser.errorMessage(from: data)
+            if response.statusCode == 429 {
+                if GeminiTransportHelper.isDailyQuotaExceeded(data: data, message: message) {
+                    throw GoogleAIStudioError.quotaExceeded(message)
+                }
+                throw GoogleAIStudioError.rateLimited(message: message,
+                    retryAfterSeconds: GeminiTransportHelper.retryAfterSeconds(response: response, data: data))
+            }
+            throw GoogleAIStudioError.requestFailed(statusCode: response.statusCode, message: message)
+        }
+        let text = try Self.transcribeInteractionText(from: data, timeOffsetSeconds: timeOffsetSeconds)
+        let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        let usage = json?["usage"] as? [String: Any]
+        let usageMetadata = usage.map { CloudUsageMetadata(
+            promptTokenCount: $0["total_input_tokens"] as? Int,
+            cachedContentTokenCount: $0["total_cached_tokens"] as? Int,
+            candidatesTokenCount: $0["total_output_tokens"] as? Int,
+            thoughtsTokenCount: $0["total_thought_tokens"] as? Int,
+            totalTokenCount: $0["total_tokens"] as? Int) }
+        let metadata = CloudTranscriptionMetadata(requestedModelID: requestedModelID,
+            effectiveModelID: effectiveModelID, modelVersion: json?["model"] as? String,
+            responseID: json?["id"] as? String,
+            retryCount: max(retryCount, (CloudNetworkContext.generation?.count ?? 1) - 1),
+            fallbackReason: fallbackReason, thinkingLevel: thinkingLevel,
+            latencySeconds: Date().timeIntervalSince(started), usage: usageMetadata)
+        return CloudTranscriptionResult(text: text, metadata: metadata)
     }
 
     private func sendGenerateContentRequest(

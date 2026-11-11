@@ -158,6 +158,16 @@ public struct GeminiModelDescriptor: Identifiable, Hashable, Sendable {
 
     public static let presetModels: [GeminiModelDescriptor] = [
         GeminiModelDescriptor(
+            id: "gemini-3.5-transcribe",
+            displayName: "Gemini 3.5 Transcribe",
+            note: "錄音轉文字專用；不使用自訂提示或背景。有詞庫時使用詞庫，無詞庫時嘗試區分講者。繁體中文及講者辨識請依結果確認。"
+        ),
+        GeminiModelDescriptor(
+            id: "gemini-4-carbon",
+            displayName: "Gemini 4 Carbon",
+            note: "最新旗艦深度推論模型，支援音訊轉錄與低／中／高思考強度，適合複雜專有名詞與多講者分辨。費用請以 Google 帳單為準。"
+        ),
+        GeminiModelDescriptor(
             id: "gemini-4-argon",
             displayName: "Gemini 4 Argon",
             note: "支援音訊轉錄與低／中／高思考強度，需要付費 API 使用權限；建議先用中等強度。費用請以 Google 帳單為準。"

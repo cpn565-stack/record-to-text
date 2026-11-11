@@ -30,6 +30,13 @@ enum GoogleAIStudioAPIKeyDraftPolicy {
 
 struct SettingsView: View {
     @ObservedObject var viewModel: AppViewModel
+    private var isTranscribeModel: Bool {
+        switch viewModel.settings.backendType {
+        case .googleAIStudio: return viewModel.settings.googleAIStudioModelID == "gemini-3.5-transcribe"
+        case .vertexAI: return viewModel.settings.vertexAIModelID == "gemini-3.5-transcribe"
+        case .localQwen: return false
+        }
+    }
     @State private var resetChoice: ResetChoice?
     @State private var isTestingAPIKey = false
     @State private var apiKeyTestResult: String?
@@ -407,7 +414,8 @@ struct SettingsView: View {
                         "附加內容摘要（輸出不再是純逐字稿）",
                         isOn: setting(\.vertexAIIncludeSummary)
                     )
-                    Text("預設關閉。開啟後，Vertex AI 會在逐字稿後附加摘要；若要保留純原始逐字稿，請維持關閉。")
+                    .disabled(isTranscribeModel)
+                    Text(isTranscribeModel ? "Gemini 3.5 Transcribe 不支援摘要；選用此模型時不會產生摘要。" : "預設關閉。開啟後，Vertex AI 會在逐字稿後附加摘要；若要保留純原始逐字稿，請維持關閉。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
@@ -440,7 +448,8 @@ struct SettingsView: View {
                             Text(level.displayName).tag(level)
                         }
                     }
-                    Text("此設定會實際送給 Gemini 3.x 與 Gemini 4 Argon；程度越高通常等待越久、消耗 token 越多，不保證逐字稿一定更準。每個工作加入佇列時會鎖定當下設定。")
+                    .disabled(isTranscribeModel)
+                    Text(isTranscribeModel ? "Gemini 3.5 Transcribe 不使用思考強度設定。" : "此設定會實際送給 Gemini 3.x 與 Gemini 4 Argon；程度越高通常等待越久、消耗 token 越多，不保證逐字稿一定更準。每個工作加入佇列時會鎖定當下設定。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
@@ -457,16 +466,18 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
 
                     Toggle(
-                        "在 20 分鐘上限前優先尋找靜音切點",
+                        "在單段上限前優先尋找靜音切點",
                         isOn: setting(\.silenceAwareCloudSegmentation)
                     )
-                    Text("開啟後會掃描每個 20 分鐘上限前 30 秒，優先在至少 0.35 秒的靜音中切分；找不到時安全退回硬切。")
+                    Text("開啟後會掃描單段上限前 30 秒，優先在至少 0.35 秒的靜音中切分；找不到時安全退回硬切。一般模型最多 20 分鐘，Gemini 3.5 Transcribe 最多 14 分鐘。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
+                    if !isTranscribeModel {
                     LabeledContent("雲端單段輸出上限") {
                         Text("\(GeminiGenerationConfig.transcriptionOutputTokens(modelID: viewModel.settings.backendType == .vertexAI ? viewModel.settings.vertexAIModelID : viewModel.settings.googleAIStudioModelID).formatted()) tokens")
                             .foregroundStyle(.secondary)
+                    }
                     }
                     Text("Cloud 最終稿會在本機經 OpenCC s2tw 統一成繁體字形（保留原始用詞），因此環境檢查會要求 OpenCC。")
                         .font(.caption)

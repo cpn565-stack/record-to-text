@@ -409,9 +409,11 @@ public final class TranscriptionEngine {
                     )
                 )
             } else {
+                let initialLimit = job.snapshot.backendType == .localQwen
+                    ? maximumASRSegmentDuration : cloudSegmentLimit(for: job)
                 segmentPlan = try AudioSegmentPlanner.makePlan(
                     sourceDuration: metadata.duration,
-                    maximumSegmentDuration: maximumASRSegmentDuration
+                    maximumSegmentDuration: initialLimit
                 )
                 update(
                     .log(
@@ -419,8 +421,8 @@ public final class TranscriptionEngine {
                         message: String(
                             format: "分段計畫：來源 %.1f 分鐘，每段最長 %.0f 分鐘（%.0f 秒），共 %d 段。",
                             metadata.duration / 60.0,
-                            maximumASRSegmentDuration / 60.0,
-                            maximumASRSegmentDuration,
+                            initialLimit / 60.0,
+                            initialLimit,
                             segmentPlan.expectedSegmentCount
                         )
                     )
@@ -1406,6 +1408,11 @@ public final class TranscriptionEngine {
             )
         )
         let modelDisplay = job.snapshot.vertexAIModelID
+        let supportsSummary = modelDisplay != "gemini-3.5-transcribe"
+        if !supportsSummary && job.snapshot.vertexAIIncludeSummary {
+            update(.warning(code: "transcribe_summary_unsupported",
+                message: "Gemini 3.5 Transcribe 不支援摘要，本次僅輸出逐字稿。"))
+        }
         return try await runCloudPipeline(
             job: job,
             startedAt: startedAt,
@@ -1421,7 +1428,7 @@ public final class TranscriptionEngine {
             finalizeTranscript: { segmentTexts in
                 await Self.finalizeVertexTranscript(
                     segmentTexts: segmentTexts,
-                    includeSummary: job.snapshot.vertexAIIncludeSummary,
+                    includeSummary: job.snapshot.vertexAIIncludeSummary && supportsSummary,
                     summarize: { completeTranscript in
                         update(
                             .log(
@@ -1543,6 +1550,14 @@ public final class TranscriptionEngine {
         }
     }
 
+    func cloudSegmentLimit(for job: TranscriptionJob) -> TimeInterval {
+        if job.snapshot.requestedModelID == "gemini-3.5-transcribe" {
+            // Leave headroom for encoded audio duration rounding and provider limits.
+            return min(maximumASRSegmentDuration, 14 * 60)
+        }
+        return maximumASRSegmentDuration
+    }
+
     private func makeCloudSegmentPlan(
         job: TranscriptionJob,
         sourceURL: URL,
@@ -1550,9 +1565,11 @@ public final class TranscriptionEngine {
         update: (PipelineUpdate) -> Void,
         silenceAnalysisCache: JobSilenceAnalysisCache
     ) async throws -> AudioSegmentationPlan {
+        let segmentLimit = cloudSegmentLimit(for: job)
+        let limitDescription = String(format: "%.0f", segmentLimit / 60)
         let hardPlan = try AudioSegmentPlanner.makePlan(
             sourceDuration: metadata.duration,
-            maximumSegmentDuration: maximumASRSegmentDuration
+            maximumSegmentDuration: segmentLimit
         )
         guard job.snapshot.silenceAwareCloudSegmentation,
               hardPlan.requiresSplitting
@@ -1565,7 +1582,7 @@ public final class TranscriptionEngine {
             update(
                 .log(
                     level: "info",
-                    message: "正在準備 20 分鐘上限前的靜音位置；本工作已有涵蓋結果時會直接沿用。"
+                    message: "正在準備 \(limitDescription) 分鐘上限前的靜音位置；本工作已有涵蓋結果時會直接沿用。"
                 )
             )
             let scanStartSeconds = job.sourceSlice?.startSeconds ?? 0
@@ -1582,14 +1599,14 @@ public final class TranscriptionEngine {
             }
             let adjusted = try SilenceAwareSegmentPlanner.makePlan(
                 sourceDuration: metadata.duration,
-                maximumSegmentDuration: maximumASRSegmentDuration,
+                maximumSegmentDuration: segmentLimit,
                 silences: silences
             )
             guard adjusted != hardPlan else {
                 update(
                     .log(
                         level: "info",
-                        message: "未找到合適靜音切點，維持精確 20 分鐘硬切。"
+                        message: "未找到合適靜音切點，維持 \(limitDescription) 分鐘硬切。"
                     )
                 )
                 return hardPlan
@@ -1600,7 +1617,7 @@ public final class TranscriptionEngine {
             update(
                 .log(
                     level: "info",
-                    message: "已採用靜音感知切點（秒）：\(boundaries)。每段仍不超過 20 分鐘。"
+                    message: "已採用靜音感知切點（秒）：\(boundaries)。每段仍不超過 \(limitDescription) 分鐘。"
                 )
             )
             return adjusted
@@ -1611,7 +1628,7 @@ public final class TranscriptionEngine {
             update(
                 .warning(
                     code: "silence_detection_failed",
-                    message: "靜音分析失敗，已安全退回 20 分鐘硬切：\(error.localizedDescription)"
+                    message: "靜音分析失敗，已安全退回 \(limitDescription) 分鐘硬切：\(error.localizedDescription)"
                 )
             )
             return hardPlan
@@ -1716,6 +1733,14 @@ public final class TranscriptionEngine {
         ) async throws -> CloudTranscriptionResult
     ) async throws -> PipelineResult {
         let fileManager = FileManager.default
+        let segmentLimit = cloudSegmentLimit(for: job)
+        // Transcribe receives vocabulary as structured hints, not the prompt or
+        // background text. Spoken words matching those inputs are not echoes.
+        let usesPrompt = job.snapshot.requestedModelID != "gemini-3.5-transcribe"
+        let validationPrompt = usesPrompt ? job.snapshot.prompt : ""
+        let validationTerms = usesPrompt ? job.snapshot.terms : []
+        let validationContext = usesPrompt
+            ? try CloudRecordingContext.referenceBlock(job.snapshot.cloudRecordingContext) : ""
         let sourceTimeOffset = Self.cloudSegmentStart(
             sourceSlice: job.sourceSlice,
             plannedStart: 0
@@ -1730,7 +1755,7 @@ public final class TranscriptionEngine {
                 job: job,
                 sourceDuration: metadata.duration,
                 sourceTimeOffset: sourceTimeOffset,
-                maximumSegmentDuration: maximumASRSegmentDuration,
+                maximumSegmentDuration: segmentLimit,
                 paths: paths,
                 fileManager: fileManager
             )
@@ -1858,7 +1883,7 @@ public final class TranscriptionEngine {
             update(
                 .log(
                     level: "info",
-                    message: "音檔超過單段上限，將以最多 \(Int(maximumASRSegmentDuration / 60)) 分鐘切成 \(initialTotalSegments) 段；每段完成後會立即建立可取回的救援檢查點。"
+                    message: "音檔超過單段上限，將以最多 \(Int(segmentLimit / 60)) 分鐘切成 \(initialTotalSegments) 段；每段完成後會立即建立可取回的救援檢查點。"
                 )
             )
         }
@@ -2013,12 +2038,12 @@ public final class TranscriptionEngine {
                     try await probeService.probe(audioURL)
                 }
                 guard preparedMetadata.duration
-                    <= maximumASRSegmentDuration + 1.0
+                    <= segmentLimit + 1.0
                 else {
                     throw AudioSegmentationError.segmentOutputTooLong(
                         index: segmentIndex,
                         duration: preparedMetadata.duration,
-                        maximum: maximumASRSegmentDuration
+                        maximum: segmentLimit
                     )
                 }
                 try segmentManifest.mark(
@@ -2072,9 +2097,9 @@ public final class TranscriptionEngine {
                 let contractText = try OutputContractValidator.validate(
                     text: result.text,
                     path: transcriptURL.path,
-                    canonicalPrompt: job.snapshot.prompt,
-                    terms: job.snapshot.terms,
-                    recordingContextBlock: try CloudRecordingContext.referenceBlock(job.snapshot.cloudRecordingContext)
+                    canonicalPrompt: validationPrompt,
+                    terms: validationTerms,
+                    recordingContextBlock: validationContext
                 )
                 let checked = TranscriptTimestampValidator.validate(text: contractText,
                     startSeconds: record.startSeconds, endSeconds: record.endSeconds)
@@ -2307,8 +2332,8 @@ public final class TranscriptionEngine {
             }
             return try OutputContractValidator.readTranscript(
                 at: URL(fileURLWithPath: record.outputPath),
-                canonicalPrompt: job.snapshot.prompt, terms: job.snapshot.terms,
-                recordingContextBlock: try CloudRecordingContext.referenceBlock(job.snapshot.cloudRecordingContext)
+                canonicalPrompt: validationPrompt, terms: validationTerms,
+                recordingContextBlock: validationContext
             )
         }
         let segmentMetadata = mergeableSegments.compactMap(\.cloudMetadata)
@@ -2322,9 +2347,9 @@ public final class TranscriptionEngine {
         let validatedRaw = try OutputContractValidator.validate(
             text: mergedText,
             path: cloudRawURL.path,
-            canonicalPrompt: job.snapshot.prompt,
-            terms: job.snapshot.terms,
-            recordingContextBlock: try CloudRecordingContext.referenceBlock(job.snapshot.cloudRecordingContext)
+            canonicalPrompt: validationPrompt,
+            terms: validationTerms,
+            recordingContextBlock: validationContext
         )
         try AtomicFileWriter.writeText(validatedRaw, to: cloudRawURL)
 
@@ -2352,9 +2377,9 @@ public final class TranscriptionEngine {
         )
         let finalTranscribedText = try OutputContractValidator.readTranscript(
             at: cloudTraditionalURL,
-            canonicalPrompt: job.snapshot.prompt,
-            terms: job.snapshot.terms,
-            recordingContextBlock: try CloudRecordingContext.referenceBlock(job.snapshot.cloudRecordingContext)
+            canonicalPrompt: validationPrompt,
+            terms: validationTerms,
+            recordingContextBlock: validationContext
         )
 
         try Task.checkCancellation()

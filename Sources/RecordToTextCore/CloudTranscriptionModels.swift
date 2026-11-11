@@ -256,7 +256,7 @@ public extension CloudUsageMetadata {
         // Argon has a dated introductory tariff and different thinking/cache
         // pricing. Keep actual token usage, but never apply the Flash fallback
         // rate to it. Accurate billing needs provider/date-aware per-request data.
-        guard modelID != "gemini-4-argon" else { return nil }
+        guard modelID != "gemini-4-argon", modelID != "gemini-4-carbon", modelID != "gemini-3.5-transcribe" else { return nil }
         guard let total = totalTokenCount, total > 0 else {
             return nil
         }

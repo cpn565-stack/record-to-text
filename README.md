@@ -123,7 +123,8 @@ open /path/to/record-to-text.app
 - 可用「合併文字稿」選取多份 TXT，依分段編號排序產生新檔；原始 TXT 不會被覆寫。
 - 本機管線：`ffprobe → ffmpeg → Qwen ASR helper → OpenCC → 原子寫入 TXT`。
 - 雲端管線：`ffprobe → ffmpeg 壓縮／分段 → Gemini API → 原子寫入 TXT`。
-- 超過 **20 分鐘**：coordinator 切成編號片段、逐段獨立 ASR（預設 token 預算 16384）；全部通過 manifest gate 後才交付正式逐字稿。
+- 可選 Google AI Studio 或 Vertex AI 的 `gemini-3.5-transcribe` 錄音檔專用模型；此模型使用逐字模式，不套用自訂提示、錄音背景、思考強度或摘要。有詞庫時優先詞庫、停用講者辨識；沒有詞庫時嘗試辨識講者，講者編號不保證跨片段一致。詞庫上限 1,000 個，超過時明確報錯。最終字形仍在本機轉成繁體，實際辨識品質需依音檔確認。
+- 一般模型超過 **20 分鐘**、`gemini-3.5-transcribe` 超過 **14 分鐘**時切成編號片段逐段處理；全部通過 manifest gate 後才交付正式逐字稿。
 - 雲端分段工作失敗或取消時，若已有完成片段，`Temp-Recovery` 會只保留部分 TXT、manifest 與最小 metadata（不保留 MP3），供人工取回。這不是自動斷點續跑；重新加入原始錄音會從頭轉錄。若還沒有任何完成片段，就不會誤稱有部分稿可取回。
 - Apple Silicon：MLX-Audio helper；Prompt 走 `system_prompt`，不支援則 fail closed。
 - 設定／詞庫 JSON、本機失敗 WAV 與雲端部分稿 `Temp-Recovery`、來源檔不修改。

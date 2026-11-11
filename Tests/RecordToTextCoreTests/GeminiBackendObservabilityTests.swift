@@ -3,6 +3,38 @@ import XCTest
 @testable import RecordToTextCore
 
 final class GeminiBackendObservabilityTests: XCTestCase {
+    func testTranscribeQuickSelectionsPersistAndDoNotClaimFlashPricing() throws {
+        let original = AppSettings(defaultOutputDirectory: "/tmp/output")
+        for choice in [QuickTranscriptionChoice.aiStudioGemini35Transcribe, .vertexGemini35Transcribe] {
+            let selected = choice.applying(to: original)
+            let restored = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(selected))
+            XCTAssertTrue(choice.matches(restored))
+            XCTAssertEqual(choice.backendType == .vertexAI ? restored.vertexAIModelID : restored.googleAIStudioModelID,
+                           "gemini-3.5-transcribe")
+        }
+        let usage = CloudUsageMetadata(promptTokenCount: 1_000, candidatesTokenCount: 100,
+                                       thoughtsTokenCount: nil, totalTokenCount: 1_100)
+        XCTAssertNil(usage.estimatedCostUSD(modelID: "gemini-3.5-transcribe"))
+    }
+
+    func testTranscribeSegmentLimitKeepsHeadroomAndOtherModelsUnchanged() throws {
+        let root = try TestSupport.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = ApplicationPaths(root: root)
+        let runtime = RuntimeEnvironment.candidate(paths: paths,
+            settings: AppSettings.defaultValue(developerMode: true), bundledHelperURL: nil)
+        let engine = TranscriptionEngine(runtime: runtime, paths: paths)
+        for (backend, model, expected) in [(ASRBackendType.googleAIStudio, "gemini-3.5-transcribe", 840.0),
+                                           (.vertexAI, "gemini-3.5-transcribe", 840.0),
+                                           (.vertexAI, "gemini-3.8-flash", 1_200.0)] {
+            let snapshot = JobSnapshot(modelID: "unused", glossaryID: nil, glossaryName: nil,
+                terms: [], prompt: "", outputLocationMode: .fixedDirectory, outputDirectory: root.path,
+                keepRawTranscript: false, backendType: backend, googleAIStudioModelID: model, vertexAIModelID: model)
+            let job = TranscriptionJob(sourcePath: "/tmp/source.wav", snapshot: snapshot)
+            XCTAssertEqual(engine.cloudSegmentLimit(for: job), expected)
+        }
+    }
+
     func testQuickArgonSelectionPersistsWithoutChangingTranscriptPreferences() throws {
         var original = AppSettings(defaultOutputDirectory: "/tmp/output")
         original.geminiThinkingLevel = .medium
@@ -38,6 +70,7 @@ final class GeminiBackendObservabilityTests: XCTestCase {
         }
         XCTAssertEqual(GeminiGenerationConfig.transcriptionOutputTokens(modelID: "custom-model"), 16_384)
         XCTAssertEqual(GeminiGenerationConfig.transcriptionOutputTokens(modelID: "gemini-4-argon"), 32_768)
+        XCTAssertEqual(GeminiGenerationConfig.transcriptionOutputTokens(modelID: "gemini-4-carbon"), 32_768)
     }
 
     func testArgonSupportKeepsOtherModelTimeoutsAndUnknownCapabilities() {
@@ -46,12 +79,15 @@ final class GeminiBackendObservabilityTests: XCTestCase {
             XCTAssertEqual(GeminiGenerationConfig.segmentBudget(modelID: model), .seconds(900))
         }
         XCTAssertEqual(GeminiGenerationConfig.segmentBudget(modelID: "gemini-4-argon"), .seconds(1_800))
+        XCTAssertEqual(GeminiGenerationConfig.segmentBudget(modelID: "gemini-4-carbon"), .seconds(1_800))
         XCTAssertNil(GeminiGenerationConfig.make(maxOutputTokens: 16_384,
             modelID: "custom-model", thinkingLevel: .high)["thinkingConfig"])
         let usage = CloudUsageMetadata(promptTokenCount: 1_000, candidatesTokenCount: 100,
             thoughtsTokenCount: 200, totalTokenCount: 1_300)
         XCTAssertNil(usage.estimatedCostUSD(modelID: "gemini-4-argon"))
+        XCTAssertNil(usage.estimatedCostUSD(modelID: "gemini-4-carbon"))
         XCTAssertEqual(usage.summaryDisplay(modelID: "gemini-4-argon"), "1.3k tokens (思考 200)")
+        XCTAssertEqual(usage.summaryDisplay(modelID: "gemini-4-carbon"), "1.3k tokens (思考 200)")
     }
 
     func testMetadataParserCapturesModelVersionResponseAndUsage() throws {

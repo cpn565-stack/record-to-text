@@ -181,6 +181,11 @@ struct MainView: View {
                 Text("新錄音與尚未開始的工作")
                     .font(.caption2).foregroundStyle(.secondary)
                 quickModelMenu
+                if viewModel.selectedQuickTranscriptionChoice == .aiStudioGemini35Transcribe ||
+                    viewModel.selectedQuickTranscriptionChoice == .vertexGemini35Transcribe {
+                    Text("專用轉錄：有詞庫時不區分講者；不使用背景與自訂提示")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
                 if let active = viewModel.jobs.first(where: { $0.id == viewModel.activeJobID }) {
                     Text("正在執行：\(active.snapshot.engineDisplayName)")
                         .font(.caption).foregroundStyle(.secondary)
