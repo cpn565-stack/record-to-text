@@ -124,6 +124,7 @@ open /path/to/record-to-text.app
 - 本機管線：`ffprobe → ffmpeg → Qwen ASR helper → OpenCC → 原子寫入 TXT`。
 - 雲端管線：`ffprobe → ffmpeg 壓縮／分段 → Gemini API → 原子寫入 TXT`。
 - 可選 Google AI Studio 或 Vertex AI 的 `gemini-3.5-transcribe` 錄音檔專用模型；此模型使用逐字模式，不套用自訂提示、錄音背景、思考強度或摘要。有詞庫時優先詞庫、停用講者辨識；沒有詞庫時嘗試辨識講者，講者編號不保證跨片段一致。詞庫上限 1,000 個，超過時明確報錯。最終字形仍在本機轉成繁體，實際辨識品質需依音檔確認。
+- AI Studio 與 Vertex AI 都可選 `gemini-4-hydrogen`，首次預設極高（xhigh）。在「設定 → Runtime → Gemini 思考強度」可切換低／中／高／極高；Carbon 可選低／中／高。各模型分別記住強度、兩個後端共用，重開 App 後保留。較高強度通常更耗時、消耗更多 token，不保證逐字稿更準。一般排隊工作跟隨新設定，執行中及續跑工作保留原設定。Hydrogen 的 Vertex Location 支援 `global`、`us`、`eu`。詳見 [Hydrogen 支援說明](docs/gemini-4-hydrogen-support-2026-11-13.md)。
 - 一般模型超過 **20 分鐘**、`gemini-3.5-transcribe` 超過 **14 分鐘**時切成編號片段逐段處理；全部通過 manifest gate 後才交付正式逐字稿。
 - 雲端分段工作失敗或取消時，若已有完成片段，`Temp-Recovery` 會只保留部分 TXT、manifest 與最小 metadata（不保留 MP3），供人工取回。這不是自動斷點續跑；重新加入原始錄音會從頭轉錄。若還沒有任何完成片段，就不會誤稱有部分稿可取回。
 - Apple Silicon：MLX-Audio helper；Prompt 走 `system_prompt`，不支援則 fail closed。

@@ -163,6 +163,11 @@ public struct GeminiModelDescriptor: Identifiable, Hashable, Sendable {
             note: "錄音轉文字專用；不使用自訂提示或背景。有詞庫時使用詞庫，無詞庫時嘗試區分講者。繁體中文及講者辨識請依結果確認。"
         ),
         GeminiModelDescriptor(
+            id: "gemini-4-hydrogen",
+            displayName: "Gemini 4 Hydrogen",
+            note: "支援音訊轉錄與低／中／高／極高思考強度，預設極高。較高強度可能增加耗時及 token 用量，不保證逐字稿更準；費用以 Google 帳單為準。"
+        ),
+        GeminiModelDescriptor(
             id: "gemini-4-carbon",
             displayName: "Gemini 4 Carbon",
             note: "最新旗艦深度推論模型，支援音訊轉錄與低／中／高思考強度，適合複雜專有名詞與多講者分辨。費用請以 Google 帳單為準。"
@@ -229,6 +234,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         case vertexAIGCSBucket
         case vertexAIIncludeSummary
         case geminiThinkingLevel
+        case geminiThinkingLevelsByModel
         case cloudFallbackPolicy
         case silenceAwareCloudSegmentation
         case localSilenceAwareSegmentation
@@ -269,7 +275,30 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var vertexAIModelID: String
     public var vertexAIGCSBucket: String?
     public var vertexAIIncludeSummary: Bool
-    public var geminiThinkingLevel: GeminiThinkingLevel
+    /// Legacy global preference is the migration default for pre-Hydrogen models.
+    private var legacyGeminiThinkingLevel: GeminiThinkingLevel
+    public var geminiThinkingLevelsByModel: [String: GeminiThinkingLevel]
+
+    public var selectedGeminiModelID: String {
+        backendType == .vertexAI ? vertexAIModelID : googleAIStudioModelID
+    }
+
+    /// Each model remembers its own choice, shared across AI Studio and Vertex.
+    /// JobSnapshot still captures a single immutable value for execution/resume.
+    public var geminiThinkingLevel: GeminiThinkingLevel {
+        get {
+            let model = selectedGeminiModelID
+            let fallback = model == "gemini-4-hydrogen"
+                ? GeminiGenerationConfig.defaultThinkingLevel(modelID: model)
+                : legacyGeminiThinkingLevel
+            return GeminiGenerationConfig.resolvedThinkingLevel(
+                geminiThinkingLevelsByModel[model] ?? fallback, modelID: model)
+        }
+        set {
+            geminiThinkingLevelsByModel[selectedGeminiModelID] =
+                GeminiGenerationConfig.resolvedThinkingLevel(newValue, modelID: selectedGeminiModelID)
+        }
+    }
     public var cloudFallbackPolicy: CloudFallbackPolicy
     public var silenceAwareCloudSegmentation: Bool
     /// Local Qwen only. Deliberately a separate field: §2 of the phase 1 spec
@@ -309,7 +338,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         vertexAIModelID: String = "gemini-3.7-flash",
         vertexAIGCSBucket: String? = nil,
         vertexAIIncludeSummary: Bool = false,
-        geminiThinkingLevel: GeminiThinkingLevel = .high,
+        geminiThinkingLevel: GeminiThinkingLevel? = nil,
+        geminiThinkingLevelsByModel: [String: GeminiThinkingLevel] = [:],
         cloudFallbackPolicy: CloudFallbackPolicy = .disabled,
         silenceAwareCloudSegmentation: Bool = true,
         localSilenceAwareSegmentation: Bool = false,
@@ -343,11 +373,15 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.vertexAIModelID = vertexAIModelID
         self.vertexAIGCSBucket = vertexAIGCSBucket
         self.vertexAIIncludeSummary = vertexAIIncludeSummary
-        self.geminiThinkingLevel = geminiThinkingLevel
+        self.legacyGeminiThinkingLevel = geminiThinkingLevel ?? .high
+        self.geminiThinkingLevelsByModel = geminiThinkingLevelsByModel
         self.cloudFallbackPolicy = cloudFallbackPolicy
         self.silenceAwareCloudSegmentation = silenceAwareCloudSegmentation
         self.localSilenceAwareSegmentation = localSilenceAwareSegmentation
         self.customGCloudPath = customGCloudPath
+        if let geminiThinkingLevel {
+            self.geminiThinkingLevel = geminiThinkingLevel
+        }
     }
 
     public init(from decoder: Decoder) throws {
@@ -384,10 +418,13 @@ public struct AppSettings: Codable, Equatable, Sendable {
         vertexAIModelID = try container.decodeIfPresent(String.self, forKey: .vertexAIModelID) ?? "gemini-3.7-flash"
         vertexAIGCSBucket = try container.decodeIfPresent(String.self, forKey: .vertexAIGCSBucket)
         vertexAIIncludeSummary = try container.decodeIfPresent(Bool.self, forKey: .vertexAIIncludeSummary) ?? false
-        geminiThinkingLevel = try container.decodeIfPresent(
+        legacyGeminiThinkingLevel = try container.decodeIfPresent(
             GeminiThinkingLevel.self,
             forKey: .geminiThinkingLevel
         ) ?? .high
+        geminiThinkingLevelsByModel = try container.decodeIfPresent(
+            [String: GeminiThinkingLevel].self, forKey: .geminiThinkingLevelsByModel
+        ) ?? [:]
         cloudFallbackPolicy = try container.decodeIfPresent(
             CloudFallbackPolicy.self,
             forKey: .cloudFallbackPolicy
@@ -433,7 +470,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         try container.encode(vertexAIModelID, forKey: .vertexAIModelID)
         try container.encodeIfPresent(vertexAIGCSBucket, forKey: .vertexAIGCSBucket)
         try container.encode(vertexAIIncludeSummary, forKey: .vertexAIIncludeSummary)
-        try container.encode(geminiThinkingLevel, forKey: .geminiThinkingLevel)
+        try container.encode(legacyGeminiThinkingLevel, forKey: .geminiThinkingLevel)
+        try container.encode(geminiThinkingLevelsByModel, forKey: .geminiThinkingLevelsByModel)
         try container.encode(cloudFallbackPolicy, forKey: .cloudFallbackPolicy)
         try container.encode(
             silenceAwareCloudSegmentation,

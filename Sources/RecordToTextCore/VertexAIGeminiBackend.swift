@@ -88,7 +88,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             modelID: String = "gemini-3.7-flash",
             gcsBucket: String? = nil,
             includeSummary: Bool = false,
-            thinkingLevel: GeminiThinkingLevel = .high,
+            thinkingLevel: GeminiThinkingLevel? = nil,
             fallbackPolicy: CloudFallbackPolicy = .disabled
         ) {
             self.projectID = projectID
@@ -96,7 +96,8 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             self.modelID = modelID
             self.gcsBucket = gcsBucket
             self.includeSummary = includeSummary
-            self.thinkingLevel = thinkingLevel
+            self.thinkingLevel = GeminiGenerationConfig.resolvedThinkingLevel(
+                thinkingLevel ?? GeminiGenerationConfig.defaultThinkingLevel(modelID: modelID), modelID: modelID)
             self.fallbackPolicy = fallbackPolicy
         }
 
@@ -576,7 +577,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
 """,
             userPromptText: "請直接輸出這份完整逐字稿的精簡摘要。",
             requestDescription: "摘要",
-            maximumOutputTokens: 2_048,
+            maximumOutputTokens: GeminiGenerationConfig.summaryOutputTokens(modelID: currentConfig.modelID),
             thinkingLevel: currentConfig.thinkingLevel,
             workingDirectory: workingDirectory,
             logger: logger
@@ -608,10 +609,12 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         logger: ((_ level: String, _ message: String) -> Void)?
     ) async throws -> (result: CloudTranscriptionResult, accessToken: String) {
         var resolvedAccessToken = accessToken
+        let effectiveThinkingLevel = GeminiGenerationConfig.resolvedThinkingLevel(
+            thinkingLevel, modelID: effectiveModelID)
         let generationConfig = GeminiGenerationConfig.make(
             maxOutputTokens: maximumOutputTokens,
             modelID: effectiveModelID,
-            thinkingLevel: thinkingLevel,
+            thinkingLevel: effectiveThinkingLevel,
             includeThoughts: responseMode == .geminiSSE
         )
         let isTranscribe = requestDescription == "轉錄" && VertexTranscribeRequest.matches(modelID: effectiveModelID)
@@ -622,7 +625,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         } else {
             logger?(
                 "info",
-                "轉錄請求送出 maxOutputTokens=\(generationConfig["maxOutputTokens"] as? Int ?? 0)，thinkingConfig=\(thinkingLevel.rawValue)（模型 \(effectiveModelID)）。"
+                "轉錄請求送出 maxOutputTokens=\(generationConfig["maxOutputTokens"] as? Int ?? 0)，thinkingConfig=\(effectiveThinkingLevel.rawValue)（模型 \(effectiveModelID)）。"
             )
             requestBody = [
             "systemInstruction": [
@@ -755,7 +758,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             effectiveModelID: effectiveModelID,
             retryCount: max(retryCount, (CloudNetworkContext.generation?.count ?? 1) - 1),
             fallbackReason: fallbackReason,
-            thinkingLevel: thinkingLevel,
+            thinkingLevel: effectiveThinkingLevel,
             latencySeconds: Date().timeIntervalSince(startedAt)
         )
         return (
