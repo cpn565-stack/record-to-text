@@ -37,6 +37,7 @@ final class GeminiBackendObservabilityTests: XCTestCase {
 
     func testQuickArgonSelectionPersistsWithoutChangingTranscriptPreferences() throws {
         var original = AppSettings(defaultOutputDirectory: "/tmp/output")
+        original.googleAIStudioModelID = "gemini-4-argon"
         original.geminiThinkingLevel = .medium
         original.keepRawTranscript = true
         for choice in [QuickTranscriptionChoice.aiStudioGemini4Argon, .vertexGemini4Argon] {

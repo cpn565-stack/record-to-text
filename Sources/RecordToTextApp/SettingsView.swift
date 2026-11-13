@@ -30,6 +30,9 @@ enum GoogleAIStudioAPIKeyDraftPolicy {
 
 struct SettingsView: View {
     @ObservedObject var viewModel: AppViewModel
+    private var supportedThinkingLevels: [GeminiThinkingLevel] {
+        GeminiGenerationConfig.supportedThinkingLevels(modelID: viewModel.settings.selectedGeminiModelID)
+    }
     private var isTranscribeModel: Bool {
         switch viewModel.settings.backendType {
         case .googleAIStudio: return viewModel.settings.googleAIStudioModelID == "gemini-3.5-transcribe"
@@ -410,6 +413,12 @@ struct SettingsView: View {
 
                     GeminiModelPicker(modelID: setting(\.vertexAIModelID))
 
+                    if viewModel.settings.vertexAIModelID == "gemini-4-hydrogen" {
+                        Text("Hydrogen 支援 global、us、eu 區域；請確認上述 Location 與專案權限。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
                     Toggle(
                         "附加內容摘要（輸出不再是純逐字稿）",
                         isOn: setting(\.vertexAIIncludeSummary)
@@ -440,18 +449,24 @@ struct SettingsView: View {
                 if viewModel.settings.backendType != .localQwen {
                     Divider()
 
+                    if !supportedThinkingLevels.isEmpty {
                     Picker(
                         "Gemini 思考強度",
                         selection: setting(\.geminiThinkingLevel)
                     ) {
-                        ForEach(GeminiThinkingLevel.allCases, id: \.self) { level in
+                        ForEach(supportedThinkingLevels, id: \.self) { level in
                             Text(level.displayName).tag(level)
                         }
                     }
-                    .disabled(isTranscribeModel)
-                    Text(isTranscribeModel ? "Gemini 3.5 Transcribe 不使用思考強度設定。" : "此設定會實際送給 Gemini 3.x 與 Gemini 4 Argon；程度越高通常等待越久、消耗 token 越多，不保證逐字稿一定更準。每個工作加入佇列時會鎖定當下設定。")
+                    .accessibilityIdentifier("gemini-thinking-level-picker")
+                    Text("各模型分別記住強度，AI Studio 與 Vertex AI 共用；Hydrogen 首次預設極高。較高強度通常更耗時、消耗更多 token，不保證逐字稿更準。尚未開始的一般排隊工作會跟隨設定；執行中及續跑工作保留原設定。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    } else {
+                        Text(isTranscribeModel ? "Gemini 3.5 Transcribe 不使用思考強度設定。" : "此自訂模型尚無已確認的思考強度選項，不會傳送思考設定。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
 
                     Picker(
                         "模型不可用時",

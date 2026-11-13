@@ -6,6 +6,8 @@ public enum QuickTranscriptionChoice: String, CaseIterable, Identifiable, Sendab
     case qwen3ASR1_7BBF16
     case aiStudioGemini35Transcribe
     case vertexGemini35Transcribe
+    case aiStudioGemini4Hydrogen
+    case vertexGemini4Hydrogen
     case aiStudioGemini4Carbon
     case vertexGemini4Carbon
     case aiStudioGemini4Argon
@@ -25,6 +27,10 @@ public enum QuickTranscriptionChoice: String, CaseIterable, Identifiable, Sendab
             return "AI Studio (Gemini 3.5 Transcribe)"
         case .vertexGemini35Transcribe:
             return "Vertex AI (Gemini 3.5 Transcribe)"
+        case .aiStudioGemini4Hydrogen:
+            return "AI Studio (Gemini 4 Hydrogen)"
+        case .vertexGemini4Hydrogen:
+            return "Vertex AI (Gemini 4 Hydrogen)"
         case .aiStudioGemini4Carbon:
             return "AI Studio (Gemini 4 Carbon)"
         case .vertexGemini4Carbon:
@@ -48,9 +54,9 @@ public enum QuickTranscriptionChoice: String, CaseIterable, Identifiable, Sendab
         switch self {
         case .qwen3ASR1_7BBF16:
             return .localQwen
-        case .vertexGemini35Transcribe, .vertexGemini4Carbon, .vertexGemini4Argon, .vertexGemini38Flash, .vertexGemini37Flash:
+        case .vertexGemini35Transcribe, .vertexGemini4Hydrogen, .vertexGemini4Carbon, .vertexGemini4Argon, .vertexGemini38Flash, .vertexGemini37Flash:
             return .vertexAI
-        case .aiStudioGemini35Transcribe, .aiStudioGemini4Carbon, .aiStudioGemini4Argon, .aiStudioGemini38Flash, .aiStudioGemini37Flash:
+        case .aiStudioGemini35Transcribe, .aiStudioGemini4Hydrogen, .aiStudioGemini4Carbon, .aiStudioGemini4Argon, .aiStudioGemini38Flash, .aiStudioGemini37Flash:
             return .googleAIStudio
         }
     }
@@ -66,6 +72,10 @@ public enum QuickTranscriptionChoice: String, CaseIterable, Identifiable, Sendab
             updated.googleAIStudioModelID = "gemini-3.5-transcribe"
         case .vertexGemini35Transcribe:
             updated.vertexAIModelID = "gemini-3.5-transcribe"
+        case .aiStudioGemini4Hydrogen:
+            updated.googleAIStudioModelID = "gemini-4-hydrogen"
+        case .vertexGemini4Hydrogen:
+            updated.vertexAIModelID = "gemini-4-hydrogen"
         case .aiStudioGemini4Carbon:
             updated.googleAIStudioModelID = "gemini-4-carbon"
         case .vertexGemini4Carbon:
@@ -97,6 +107,10 @@ public enum QuickTranscriptionChoice: String, CaseIterable, Identifiable, Sendab
             return settings.googleAIStudioModelID == "gemini-3.5-transcribe"
         case .vertexGemini35Transcribe:
             return settings.vertexAIModelID == "gemini-3.5-transcribe"
+        case .aiStudioGemini4Hydrogen:
+            return settings.googleAIStudioModelID == "gemini-4-hydrogen"
+        case .vertexGemini4Hydrogen:
+            return settings.vertexAIModelID == "gemini-4-hydrogen"
         case .aiStudioGemini4Carbon:
             return settings.googleAIStudioModelID == "gemini-4-carbon"
         case .vertexGemini4Carbon:

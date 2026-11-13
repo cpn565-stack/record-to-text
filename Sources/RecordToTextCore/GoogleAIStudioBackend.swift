@@ -93,13 +93,14 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             apiKey: String? = nil,
             modelID: String = "gemini-3.7-flash",
             useFilesAPI: Bool = true,
-            thinkingLevel: GeminiThinkingLevel = .high,
+            thinkingLevel: GeminiThinkingLevel? = nil,
             fallbackPolicy: CloudFallbackPolicy = .disabled
         ) {
             self.apiKey = apiKey
             self.modelID = modelID
             self.useFilesAPI = useFilesAPI
-            self.thinkingLevel = thinkingLevel
+            self.thinkingLevel = GeminiGenerationConfig.resolvedThinkingLevel(
+                thinkingLevel ?? GeminiGenerationConfig.defaultThinkingLevel(modelID: modelID), modelID: modelID)
             self.fallbackPolicy = fallbackPolicy
         }
 
@@ -667,14 +668,16 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         workingDirectory: URL?,
         logger: ((_ level: String, _ message: String) -> Void)?
     ) async throws -> CloudTranscriptionResult {
+        let effectiveThinkingLevel = GeminiGenerationConfig.resolvedThinkingLevel(
+            thinkingLevel, modelID: effectiveModelID)
         let generationConfig = GeminiGenerationConfig.make(
             maxOutputTokens: GeminiGenerationConfig.transcriptionOutputTokens(modelID: effectiveModelID),
             modelID: effectiveModelID,
-            thinkingLevel: thinkingLevel
+            thinkingLevel: effectiveThinkingLevel
         )
         logger?(
             "info",
-            "轉錄請求送出 maxOutputTokens=\(generationConfig["maxOutputTokens"] as? Int ?? 0)，thinkingConfig=\(thinkingLevel.rawValue)（模型 \(effectiveModelID)）。"
+            "轉錄請求送出 maxOutputTokens=\(generationConfig["maxOutputTokens"] as? Int ?? 0)，thinkingConfig=\(effectiveThinkingLevel.rawValue)（模型 \(effectiveModelID)）。"
         )
 
         let requestBody: [String: Any] = [
@@ -763,7 +766,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             effectiveModelID: effectiveModelID,
             retryCount: max(retryCount, (CloudNetworkContext.generation?.count ?? 1) - 1),
             fallbackReason: fallbackReason,
-            thinkingLevel: thinkingLevel,
+            thinkingLevel: effectiveThinkingLevel,
             latencySeconds: latency
         )
         return CloudTranscriptionResult(text: text, metadata: metadata)
