@@ -4,6 +4,7 @@ public enum GeminiThinkingLevel: String, Codable, CaseIterable, Sendable {
     case low
     case medium
     case high
+    case xhigh
 
     public var displayName: String {
         switch self {
@@ -12,7 +13,9 @@ public enum GeminiThinkingLevel: String, Codable, CaseIterable, Sendable {
         case .medium:
             return "中"
         case .high:
-            return "高（預設／品質優先）"
+            return "高"
+        case .xhigh:
+            return "極高（較耗時）"
         }
     }
 }
@@ -256,7 +259,8 @@ public extension CloudUsageMetadata {
         // Argon has a dated introductory tariff and different thinking/cache
         // pricing. Keep actual token usage, but never apply the Flash fallback
         // rate to it. Accurate billing needs provider/date-aware per-request data.
-        guard modelID != "gemini-4-argon", modelID != "gemini-4-carbon", modelID != "gemini-3.5-transcribe" else { return nil }
+        guard modelID != "gemini-4-argon", modelID != "gemini-4-carbon",
+              modelID != "gemini-4-hydrogen", modelID != "gemini-3.5-transcribe" else { return nil }
         guard let total = totalTokenCount, total > 0 else {
             return nil
         }

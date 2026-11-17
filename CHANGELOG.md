@@ -6,6 +6,7 @@
 
 ### Added
 
+- 0.2.1 build 20：AI Studio API 與 Vertex AI 新增 Gemini 4 Hydrogen，首次預設極高（xhigh），可調低／中／高／極高。每個模型分別記住思考強度並跨後端共用；Carbon 保留低／中／高，舊設定及續跑工作保留原強度。Hydrogen 使用 65,536-token 上限與延長等待預算；思考內容不輸出至逐字稿。
 - 0.2.1 build 6：完成工作保存精簡分段診斷（實際音訊範圍、前處理／雲端請求／退避耗時、固定分類的重試原因、時間標記處理結果）。最近工作重開後可複製診斷；不保存 Prompt、逐字稿、原始錯誤或雲端 URL。
 - 新增完整 `TranscriptionEngine` 雲端自適應切段整合測試：父段 `MAX_TOKENS` 後切成子段重試，只有所有子段 `STOP` 才交付正式稿；子段失敗或達最大切段深度時維持 fail-closed 並保留 recovery。
 

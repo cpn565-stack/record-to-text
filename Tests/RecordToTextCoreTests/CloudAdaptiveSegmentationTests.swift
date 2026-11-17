@@ -200,6 +200,29 @@ private final class CloudSilenceDetectorSpy: SilenceDetectionServicing, @uncheck
 }
 
 final class CloudAdaptiveSegmentationTests: XCTestCase {
+    func testHydrogenFilesRequestsUseXHighByDefaultAndCleanUpUploads() async throws {
+        let transport = MockAIStudioTransport(responses: [.success((finishReason: "STOP", text: "完整逐字稿"))])
+        MockAdaptiveCloudURLProtocol.handler = { try transport.handle(request: $0) }
+        let session = GeminiTransportHelper.makeEphemeralRetrySession(protocolClasses: [MockAdaptiveCloudURLProtocol.self])
+        defer { session.invalidateAndCancel(); MockAdaptiveCloudURLProtocol.handler = nil }
+        let backend = GoogleAIStudioBackend(urlSession: session,
+            configuration: .init(apiKey: "fixture", modelID: "gemini-4-hydrogen"))
+        let result = try await backend.transcribeDetailed(audioData: Data("audio".utf8))
+        XCTAssertEqual(result.text, "完整逐字稿")
+        XCTAssertEqual(result.metadata.thinkingLevel, .xhigh)
+        let request = try XCTUnwrap(transport.recordedGenerateRequests.first)
+        XCTAssertEqual(request.url?.path, "/v1beta/models/gemini-4-hydrogen:generateContent")
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        let generation = try XCTUnwrap(body["generationConfig"] as? [String: Any])
+        XCTAssertEqual(generation["maxOutputTokens"] as? Int, 65_536)
+        XCTAssertEqual((generation["thinkingConfig"] as? [String: String])?["thinkingLevel"], "xhigh")
+        let content = try XCTUnwrap((body["contents"] as? [[String: Any]])?.first)
+        let parts = try XCTUnwrap(content["parts"] as? [[String: Any]])
+        XCTAssertNotNil(parts.first?["fileData"])
+        XCTAssertEqual(transport.createdFiles.count, 1)
+        XCTAssertEqual(transport.deletedFiles, transport.createdFiles)
+    }
+
     func testArgonFilesRequestPreservesTranscriptContractAndThinkingLevels() async throws {
         let transcript = "[20:00 - 25:00]\n\n講者 1：我們先確認 OGSTM。\n\n講者 2：好，接著討論。"
         let transport = MockAIStudioTransport(responses: Array(
@@ -207,7 +230,7 @@ final class CloudAdaptiveSegmentationTests: XCTestCase {
         MockAdaptiveCloudURLProtocol.handler = { try transport.handle(request: $0) }
         let session = GeminiTransportHelper.makeEphemeralRetrySession(protocolClasses: [MockAdaptiveCloudURLProtocol.self])
         defer { session.invalidateAndCancel(); MockAdaptiveCloudURLProtocol.handler = nil }
-        for level in GeminiThinkingLevel.allCases {
+        for level in GeminiGenerationConfig.supportedThinkingLevels(modelID: "gemini-4-argon") {
             let backend = GoogleAIStudioBackend(urlSession: session,
                 configuration: .init(apiKey: "fixture", modelID: "gemini-4-argon", thinkingLevel: level))
             let result = try await backend.transcribeDetailed(audioData: Data("audio".utf8),
