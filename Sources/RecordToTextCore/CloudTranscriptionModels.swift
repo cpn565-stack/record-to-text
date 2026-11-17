@@ -260,7 +260,7 @@ public extension CloudUsageMetadata {
         // pricing. Keep actual token usage, but never apply the Flash fallback
         // rate to it. Accurate billing needs provider/date-aware per-request data.
         guard modelID != "gemini-4-argon", modelID != "gemini-4-carbon",
-              modelID != "gemini-4-hydrogen", modelID != "gemini-3.5-transcribe" else { return nil }
+              modelID != "gemini-4-hydrogen" else { return nil }
         guard let total = totalTokenCount, total > 0 else {
             return nil
         }

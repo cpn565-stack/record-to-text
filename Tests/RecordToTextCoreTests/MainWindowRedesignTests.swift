@@ -185,7 +185,7 @@ final class MainWindowRedesignTests: XCTestCase {
 
         let model = AppViewModel(paths: paths, credentialStore: RedesignTestCredentialStore())
         await model.waitForCredentialLoading()
-        model.selectQuickTranscriptionChoice(.vertexGemini35Transcribe)
+        model.selectQuickTranscriptionChoice(.vertexGemini4Hydrogen)
 
         for size in [NSSize(width: 760, height: 680), NSSize(width: 900, height: 780)] {
             let hosting = NSHostingView(rootView: MainView(viewModel: model))

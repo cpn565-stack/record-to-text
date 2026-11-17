@@ -14,10 +14,6 @@ struct SettingChipsBar: View {
         TermParser.parse(viewModel.settings.lastTemporaryTerms).count
     }
 
-    private var isDedicatedTranscribe: Bool {
-        JobModelDisplayHelper.isDedicatedTranscribeModel(viewModel.settings)
-    }
-
     var body: some View {
         FlowLayout(horizontalSpacing: AppSpacing.sm, verticalSpacing: AppSpacing.sm) {
             glossaryChip
@@ -213,44 +209,26 @@ struct SettingChipsBar: View {
 
     private var recordingContextChip: some View {
         let count = viewModel.recordingContextCount
-        let hasError = !isDedicatedTranscribe && viewModel.recordingContextErrorMessage != nil
-        let labelText: String = {
-            if isDedicatedTranscribe {
-                return "專用轉錄不使用背景"
-            }
-            return count == 0 ? "錄音背景：未填寫" : "錄音背景：\(count)/500 字"
-        }()
+        let hasError = viewModel.recordingContextErrorMessage != nil
+        let labelText = count == 0 ? "錄音背景：未填寫" : "錄音背景：\(count)/500 字"
 
         return SettingChip(
-            isActive: !isDedicatedTranscribe && count > 0,
+            isActive: count > 0,
             isError: hasError,
-            isLocked: isDedicatedTranscribe,
             action: { isRecordingContextPopoverPresented.toggle() }
         ) {
             HStack(spacing: 5) {
-                Image(systemName: isDedicatedTranscribe ? "lock.fill" : (hasError ? "exclamationmark.triangle.fill" : "text.quote"))
+                Image(systemName: hasError ? "exclamationmark.triangle.fill" : "text.quote")
                 Text(labelText)
                     .monospacedDigit()
                     .lineLimit(1)
             }
         }
-        .help(
-            isDedicatedTranscribe
-                ? "Gemini 3.5 Transcribe 專用轉錄僅使用錄音與詞庫，不使用錄音背景與自訂提示；有詞庫時不區分講者"
-                : (viewModel.recordingContextErrorMessage ?? "補充錄音主題或情境（最多 500 字，加入檔案時固定並隨音訊送至雲端）")
-        )
+        .help(viewModel.recordingContextErrorMessage ?? "補充錄音主題或情境（最多 500 字，加入檔案時固定並隨音訊送至雲端）")
         .accessibilityElement(children: .combine)
         .accessibilityLabel("錄音背景")
-        .accessibilityValue(
-            isDedicatedTranscribe
-                ? "專用轉錄不使用背景"
-                : (hasError ? "設定錯誤，\(count) 字" : (count == 0 ? "未填寫" : "\(count) / 500 字"))
-        )
-        .accessibilityHint(
-            isDedicatedTranscribe
-                ? "目前所選專用轉錄模型不支援錄音背景"
-                : "點擊以輸入本次雲端轉錄的錄音背景"
-        )
+        .accessibilityValue(hasError ? "設定錯誤，\(count) 字" : (count == 0 ? "未填寫" : "\(count) / 500 字"))
+        .accessibilityHint("點擊以輸入本次雲端轉錄的錄音背景")
         .popover(isPresented: $isRecordingContextPopoverPresented, arrowEdge: .bottom) {
             recordingContextPopover
                 .tint(AppColors.accent)

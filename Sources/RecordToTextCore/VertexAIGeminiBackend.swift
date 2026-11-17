@@ -466,13 +466,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         let host = location == "global"
             ? "aiplatform.googleapis.com"
             : "\(location)-aiplatform.googleapis.com"
-        let isTranscribe = VertexTranscribeRequest.matches(modelID: effectiveModelID)
-        // The transcription configuration and audioTranscription parts are in
-        // Vertex's v1beta1 schema. Use unary generateContent as documented for
-        // pre-recorded audio, rather than the general Gemini SSE path.
-        let apiVersion = isTranscribe ? "v1beta1" : "v1"
-        let method = isTranscribe ? "generateContent" : "streamGenerateContent?alt=sse"
-        let endpointString = "https://\(host)/\(apiVersion)/projects/\(projectID)/locations/\(location)/publishers/google/models/\(effectiveModelID):\(method)"
+        let endpointString = "https://\(host)/v1/projects/\(projectID)/locations/\(location)/publishers/google/models/\(effectiveModelID):streamGenerateContent?alt=sse"
         guard let endpointURL = URL(string: endpointString) else {
             throw VertexAIError.invalidEndpointURL(endpointString)
         }
@@ -484,7 +478,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             fallbackReason: fallbackReason,
             resolvedLocation: location,
             endpointURL: endpointURL,
-            responseMode: isTranscribe ? .unaryJSON : .geminiSSE,
+            responseMode: .geminiSSE,
             accessToken: accessToken,
             authService: authService,
             inputByteCount: inputByteCount,
@@ -499,8 +493,6 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             maximumOutputTokens: GeminiGenerationConfig.transcriptionOutputTokens(modelID: effectiveModelID),
             thinkingLevel: thinkingLevel,
             recordingContext: recordingContext,
-            transcribeTerms: terms,
-            segmentStartSeconds: timeOffsetSeconds,
             workingDirectory: workingDirectory,
             logger: logger
         )
@@ -603,8 +595,6 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         maximumOutputTokens: Int,
         thinkingLevel: GeminiThinkingLevel,
         recordingContext: String = "",
-        transcribeTerms: [String] = [],
-        segmentStartSeconds: Double = 0,
         workingDirectory: URL?,
         logger: ((_ level: String, _ message: String) -> Void)?
     ) async throws -> (result: CloudTranscriptionResult, accessToken: String) {
@@ -617,17 +607,11 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             thinkingLevel: effectiveThinkingLevel,
             includeThoughts: responseMode == .geminiSSE
         )
-        let isTranscribe = requestDescription == "轉錄" && VertexTranscribeRequest.matches(modelID: effectiveModelID)
-        let requestBody: [String: Any]
-        if isTranscribe {
-            requestBody = try VertexTranscribeRequest.body(inputPart: inputPart, terms: transcribeTerms)
-            logger?("info", "使用 Gemini 3.5 Transcribe 逐字模式；\(transcribeTerms.isEmpty ? "啟用講者區分" : "啟用詞庫（不使用講者區分）")。")
-        } else {
-            logger?(
-                "info",
-                "轉錄請求送出 maxOutputTokens=\(generationConfig["maxOutputTokens"] as? Int ?? 0)，thinkingConfig=\(effectiveThinkingLevel.rawValue)（模型 \(effectiveModelID)）。"
-            )
-            requestBody = [
+        logger?(
+            "info",
+            "轉錄請求送出 maxOutputTokens=\(generationConfig["maxOutputTokens"] as? Int ?? 0)，thinkingConfig=\(effectiveThinkingLevel.rawValue)（模型 \(effectiveModelID)）。"
+        )
+        let requestBody: [String: Any] = [
             "systemInstruction": [
                 "parts": [
                     ["text": systemInstructionText]
@@ -651,7 +635,6 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             ],
             "generationConfig": generationConfig
         ]
-        }
 
         let requestData = try JSONSerialization.data(withJSONObject: requestBody)
 
@@ -740,18 +723,12 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             )
         }
 
-        let text: String
-        if isTranscribe {
-            text = try VertexTranscribeRequest.transcript(
-                from: data, segmentStartSeconds: segmentStartSeconds, logger: logger)
-        } else {
-            text = try parseCandidateText(
-                from: data,
-                httpStatusCode: httpResponse.statusCode,
-                recordingContextBlock: try CloudRecordingContext.referenceBlock(recordingContext),
-                logger: logger
-            )
-        }
+        let text = try parseCandidateText(
+            from: data,
+            httpStatusCode: httpResponse.statusCode,
+            recordingContextBlock: try CloudRecordingContext.referenceBlock(recordingContext),
+            logger: logger
+        )
         let metadata = GeminiResponseMetadataParser.makeMetadata(
             from: data,
             requestedModelID: requestedModelID,

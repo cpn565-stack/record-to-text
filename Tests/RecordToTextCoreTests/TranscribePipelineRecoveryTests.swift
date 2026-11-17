@@ -26,11 +26,11 @@ private final class TranscribeRecoveryURLProtocol: URLProtocol {
 
 private final class TranscribeRecoveryTransport: @unchecked Sendable {
     private let lock = NSLock()
-    private var interactionCount = 0
+    private var generationCount = 0
     private var created: [String] = []
     private var deleted: [String] = []
 
-    var sends: Int { lock.withLock { interactionCount } }
+    var sends: Int { lock.withLock { generationCount } }
     var createdFiles: [String] { lock.withLock { created } }
     var deletedFiles: [String] { lock.withLock { deleted } }
 
@@ -55,18 +55,23 @@ private final class TranscribeRecoveryTransport: @unchecked Sendable {
             lock.withLock { deleted.append(String(path.dropFirst("/v1beta/".count))) }
             return (204, [:], Data())
         }
-        if path == "/v1beta/interactions", method == "POST" {
-            let number = lock.withLock { interactionCount += 1; return interactionCount }
+        if path == "/v1beta/models/gemini-4-hydrogen:generateContent", method == "POST" {
+            let number = lock.withLock { generationCount += 1; return generationCount }
             if number == 2 {
                 // A permanent error means no automatic retry; the preserved
                 // checkpoint must be used by an explicit continuation.
                 return (400, [:], Data(#"{"error":{"message":"synthetic permanent failure"}}"#.utf8))
             }
             guard number == 1 || number == 3 else { throw URLError(.badServerResponse) }
-            let text = number == 1 ? "第一段合成測試內容。" : "第二段合成測試內容。"
-            let payload: [String: Any] = ["status": "completed", "steps": [[
-                "type": "model_output", "content": [["type": "text", "text": text]]
-            ]]]
+            let text = number == 1
+                ? "[00:00 - 20:00]\n講者 1：第一段合成測試內容。"
+                : "[20:00 - 20:02]\n講者 1：第二段合成測試內容。"
+            let payload: [String: Any] = [
+                "candidates": [[
+                    "finishReason": "STOP",
+                    "content": ["parts": [["text": text]]]
+                ]]
+            ]
             return (200, [:], try JSONSerialization.data(withJSONObject: payload))
         }
         throw URLError(.badURL)
@@ -74,7 +79,7 @@ private final class TranscribeRecoveryTransport: @unchecked Sendable {
 }
 
 final class TranscribePipelineRecoveryTests: XCTestCase {
-    func testLongTranscribeResumesOnlyUnfinishedFourteenMinuteSegment() async throws {
+    func testLongCloudJobResumesOnlyUnfinishedTwentyMinuteSegment() async throws {
         let root = try TestSupport.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let paths = ApplicationPaths(root: root.appendingPathComponent("Support"))
@@ -89,7 +94,7 @@ final class TranscribePipelineRecoveryTests: XCTestCase {
         let source = root.appendingPathComponent("synthetic.wav")
         _ = try await ProcessRunner().run(executableURL: runtime.ffmpeg, arguments: [
             "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
-            "sine=frequency=440:sample_rate=16000", "-t", "842", "-c:a", "pcm_s16le", source.path
+            "sine=frequency=440:sample_rate=16000", "-t", "1202", "-c:a", "pcm_s16le", source.path
         ])
         let sessionConfig = URLSessionConfiguration.ephemeral
         sessionConfig.protocolClasses = [TranscribeRecoveryURLProtocol.self]
@@ -98,14 +103,12 @@ final class TranscribePipelineRecoveryTests: XCTestCase {
         TranscribeRecoveryURLProtocol.handler = { try transport.handle($0) }
         defer { session.invalidateAndCancel(); TranscribeRecoveryURLProtocol.handler = nil }
         let backend = GoogleAIStudioBackend(urlSession: session,
-            configuration: .init(apiKey: "synthetic-key", modelID: "gemini-3.5-transcribe"))
+            configuration: .init(apiKey: "synthetic-key", modelID: "gemini-4-hydrogen"))
         let engine = TranscriptionEngine(runtime: runtime, paths: paths, googleAIStudioBackend: backend)
         let snapshot = JobSnapshot(modelID: "fixture", glossaryID: nil, glossaryName: nil,
-            // Transcribe never receives this prompt. The first response matches
-            // it exactly and must not be incorrectly rejected as prompt echo.
-            terms: [], prompt: "第一段合成測試內容。", outputLocationMode: .fixedDirectory,
+            terms: [], prompt: "", outputLocationMode: .fixedDirectory,
             outputDirectory: root.path, keepRawTranscript: false, backendType: .googleAIStudio,
-            googleAIStudioAPIKey: "synthetic-key", googleAIStudioModelID: "gemini-3.5-transcribe",
+            googleAIStudioAPIKey: "synthetic-key", googleAIStudioModelID: "gemini-4-hydrogen",
             silenceAwareCloudSegmentation: false)
         var failed = TranscriptionJob(sourcePath: source.path, snapshot: snapshot)
         var recovery: URL?
@@ -125,13 +128,13 @@ final class TranscribePipelineRecoveryTests: XCTestCase {
         let directory = try XCTUnwrap(recovery)
         let manifestURL = directory.appendingPathComponent(RecoveryScanner.segmentManifestFileName)
         let manifest = try JSONDecoder().decode(AudioSegmentManifest.self, from: Data(contentsOf: manifestURL))
-        XCTAssertEqual(manifest.maximumSegmentDurationSeconds, 840, accuracy: 0.01)
+        XCTAssertEqual(manifest.maximumSegmentDurationSeconds, 1200, accuracy: 0.01)
         XCTAssertEqual(manifest.segments.count, 2)
         XCTAssertEqual(manifest.segments.map(\.status), [.completed, .failed])
         XCTAssertEqual(manifest.segments[0].startSeconds, 0, accuracy: 0.01)
-        XCTAssertEqual(manifest.segments[0].endSeconds, 840, accuracy: 0.01)
-        XCTAssertEqual(manifest.segments[1].startSeconds, 840, accuracy: 0.01)
-        XCTAssertEqual(manifest.segments[1].endSeconds, 842, accuracy: 0.1)
+        XCTAssertEqual(manifest.segments[0].endSeconds, 1200, accuracy: 0.01)
+        XCTAssertEqual(manifest.segments[1].startSeconds, 1200, accuracy: 0.01)
+        XCTAssertEqual(manifest.segments[1].endSeconds, 1202, accuracy: 0.1)
         let completed = URL(fileURLWithPath: manifest.segments[0].outputPath)
         let originalFirstSegment = try Data(contentsOf: completed)
         XCTAssertFalse(FileManager.default.fileExists(atPath: manifest.segments[1].outputPath))

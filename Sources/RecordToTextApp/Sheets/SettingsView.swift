@@ -33,13 +33,6 @@ struct SettingsView: View {
     private var supportedThinkingLevels: [GeminiThinkingLevel] {
         GeminiGenerationConfig.supportedThinkingLevels(modelID: viewModel.settings.selectedGeminiModelID)
     }
-    private var isTranscribeModel: Bool {
-        switch viewModel.settings.backendType {
-        case .googleAIStudio: return viewModel.settings.googleAIStudioModelID == "gemini-3.5-transcribe"
-        case .vertexAI: return viewModel.settings.vertexAIModelID == "gemini-3.5-transcribe"
-        case .localQwen: return false
-        }
-    }
     @State private var resetChoice: ResetChoice?
     @State private var isTestingAPIKey = false
     @State private var apiKeyTestResult: String?
@@ -423,8 +416,7 @@ struct SettingsView: View {
                         "附加內容摘要（輸出不再是純逐字稿）",
                         isOn: setting(\.vertexAIIncludeSummary)
                     )
-                    .disabled(isTranscribeModel)
-                    Text(isTranscribeModel ? "Gemini 3.5 Transcribe 不支援摘要；選用此模型時不會產生摘要。" : "預設關閉。開啟後，Vertex AI 會在逐字稿後附加摘要；若要保留純原始逐字稿，請維持關閉。")
+                    Text("預設關閉。開啟後，Vertex AI 會在逐字稿後附加摘要；若要保留純原始逐字稿，請維持關閉。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
@@ -463,7 +455,7 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     } else {
-                        Text(isTranscribeModel ? "Gemini 3.5 Transcribe 不使用思考強度設定。" : "此自訂模型尚無已確認的思考強度選項，不會傳送思考設定。")
+                        Text("此自訂模型尚無已確認的思考強度選項，不會傳送思考設定。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -488,11 +480,9 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
-                    if !isTranscribeModel {
                     LabeledContent("雲端單段輸出上限") {
                         Text("\(GeminiGenerationConfig.transcriptionOutputTokens(modelID: viewModel.settings.backendType == .vertexAI ? viewModel.settings.vertexAIModelID : viewModel.settings.googleAIStudioModelID).formatted()) tokens")
                             .foregroundStyle(.secondary)
-                    }
                     }
                     Text("Cloud 最終稿會在本機經 OpenCC s2tw 統一成繁體字形（保留原始用詞），因此環境檢查會要求 OpenCC。")
                         .font(.caption)

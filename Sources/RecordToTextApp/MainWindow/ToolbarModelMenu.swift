@@ -10,8 +10,7 @@ struct ToolbarModelMenu: View {
         .aiStudioGemini4Carbon,
         .aiStudioGemini4Argon,
         .aiStudioGemini38Flash,
-        .aiStudioGemini37Flash,
-        .aiStudioGemini35Transcribe
+        .aiStudioGemini37Flash
     ]
 
     private static let vertexChoices: [QuickTranscriptionChoice] = [
@@ -19,8 +18,7 @@ struct ToolbarModelMenu: View {
         .vertexGemini4Carbon,
         .vertexGemini4Argon,
         .vertexGemini38Flash,
-        .vertexGemini37Flash,
-        .vertexGemini35Transcribe
+        .vertexGemini37Flash
     ]
 
     var body: some View {
@@ -118,10 +116,7 @@ struct ToolbarModelMenu: View {
     }
 
     private var modelMenuHelpText: String {
-        if JobModelDisplayHelper.isDedicatedTranscribeModel(viewModel.settings) {
-            return "目前為專用轉錄模型：不使用錄音背景與自訂提示；切換不會影響執行中或續跑工作"
-        }
-        return "切換新錄音與尚未開始工作的模型；執行中及檢查點續跑工作維持原設定"
+        "切換新錄音與尚未開始工作的模型；執行中及檢查點續跑工作維持原設定"
     }
 }
 

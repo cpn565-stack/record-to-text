@@ -66,7 +66,7 @@ final class GeminiThinkingPreferencesTests: XCTestCase {
         let config = GeminiGenerationConfig.make(maxOutputTokens: 32_768,
             modelID: "gemini-4-carbon", thinkingLevel: .xhigh)
         XCTAssertEqual((config["thinkingConfig"] as? [String: String])?["thinkingLevel"], "high")
-        for model in ["gemini-3.5-transcribe", "custom-model"] {
+        for model in ["custom-model"] {
             XCTAssertTrue(GeminiGenerationConfig.supportedThinkingLevels(modelID: model).isEmpty)
             XCTAssertNil(GeminiGenerationConfig.make(maxOutputTokens: 16_384,
                 modelID: model, thinkingLevel: .xhigh)["thinkingConfig"])

@@ -28,6 +28,9 @@ enum JobModelDisplayHelper {
         if backend == .localQwen {
             return ASRModelDescriptor.descriptor(id: modelID)?.displayName ?? modelID
         }
+        if modelID == "gemini-3.5-transcribe" {
+            return "Gemini 3.5 Transcribe"
+        }
         if let preset = GeminiModelDescriptor.presetModels.first(where: { $0.id == modelID }) {
             return preset.displayName
         }
@@ -52,10 +55,6 @@ enum JobModelDisplayHelper {
         "\(shortBackendName(settings.backendType)) · \(currentModelShortName(settings))"
     }
 
-    static func isDedicatedTranscribeModel(_ settings: AppSettings) -> Bool {
-        settings.backendType != .localQwen && settings.selectedGeminiModelID == "gemini-3.5-transcribe"
-    }
-
     static func choiceMenuTitle(_ choice: QuickTranscriptionChoice) -> String {
         switch choice {
         case .qwen3ASR1_7BBF16:
@@ -70,8 +69,6 @@ enum JobModelDisplayHelper {
             return "Gemini 3.8 Flash"
         case .aiStudioGemini37Flash, .vertexGemini37Flash:
             return "Gemini 3.7 Flash"
-        case .aiStudioGemini35Transcribe, .vertexGemini35Transcribe:
-            return "Gemini 3.5 Transcribe（專用轉錄）"
         }
     }
 

@@ -6,7 +6,6 @@ import Foundation
 public enum GeminiGenerationConfig {
     public static func supportedThinkingLevels(modelID: String) -> [GeminiThinkingLevel] {
         if modelID == "gemini-4-hydrogen" { return [.low, .medium, .high, .xhigh] }
-        if modelID == "gemini-3.5-transcribe" { return [] }
         if modelID.hasPrefix("gemini-3.") || modelID == "gemini-4-argon" || modelID == "gemini-4-carbon" {
             return [.low, .medium, .high]
         }

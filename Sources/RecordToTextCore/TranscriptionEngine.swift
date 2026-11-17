@@ -1412,11 +1412,6 @@ public final class TranscriptionEngine {
             )
         )
         let modelDisplay = job.snapshot.vertexAIModelID
-        let supportsSummary = modelDisplay != "gemini-3.5-transcribe"
-        if !supportsSummary && job.snapshot.vertexAIIncludeSummary {
-            update(.warning(code: "transcribe_summary_unsupported",
-                message: "Gemini 3.5 Transcribe 不支援摘要，本次僅輸出逐字稿。"))
-        }
         return try await runCloudPipeline(
             job: job,
             startedAt: startedAt,
@@ -1432,7 +1427,7 @@ public final class TranscriptionEngine {
             finalizeTranscript: { segmentTexts in
                 await Self.finalizeVertexTranscript(
                     segmentTexts: segmentTexts,
-                    includeSummary: job.snapshot.vertexAIIncludeSummary && supportsSummary,
+                    includeSummary: job.snapshot.vertexAIIncludeSummary,
                     summarize: { completeTranscript in
                         update(
                             .log(
@@ -1555,11 +1550,7 @@ public final class TranscriptionEngine {
     }
 
     func cloudSegmentLimit(for job: TranscriptionJob) -> TimeInterval {
-        if job.snapshot.requestedModelID == "gemini-3.5-transcribe" {
-            // Leave headroom for encoded audio duration rounding and provider limits.
-            return min(maximumASRSegmentDuration, 14 * 60)
-        }
-        return maximumASRSegmentDuration
+        maximumASRSegmentDuration
     }
 
     private func makeCloudSegmentPlan(
@@ -1738,13 +1729,9 @@ public final class TranscriptionEngine {
     ) async throws -> PipelineResult {
         let fileManager = FileManager.default
         let segmentLimit = cloudSegmentLimit(for: job)
-        // Transcribe receives vocabulary as structured hints, not the prompt or
-        // background text. Spoken words matching those inputs are not echoes.
-        let usesPrompt = job.snapshot.requestedModelID != "gemini-3.5-transcribe"
-        let validationPrompt = usesPrompt ? job.snapshot.prompt : ""
-        let validationTerms = usesPrompt ? job.snapshot.terms : []
-        let validationContext = usesPrompt
-            ? try CloudRecordingContext.referenceBlock(job.snapshot.cloudRecordingContext) : ""
+        let validationPrompt = job.snapshot.prompt
+        let validationTerms = job.snapshot.terms
+        let validationContext = try CloudRecordingContext.referenceBlock(job.snapshot.cloudRecordingContext)
         let sourceTimeOffset = Self.cloudSegmentStart(
             sourceSlice: job.sourceSlice,
             plannedStart: 0
