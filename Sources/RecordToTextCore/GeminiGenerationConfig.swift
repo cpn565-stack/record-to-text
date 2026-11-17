@@ -43,9 +43,16 @@ public enum GeminiGenerationConfig {
         usesExtendedBudget(modelID: modelID) ? 1_200 : 300
     }
 
-    /// Hydrogen's optional summary also needs room for thinking before text.
+    /// Thinking-capable models need room for reasoning tokens before emitting
+    /// the summary text; Hydrogen supports up to 64K in one request.
     public static func summaryOutputTokens(modelID: String) -> Int {
-        modelID == "gemini-4-hydrogen" ? 65_536 : 2_048
+        if modelID == "gemini-4-hydrogen" {
+            return 65_536
+        }
+        if !supportedThinkingLevels(modelID: modelID).isEmpty {
+            return 16_384
+        }
+        return 2_048
     }
 
     /// Includes preparation and retries; shared by all adaptive children.

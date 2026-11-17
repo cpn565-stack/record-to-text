@@ -216,7 +216,7 @@ struct JobListView: View {
     // MARK: - Section Partitioning
 
     private func isActiveSectionJob(_ job: TranscriptionJob) -> Bool {
-        job.id == viewModel.activeJobID
+        (job.id == viewModel.activeJobID && !job.stage.isTerminal)
             || job.isCloudRecoveryPaused
             || (!job.stage.isTerminal && job.stage != .queued)
     }

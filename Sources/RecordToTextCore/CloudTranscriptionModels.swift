@@ -179,6 +179,24 @@ public enum CloudTranscriptionMetadataAggregator {
     ) -> Int {
         metadata.reduce(0) { $0 + $1.retryCount }
     }
+
+    /// Sums per-segment cost using each segment's effective model rate so a
+    /// fallback segment (e.g. 3.8 Flash -> 3.6 Flash) is billed at its own rate.
+    public static func totalEstimatedCostUSD(
+        _ metadata: [CloudTranscriptionMetadata]
+    ) -> Double? {
+        var totalCost = 0.0
+        var hasAnyCost = false
+        for item in metadata {
+            guard let usage = item.usage else { continue }
+            guard let segmentCost = usage.estimatedCostUSD(modelID: item.effectiveModelID) else {
+                return nil
+            }
+            totalCost += segmentCost
+            hasAnyCost = true
+        }
+        return hasAnyCost ? totalCost : nil
+    }
 }
 
 public extension JobSnapshot {
@@ -226,7 +244,8 @@ public extension TranscriptionJob {
         let usage = CloudTranscriptionMetadataAggregator.totalUsage(metadata)
         let effective = CloudTranscriptionMetadataAggregator.uniqueEffectiveModelIDs(metadata)
         let model = effective.first ?? snapshot.requestedModelID
-        return usage?.summaryDisplay(modelID: model)
+        let costOverride = CloudTranscriptionMetadataAggregator.totalEstimatedCostUSD(metadata)
+        return usage?.summaryDisplay(modelID: model, estimatedCostOverride: costOverride)
     }
 }
 
@@ -286,9 +305,11 @@ public extension CloudUsageMetadata {
             outputRatePer1M = 3.75
         }
 
-        if let prompt = promptTokenCount, let candidates = candidatesTokenCount {
+        if let prompt = promptTokenCount, candidatesTokenCount != nil || thoughtsTokenCount != nil {
+            // Gemini REST bills thoughtsTokenCount at the model's output token rate.
+            let outputTokens = (candidatesTokenCount ?? 0) + (thoughtsTokenCount ?? 0)
             let promptCost = (Double(prompt) / 1_000_000.0) * inputRatePer1M
-            let candidateCost = (Double(candidates) / 1_000_000.0) * outputRatePer1M
+            let candidateCost = (Double(outputTokens) / 1_000_000.0) * outputRatePer1M
             return promptCost + candidateCost
         } else {
             // 若只有 totalTokenCount，錄音輸入約佔 95%，輸出約佔 5%
@@ -324,8 +345,11 @@ public extension CloudUsageMetadata {
         }
     }
 
-    /// 產生格式如「79.2k tokens (思考 1.2k)，預估 $0.07」的完整顯示字串
-    func summaryDisplay(modelID: String) -> String? {
+    /// 產生格式如「79.2k tokens (思考 1.2k)，預估 $0.08」的完整顯示字串
+    func summaryDisplay(
+        modelID: String,
+        estimatedCostOverride: Double? = nil
+    ) -> String? {
         guard let total = totalTokenCount, total > 0 else {
             return nil
         }
@@ -338,7 +362,7 @@ public extension CloudUsageMetadata {
             parts.append("\(totalFormatted) tokens")
         }
 
-        if let cost = estimatedCostUSD(modelID: modelID) {
+        if let cost = estimatedCostOverride ?? estimatedCostUSD(modelID: modelID) {
             parts.append("預估 \(Self.formatCostUSD(cost))")
         }
 

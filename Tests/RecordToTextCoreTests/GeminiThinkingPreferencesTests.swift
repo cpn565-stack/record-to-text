@@ -98,7 +98,9 @@ final class GeminiThinkingPreferencesTests: XCTestCase {
     func testHydrogenBudgetsAndUsageDoNotInheritUnknownModelOrFlashDefaults() {
         XCTAssertEqual(GeminiGenerationConfig.transcriptionOutputTokens(modelID: "gemini-4-hydrogen"), 65_536)
         XCTAssertEqual(GeminiGenerationConfig.summaryOutputTokens(modelID: "gemini-4-hydrogen"), 65_536)
-        XCTAssertEqual(GeminiGenerationConfig.summaryOutputTokens(modelID: "gemini-4-carbon"), 2_048)
+        XCTAssertEqual(GeminiGenerationConfig.summaryOutputTokens(modelID: "gemini-4-carbon"), 16_384)
+        XCTAssertEqual(GeminiGenerationConfig.summaryOutputTokens(modelID: "gemini-3.8-flash"), 16_384)
+        XCTAssertEqual(GeminiGenerationConfig.summaryOutputTokens(modelID: "custom-model"), 2_048)
         XCTAssertEqual(GeminiGenerationConfig.requestTimeout(modelID: "gemini-4-hydrogen"), 1_200)
         XCTAssertEqual(GeminiGenerationConfig.segmentBudget(modelID: "gemini-4-hydrogen"), .seconds(1_800))
         let usage = CloudUsageMetadata(promptTokenCount: 1_000, candidatesTokenCount: 100,

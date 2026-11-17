@@ -475,4 +475,89 @@ extension VertexAIGeminiBackendTests {
         }
         XCTAssertEqual(requests, 0)
     }
+
+    func testGCSCleanupUsesRefreshedAccessTokenAfter401() async throws {
+        let tokenCounterURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vertex-token-counter-\(UUID().uuidString)")
+        let rotatingGCloudURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vertex-rotating-gcloud-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: tokenCounterURL)
+            try? FileManager.default.removeItem(at: rotatingGCloudURL)
+        }
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "auth" ] && [ "$2" = "print-access-token" ]; then
+          count=0
+          if [ -f "\(tokenCounterURL.path)" ]; then count=$(cat "\(tokenCounterURL.path)"); fi
+          count=$((count + 1))
+          echo "$count" > "\(tokenCounterURL.path)"
+          echo "token-$count"
+          exit 0
+        fi
+        exit 2
+        """
+        try script.write(to: rotatingGCloudURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: rotatingGCloudURL.path)
+
+        var generateCount = 0
+        var deleteAuthHeader: String?
+        MockURLProtocol.requestHandler = { request in
+            if request.httpMethod == "DELETE" {
+                deleteAuthHeader = request.value(forHTTPHeaderField: "Authorization")
+                return (HTTPURLResponse(url: request.url!, statusCode: 204, httpVersion: nil, headerFields: nil)!, Data())
+            }
+            if request.url!.host == "storage.googleapis.com" {
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data("{}".utf8))
+            }
+            generateCount += 1
+            if generateCount == 1 {
+                return (HTTPURLResponse(url: request.url!, statusCode: 401, httpVersion: nil, headerFields: nil)!, Data())
+            }
+            let sse = "data: {\"candidates\":[{\"finishReason\":\"STOP\",\"content\":{\"parts\":[{\"text\":\"刷新後成功。\"}]}}]}\n\n"
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "text/event-stream"])!, Data(sse.utf8))
+        }
+
+        let backend = VertexAIGeminiBackend(
+            networkEnvironment: RecoveryClock().environment(),
+            authService: GCloudAuthService(customGCloudPath: rotatingGCloudURL.path),
+            urlSession: mockSession,
+            configuration: .init(projectID: "fixture-project", location: "global", modelID: "gemini-3.8-flash", gcsBucket: "gs://fixture-bucket/")
+        )
+        let text = try await backend.transcribe(audioData: Data("audio".utf8))
+        XCTAssertEqual(text, "刷新後成功。")
+        XCTAssertEqual(generateCount, 2)
+        XCTAssertEqual(deleteAuthHeader, "Bearer token-2")
+    }
+
+    func testEndpointAndBucketValidationRejectsPathTraversalBeforeNetworkRequests() async throws {
+        var networkRequests = 0
+        MockURLProtocol.requestHandler = { request in
+            networkRequests += 1
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data("{}".utf8))
+        }
+
+        let badConfigs: [VertexAIGeminiBackend.Configuration] = [
+            .init(projectID: "proj/../evil", location: "global", modelID: "gemini-3.8-flash"),
+            .init(projectID: "valid-project", location: "us-central1/evil", modelID: "gemini-3.8-flash"),
+            .init(projectID: "valid-project", location: "global", modelID: "gemini-3.8-flash?alt=json"),
+            .init(projectID: "valid-project", location: "global", modelID: "gemini-3.8-flash", gcsBucket: "gs://bucket/../evil")
+        ]
+        for config in badConfigs {
+            let backend = VertexAIGeminiBackend(
+                authService: GCloudAuthService(customGCloudPath: fakeGCloudURL.path),
+                urlSession: mockSession,
+                configuration: config
+            )
+            do {
+                _ = try await backend.transcribe(audioData: Data("audio".utf8))
+                XCTFail("Expected invalidEndpointURL for \(config)")
+            } catch let error as VertexAIError {
+                guard case .invalidEndpointURL = error else {
+                    return XCTFail("Unexpected VertexAIError: \(error)")
+                }
+            }
+        }
+        XCTAssertEqual(networkRequests, 0)
+    }
 }

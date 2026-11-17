@@ -24,7 +24,8 @@ struct JobRowView: View {
     @State private var localQwenResumeIsAvailable = false
 
     private var isRunningJob: Bool {
-        job.id == viewModel.activeJobID || (!job.stage.isTerminal && job.stage != .queued)
+        (job.id == viewModel.activeJobID && !job.stage.isTerminal)
+            || (!job.stage.isTerminal && job.stage != .queued)
     }
 
     private var hasLogsOrDiagnostics: Bool {
@@ -497,7 +498,7 @@ struct JobRowView: View {
 
     @ViewBuilder
     private var actionButtons: some View {
-        if job.id == viewModel.activeJobID {
+        if job.id == viewModel.activeJobID && !job.stage.isTerminal {
             Button {
                 viewModel.cancelCurrentJob()
             } label: {
@@ -512,10 +513,11 @@ struct JobRowView: View {
             if job.sourceSlice == nil {
                 Menu {
                     Button {
-                        viewModel.splitQueuedAudioFileInHalf(job.id)
+                        viewModel.splitQueuedAudioFileInHalf(job.id, autoStart: false)
                     } label: {
-                        Label("切分再依序轉", systemImage: "scissors")
+                        Label("切成前後兩段（保留待轉）", systemImage: "scissors")
                     }
+                    .disabled(viewModel.splittingJobIDs.contains(job.id))
                     Button {
                         isPromptPresented = true
                     } label: {

@@ -94,7 +94,8 @@ final class AppViewModel: ObservableObject {
     @Published var recoveryItemPendingDeletion: RecoveryScanItem?
     @Published var isBulkCleanupConfirmationPresented = false
     @Published var isUnsuccessfulCleanupConfirmationPresented = false
-    @Published private(set) var isUnsuccessfulCleanupRunning = false
+    @Published private(set) var isUnsuccessfulCleanupRunning = false { didSet { refreshQueueSleep() } }
+    @Published private(set) var splittingJobIDs: Set<UUID> = [] { didSet { refreshQueueSleep() } }
 
     @Published private(set) var jobPersistenceError: String? { didSet { refreshQueueSleep() } }
     private var persistenceRevision: UInt64 = 0
@@ -1328,8 +1329,9 @@ final class AppViewModel: ObservableObject {
         addFiles(panel.urls)
     }
 
-    func splitQueuedAudioFileInHalf(_ id: UUID) {
-        guard let job = jobs.first(where: { $0.id == id }),
+    func splitQueuedAudioFileInHalf(_ id: UUID, autoStart: Bool = true) {
+        guard !splittingJobIDs.contains(id),
+              let job = jobs.first(where: { $0.id == id }),
               job.stage == .queued,
               job.sourceSlice == nil
         else {
@@ -1337,11 +1339,15 @@ final class AppViewModel: ObservableObject {
         }
 
         Task { @MainActor [weak self] in
-            await self?.prepareAndSplitQueuedJob(id)
+            await self?.prepareAndSplitQueuedJob(id, autoStart: autoStart)
         }
     }
 
-    private func prepareAndSplitQueuedJob(_ id: UUID) async {
+    private func prepareAndSplitQueuedJob(_ id: UUID, autoStart: Bool) async {
+        guard !splittingJobIDs.contains(id) else { return }
+        splittingJobIDs.insert(id)
+        defer { splittingJobIDs.remove(id) }
+
         do {
             guard let job = jobs.first(where: { $0.id == id }),
                   job.stage == .queued,
@@ -1384,10 +1390,13 @@ final class AppViewModel: ObservableObject {
             }
             jobs.replaceSubrange(index...index, with: splitJobs)
             persistJobs()
-            // This action is intentionally the one-click variant of the
-            // manual start button: the first slice begins immediately and
-            // the second remains ordered behind it in the queue.
-            startQueuedJobs()
+            if autoStart {
+                // Toolbar/action-bar variant starts the first slice immediately
+                // and keeps the second ordered behind it in the queue.
+                startQueuedJobs()
+            } else {
+                scheduleQueueIfNeeded()
+            }
         } catch {
             alert = UserFacingAlert(
                 title: "無法切分音檔",
@@ -1525,6 +1534,7 @@ final class AppViewModel: ObservableObject {
         durablePersistenceRevision < persistenceRevision ||
         queuePausedForRecovery || queuePausedForEnvironment || queuePausedForPromptConsent ||
         isGoogleAIStudioCredentialLoading || isGoogleAIStudioCredentialSaving || modelDownloadPhase.isBusy ||
+        isUnsuccessfulCleanupRunning || !splittingJobIDs.isEmpty ||
         fileOperations > 0 || isDuplicateConfirmationPresented || isPromptConsentPresented ||
         jobPersistenceError != nil || jobPersistenceLoadBlocked || jobPersistenceDeferred ||
         hasQueuedJobs
@@ -2782,41 +2792,100 @@ final class AppViewModel: ObservableObject {
 
     private func performModelDownload(modelID: String, revision: String?) async {
         modelDownloadProgressLine = ""
-        do {
-            try paths.createDirectories(fileManager: fileManager)
-        } catch {
+        let appPaths = paths
+        let modelsDirectory = paths.models
+
+        let precheckResult: Result<(alreadyCached: Bool, inDefaultCache: Bool), Error> =
+            await Task.detached(priority: .utility) {
+                let fm = FileManager()
+                do {
+                    try appPaths.createDirectories(fileManager: fm)
+                    let alreadyCached = ModelCache.isDownloaded(
+                        modelID: modelID,
+                        revision: revision,
+                        modelsDirectory: modelsDirectory,
+                        fileManager: fm
+                    )
+                    if alreadyCached {
+                        return .success((true, false))
+                    }
+                    let inDefaultCache = ModelCache.isDownloadedInDefaultCache(
+                        modelID: modelID,
+                        revision: revision,
+                        fileManager: fm
+                    )
+                    return .success((false, inDefaultCache))
+                } catch {
+                    return .failure(error)
+                }
+            }.value
+
+        guard !Task.isCancelled else {
+            modelDownloadPhase = .idle
+            modelDownloadProgressLine = "已取消下載。"
+            return
+        }
+
+        let inDefaultCache: Bool
+        switch precheckResult {
+        case let .failure(error):
             modelDownloadPhase = .failed("無法建立模型資料夾：\(error.localizedDescription)")
             return
+        case let .success(status):
+            if status.alreadyCached {
+                if settings.selectedModelID == modelID {
+                    isSelectedModelCached = true
+                }
+                modelDownloadPhase = .succeeded("App 模型目錄已有此模型。")
+                modelDownloadProgressLine = ""
+                refreshSelectedModelCacheStatus()
+                return
+            }
+            inDefaultCache = status.inDefaultCache
         }
 
-        if ModelCache.isDownloaded(
-            modelID: modelID,
-            revision: revision,
-            modelsDirectory: paths.models,
-            fileManager: fileManager
-        ) {
-            isSelectedModelCached = true
-            modelDownloadPhase = .succeeded("App 模型目錄已有此模型。")
-            modelDownloadProgressLine = ""
-            return
-        }
-
-        if ModelCache.isDownloadedInDefaultCache(
-            modelID: modelID,
-            revision: revision,
-            fileManager: fileManager
-        ) {
+        if inDefaultCache {
             modelDownloadPhase = .importingLocal
             modelDownloadProgressLine = "正在從 ~/.cache/huggingface 匯入…"
-            do {
-                try importModelFromDefaultHFCache(modelID: modelID)
-                refreshSelectedModelCacheStatus()
-                if isSelectedModelCached {
-                    modelDownloadPhase = .succeeded("已從本機 Hugging Face cache 匯入。")
-                    modelDownloadProgressLine = ""
-                    return
+            let importOutcome: Result<Bool, Error> = await Task.detached(priority: .utility) {
+                let fm = FileManager()
+                do {
+                    try Self.copyModelFromDefaultHFCache(
+                        modelID: modelID,
+                        modelsDirectory: modelsDirectory,
+                        fileManager: fm
+                    )
+                    let imported = ModelCache.isDownloaded(
+                        modelID: modelID,
+                        revision: revision,
+                        modelsDirectory: modelsDirectory,
+                        fileManager: fm
+                    )
+                    return .success(imported)
+                } catch {
+                    return .failure(error)
                 }
-            } catch {
+            }.value
+
+            guard !Task.isCancelled else {
+                modelDownloadPhase = .idle
+                modelDownloadProgressLine = "已取消下載。"
+                refreshSelectedModelCacheStatus()
+                return
+            }
+
+            switch importOutcome {
+            case let .success(imported) where imported:
+                if settings.selectedModelID == modelID {
+                    isSelectedModelCached = true
+                }
+                modelDownloadPhase = .succeeded("已從本機 Hugging Face cache 匯入。")
+                modelDownloadProgressLine = ""
+                refreshSelectedModelCacheStatus()
+                return
+            case .success:
+                modelDownloadProgressLine = "本機快取未含完整模型 snapshot，改從網路下載…"
+            case let .failure(error):
                 modelDownloadProgressLine =
                     "本機匯入失敗，改從網路下載：\(error.localizedDescription)"
             }
@@ -2848,7 +2917,7 @@ final class AppViewModel: ObservableObject {
         print(path)
         """
 
-        let environment = modelDownloadEnvironment(modelsDirectory: paths.models)
+        let environment = modelDownloadEnvironment(modelsDirectory: modelsDirectory)
         var arguments = ["-u", "-c", script, modelID]
         if let revision, !revision.isEmpty {
             arguments.append(revision)
@@ -2877,8 +2946,18 @@ final class AppViewModel: ObservableObject {
                     }
                 }
             )
-            refreshSelectedModelCacheStatus()
-            if isSelectedModelCached {
+            let isDownloadedNow = await Task.detached(priority: .utility) {
+                ModelCache.isDownloaded(
+                    modelID: modelID,
+                    revision: revision,
+                    modelsDirectory: modelsDirectory,
+                    fileManager: FileManager()
+                )
+            }.value
+            if isDownloadedNow {
+                if settings.selectedModelID == modelID {
+                    isSelectedModelCached = true
+                }
                 modelDownloadPhase = .succeeded("模型已下載到 App 模型目錄。")
             } else {
                 modelDownloadPhase = .failed(
@@ -2899,12 +2978,16 @@ final class AppViewModel: ObservableObject {
         refreshSelectedModelCacheStatus()
     }
 
-    private func importModelFromDefaultHFCache(modelID: String) throws {
+    private nonisolated static func copyModelFromDefaultHFCache(
+        modelID: String,
+        modelsDirectory: URL,
+        fileManager: FileManager
+    ) throws {
         let source = ModelCache.repositoryDirectory(
             modelID: modelID,
             hubRoot: ModelCache.defaultHuggingFaceHub(fileManager: fileManager)
         )
-        let destinationRoot = ModelCache.hubRoot(modelsDirectory: paths.models)
+        let destinationRoot = ModelCache.hubRoot(modelsDirectory: modelsDirectory)
         let destination = ModelCache.repositoryDirectory(
             modelID: modelID,
             hubRoot: destinationRoot

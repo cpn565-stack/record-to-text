@@ -39,6 +39,11 @@ public final class GCloudAuthService: @unchecked Sendable {
     private let customGCloudPath: String?
     private let lock = NSLock()
     private var cachedToken: CachedToken?
+    private var cachedProjectID: String?
+
+    public var configuredCustomGCloudPath: String? {
+        customGCloudPath
+    }
 
     public init(
         customGCloudPath: String? = nil,
@@ -135,7 +140,12 @@ public final class GCloudAuthService: @unchecked Sendable {
 
             return token
         } catch let error as ProcessRunnerError {
+            if Task.isCancelled {
+                throw GCloudAuthError.cancelled
+            }
             switch error {
+            case .cancelledBeforeLaunch:
+                throw GCloudAuthError.cancelled
             case let .nonZeroExit(_, status, stderr):
                 throw GCloudAuthError.commandFailed(status: status, message: stderr)
             default:
@@ -146,8 +156,17 @@ public final class GCloudAuthService: @unchecked Sendable {
         }
     }
 
-    /// 獲取當前 gcloud active project ID
-    public func getDefaultProjectID(timeout: TimeInterval = 15) async throws -> String {
+    /// 獲取當前 gcloud active project ID（具快取機制）
+    public func getDefaultProjectID(
+        forceRefresh: Bool = false,
+        timeout: TimeInterval = 15
+    ) async throws -> String {
+        if !forceRefresh {
+            if let cached = lock.withLock({ cachedProjectID }) {
+                return cached
+            }
+        }
+
         guard let executableURL = resolveGCloudURL() else {
             throw GCloudAuthError.gcloudNotFound
         }
@@ -173,9 +192,18 @@ public final class GCloudAuthService: @unchecked Sendable {
                 throw GCloudAuthError.projectNotFound
             }
 
+            lock.withLock {
+                cachedProjectID = project
+            }
+
             return project
         } catch let error as ProcessRunnerError {
+            if Task.isCancelled {
+                throw GCloudAuthError.cancelled
+            }
             switch error {
+            case .cancelledBeforeLaunch:
+                throw GCloudAuthError.cancelled
             case let .nonZeroExit(_, status, stderr):
                 throw GCloudAuthError.commandFailed(status: status, message: stderr)
             default:
@@ -186,10 +214,11 @@ public final class GCloudAuthService: @unchecked Sendable {
         }
     }
 
-    /// 清除 Token 快取
+    /// 清除 Token 與 Project 快取
     public func clearCache() {
         lock.withLock {
             cachedToken = nil
+            cachedProjectID = nil
         }
     }
 }

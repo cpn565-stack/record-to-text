@@ -110,6 +110,7 @@ public final class TranscriptionEngine {
     private let runtime: ResolvedRuntime
     private let paths: ApplicationPaths
     private let runner: ProcessRunner
+    private let authRunner = ProcessRunner()
     private let probeService: AudioProbeService
     private let ffmpegService: FFmpegService
     private let silenceDetectionService: any SilenceDetectionServicing
@@ -261,7 +262,7 @@ public final class TranscriptionEngine {
         self.backend = HelperASRBackend(runtime: runtime, paths: paths, runner: runner)
         self.googleAIStudioBackend = googleAIStudioBackend ?? GoogleAIStudioBackend()
         self.usesCustomVertexAIBackend = vertexAIBackend != nil
-        self.vertexAIBackend = vertexAIBackend ?? VertexAIGeminiBackend(authService: GCloudAuthService(runner: runner))
+        self.vertexAIBackend = vertexAIBackend ?? VertexAIGeminiBackend(authService: GCloudAuthService(runner: authRunner))
         self.sleepPrevention = sleepPrevention
         self.maximumASRSegmentDuration = maximumASRSegmentDuration
         self.cloudAdaptiveMinimumChildDuration = cloudAdaptiveMinimumChildDuration
@@ -1265,6 +1266,7 @@ public final class TranscriptionEngine {
         }
         backend.cancelCurrentJob()
         runner.cancelCurrent()
+        authRunner.cancelCurrent()
     }
 
     private func resolvedOutputDirectory(
@@ -1397,7 +1399,7 @@ public final class TranscriptionEngine {
         if !usesCustomVertexAIBackend || runtime.gcloud != nil {
             vertexAIBackend.updateAuthentication(
                 customGCloudPath: runtime.gcloud?.path,
-                runner: runner
+                runner: authRunner
             )
         }
         vertexAIBackend.updateConfiguration(

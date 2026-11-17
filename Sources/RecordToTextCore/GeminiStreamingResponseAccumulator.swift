@@ -43,7 +43,10 @@ public final class GeminiStreamingResponseAccumulator {
         "ABORTED": 409,
         "ALREADY_EXISTS": 409,
         "RESOURCE_EXHAUSTED": 429,
+        "CANCELLED": 499,
         "INTERNAL": 500,
+        "UNKNOWN": 500,
+        "DATA_LOSS": 500,
         "UNIMPLEMENTED": 501,
         "UNAVAILABLE": 503,
         "DEADLINE_EXCEEDED": 504
@@ -447,16 +450,10 @@ public final class GeminiStreamingResponseAccumulator {
         }
 
         let resolvedStatus: Int
-        if let statusString {
-            guard let mapped = rpcStatusToHTTP[statusString] else {
-                throw GeminiSSEError.invalidEventJSON
-            }
-            if let httpCode, httpCode != mapped {
-                throw GeminiSSEError.invalidEventJSON
-            }
-            resolvedStatus = mapped
-        } else if let httpCode {
+        if let httpCode {
             resolvedStatus = httpCode
+        } else if let statusString, let mapped = rpcStatusToHTTP[statusString] {
+            resolvedStatus = mapped
         } else {
             throw GeminiSSEError.invalidEventJSON
         }

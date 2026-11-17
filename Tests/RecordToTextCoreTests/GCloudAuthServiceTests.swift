@@ -96,16 +96,33 @@ final class GCloudAuthServiceTests: XCTestCase {
     func testProjectIDIsTrimmedAndParsed() async throws {
         let fixture = try makeScript(
             body: """
+            counter="$1"
+            shift
             if [ "$1" = "config" ] && [ "$2" = "get-value" ] && [ "$3" = "project" ]; then
-              printf '  project-from-config  \\n'
+              value=0
+              if [ -f "$counter" ]; then value=$(cat "$counter"); fi
+              value=$((value + 1))
+              echo "$value" > "$counter"
+              printf '  project-from-config-%s  \\n' "$value"
               exit 0
             fi
             exit 9
-            """
+            """,
+            wrapperArguments: { counter in [counter.path] }
         )
         let auth = GCloudAuthService(customGCloudPath: fixture.executable.path)
         let projectID = try await auth.getDefaultProjectID()
-        XCTAssertEqual(projectID, "project-from-config")
+        let cachedProjectID = try await auth.getDefaultProjectID()
+        XCTAssertEqual(projectID, "project-from-config-1")
+        XCTAssertEqual(cachedProjectID, "project-from-config-1")
+        XCTAssertEqual(
+            try String(contentsOf: fixture.counter, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            "1"
+        )
+        auth.clearCache()
+        let refreshedProjectID = try await auth.getDefaultProjectID()
+        XCTAssertEqual(refreshedProjectID, "project-from-config-2")
     }
 
     func testUnsetProjectAndEmptyTokenProduceSpecificErrors() async throws {

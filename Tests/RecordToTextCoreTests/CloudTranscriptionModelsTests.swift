@@ -155,14 +155,65 @@ final class CloudTranscriptionModelsTests: XCTestCase {
         )
         let cost = usage.estimatedCostUSD(modelID: "gemini-3.8-flash")
         XCTAssertNotNil(cost)
-        XCTAssertEqual(String(format: "%.4f", cost!), "0.0721")
-        XCTAssertEqual(CloudUsageMetadata.formatCostUSD(cost!), "$0.07")
+        XCTAssertEqual(cost!, 0.07665, accuracy: 1e-9)
+        XCTAssertEqual(CloudUsageMetadata.formatCostUSD(cost!), "$0.08")
         XCTAssertEqual(CloudUsageMetadata.formatTokenCount(79_228), "79.2k")
         XCTAssertEqual(CloudUsageMetadata.formatTokenCount(1_212), "1.2k")
         XCTAssertEqual(
             usage.summaryDisplay(modelID: "gemini-3.8-flash"),
-            "79.2k tokens (思考 1.2k)，預估 $0.07"
+            "79.2k tokens (思考 1.2k)，預估 $0.08"
         )
+    }
+
+    func testMultiSegmentFallbackTotalsCostPerEffectiveModelRate() {
+        let seg1 = CloudTranscriptionMetadata(
+            requestedModelID: "gemini-3.8-flash",
+            effectiveModelID: "gemini-3.8-flash",
+            usage: CloudUsageMetadata(
+                promptTokenCount: 100_000,
+                candidatesTokenCount: 10_000,
+                thoughtsTokenCount: 0,
+                totalTokenCount: 110_000
+            )
+        )
+        let seg2 = CloudTranscriptionMetadata(
+            requestedModelID: "gemini-3.8-flash",
+            effectiveModelID: "gemini-3.6-flash",
+            retryCount: 3,
+            fallbackReason: "HTTP 503",
+            usage: CloudUsageMetadata(
+                promptTokenCount: 100_000,
+                candidatesTokenCount: 10_000,
+                thoughtsTokenCount: 0,
+                totalTokenCount: 110_000
+            )
+        )
+        // seg1 (3.8): 0.1 * $0.75 + 0.01 * $3.75 = $0.075 + $0.0375 = $0.1125
+        // seg2 (3.6): 0.1 * $0.70 + 0.01 * $0.40 = $0.070 + $0.0040 = $0.0740
+        // sum = $0.1865 (vs $0.2250 if erroneously billed all at 3.8 rate)
+        let totalCost = CloudTranscriptionMetadataAggregator.totalEstimatedCostUSD([seg1, seg2])
+        XCTAssertNotNil(totalCost)
+        XCTAssertEqual(String(format: "%.4f", totalCost!), "0.1865")
+
+        let snapshot = JobSnapshot(
+            modelID: "unused",
+            glossaryID: nil,
+            glossaryName: nil,
+            terms: [],
+            prompt: "",
+            outputLocationMode: .sameAsSource,
+            outputDirectory: "",
+            keepRawTranscript: false,
+            backendType: .googleAIStudio,
+            googleAIStudioModelID: "gemini-3.8-flash"
+        )
+        let job = TranscriptionJob(
+            sourcePath: "/tmp/fallback.m4a",
+            snapshot: snapshot,
+            stage: .completed,
+            cloudSegmentMetadata: [seg1, seg2]
+        )
+        XCTAssertEqual(job.cloudTokenSummary, "220.0k tokens，預估 $0.19")
     }
 
     func testCompletionTimeFormatting() {

@@ -221,7 +221,9 @@ enum JobDebugClipboard {
             if let thoughts = usage?.thoughtsTokenCount {
                 lines.append("thinking token：\(thoughts)")
             }
-            if let cost = usage?.estimatedCostUSD(modelID: job.snapshot.requestedModelID) {
+            if let cost = CloudTranscriptionMetadataAggregator.totalEstimatedCostUSD(metadata)
+                ?? usage?.estimatedCostUSD(modelID: job.snapshot.requestedModelID)
+            {
                 lines.append("預估費用：\(CloudUsageMetadata.formatCostUSD(cost))")
             }
             if retries > 0 {
@@ -249,8 +251,10 @@ enum JobDebugClipboard {
         if retries > 0 {
             badges.append("重試 \(retries)")
         }
-        if let usage = CloudTranscriptionMetadataAggregator.totalUsage(metadata),
-           let cost = usage.estimatedCostUSD(modelID: job.snapshot.requestedModelID)
+        if let cost = CloudTranscriptionMetadataAggregator.totalEstimatedCostUSD(metadata)
+            ?? CloudTranscriptionMetadataAggregator.totalUsage(metadata)?.estimatedCostUSD(
+                modelID: job.snapshot.requestedModelID
+            )
         {
             badges.append("預估 \(CloudUsageMetadata.formatCostUSD(cost))")
         }
