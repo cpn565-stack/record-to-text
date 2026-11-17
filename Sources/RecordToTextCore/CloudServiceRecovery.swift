@@ -122,7 +122,8 @@ final class CloudServiceRecoveryContext: @unchecked Sendable {
 
     func rateLimited(after sends: Int, stage: CloudDiagnosticStage, serverDelay: Double?,
                      dailyQuota: Bool = false, canRetry: Bool = true,
-                     resultUnknown: Bool = false) async throws {
+                     resultUnknown: Bool = false,
+                     onCoolingDown: ((Double) -> Void)? = nil) async throws {
         try Task.checkCancellation()
         let serverDelay = serverDelay.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
         let notBefore = serverDelay.map { date.addingTimeInterval($0) }
@@ -139,6 +140,7 @@ final class CloudServiceRecoveryContext: @unchecked Sendable {
             throw exhausted(.stageDeadline)
         }
         CloudDiagnosticContext.current?.retry(.rateLimited)
+        onCoolingDown?(delay)
         try await wait(seconds: delay, stage: stage)
     }
 

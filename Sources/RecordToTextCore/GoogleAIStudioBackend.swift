@@ -267,7 +267,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                     if !rebuilt, case let .requestFailed(statusCode, _) = error as? GoogleAIStudioError,
                        [400, 403, 404, 410].contains(statusCode), let name = preparedAudio.uploadedFileName,
                        (CloudNetworkContext.segmentAttempts?.quota(for: currentConfig.modelID).count ?? 4) < 4,
-                       try await remoteFileIsMissing(name: name, apiKey: apiKey) {
+                       try await remoteFileIsMissing(name: name, apiKey: apiKey, logger: logger) {
                         rebuilt = true
                         preparedAudio = try await prepareAudioPart(apiKey: apiKey, audioData: audioData,
                             mimeType: mimeType, useFilesAPI: true, workingDirectory: workingDirectory, logger: logger)
@@ -785,7 +785,8 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                 request: request,
                 fileURL: fileURL,
                 stage: .generation,
-                responseMode: .unaryJSON
+                responseMode: .unaryJSON,
+                logger: logger
             )
             guard let http = response as? HTTPURLResponse else { throw GoogleAIStudioError.invalidJSONResponse }
             return (data, http)
@@ -816,7 +817,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         let requestedName = "files/" + UUID().uuidString.lowercased()
         let makeRequest = {
             try await self.startFilesUpload(apiKey: apiKey, name: requestedName,
-                byteCount: audioData.count, mimeType: mimeType)
+                byteCount: audioData.count, mimeType: mimeType, logger: logger)
         }
         let uploadRequest = try await makeRequest()
         let expectedHash = Data(SHA256.hash(data: audioData)).base64EncodedString()
@@ -827,8 +828,9 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             stage: .upload,
             responseMode: .unaryJSON,
             attempts: CloudNetworkContext.segmentAttempts?.quota(for: "preparation:filesUpload", stage: .upload),
+            logger: logger,
             confirmUpload: {
-                let (data, response) = try await self.remoteFileMetadata(name: requestedName, apiKey: apiKey)
+                let (data, response) = try await self.remoteFileMetadata(name: requestedName, apiKey: apiKey, logger: logger)
                 guard response.statusCode == 200,
                       let file = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                       file["name"] as? String == requestedName,
@@ -841,7 +843,13 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         return try await finishFilesUpload(data: uploadData, response: uploadHTTP, apiKey: apiKey, logger: logger)
     }
 
-    private func startFilesUpload(apiKey: String, name: String, byteCount: Int, mimeType: String) async throws -> URLRequest {
+    private func startFilesUpload(
+        apiKey: String,
+        name: String,
+        byteCount: Int,
+        mimeType: String,
+        logger: ((_ level: String, _ message: String) -> Void)? = nil
+    ) async throws -> URLRequest {
         // Each initialization has its own bounded transport scope. Recreating
         // a session does not recreate the root budget or generation ledger.
         guard let initURL = URL(string: "https://generativelanguage.googleapis.com/upload/v1beta/files") else {
@@ -868,7 +876,8 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             request: initRequest,
             stage: "upload",
             responseMode: .rawData,
-            attempts: CloudNetworkContext.segmentAttempts?.quota(for: "preparation:filesInit", stage: .upload)
+            attempts: CloudNetworkContext.segmentAttempts?.quota(for: "preparation:filesInit", stage: .upload),
+            logger: logger
         )
         guard let initHTTP = initResponse as? HTTPURLResponse else {
             throw GoogleAIStudioError.invalidJSONResponse
@@ -898,7 +907,11 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         return uploadRequest
     }
 
-    private func remoteFileMetadata(name: String, apiKey: String) async throws -> (Data, HTTPURLResponse) {
+    private func remoteFileMetadata(
+        name: String,
+        apiKey: String,
+        logger: ((_ level: String, _ message: String) -> Void)? = nil
+    ) async throws -> (Data, HTTPURLResponse) {
         guard name.range(of: #"^files/[a-z0-9-]{1,40}$"#, options: .regularExpression) != nil,
               let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/\(name)") else {
             throw GoogleAIStudioError.invalidJSONResponse
@@ -910,14 +923,19 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             session: urlSession,
             request: request,
             stage: "poll",
-            responseMode: .unaryJSON
+            responseMode: .unaryJSON,
+            logger: logger
         )
         guard let http = response as? HTTPURLResponse else { throw GoogleAIStudioError.invalidJSONResponse }
         return (data, http)
     }
 
-    private func remoteFileIsMissing(name: String, apiKey: String) async throws -> Bool {
-        let (_, response) = try await remoteFileMetadata(name: name, apiKey: apiKey)
+    private func remoteFileIsMissing(
+        name: String,
+        apiKey: String,
+        logger: ((_ level: String, _ message: String) -> Void)? = nil
+    ) async throws -> Bool {
+        let (_, response) = try await remoteFileMetadata(name: name, apiKey: apiKey, logger: logger)
         return [404, 410].contains(response.statusCode)
     }
 
@@ -969,7 +987,8 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                         session: urlSession,
                         request: pollRequest,
                         stage: "poll",
-                        responseMode: .unaryJSON
+                        responseMode: .unaryJSON,
+                        logger: logger
                     )
                 }
                 guard let pollHTTP = pollResponse as? HTTPURLResponse else {

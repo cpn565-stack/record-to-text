@@ -252,7 +252,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                        [400, 403, 404, 410].contains(statusCode), let bucket = preparedAudio.gcsBucket,
                        let name = preparedAudio.gcsObjectName,
                        (CloudNetworkContext.segmentAttempts?.quota(for: currentConfig.modelID).count ?? 4) < 4,
-                       try await gcsObjectIsMissing(bucket: bucket, objectName: name, accessToken: accessToken) {
+                       try await gcsObjectIsMissing(bucket: bucket, objectName: name, accessToken: accessToken, logger: logger) {
                         rebuilt = true
                         preparedAudio = try await prepareAudioPart(bucket: bucket, authService: authService,
                             accessToken: accessToken, audioData: audioData, mimeType: mimeType,
@@ -782,7 +782,8 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                 fileURL: fileURL,
                 stage: .generation,
                 responseMode: responseMode,
-                streamingLimits: streamingLimits
+                streamingLimits: streamingLimits,
+                logger: logger
             )
             guard let http = response as? HTTPURLResponse else { throw VertexAIError.invalidJSONResponse }
             return (data, http)
@@ -834,8 +835,9 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             stage: .upload,
             responseMode: .rawData,
             attempts: CloudNetworkContext.segmentAttempts?.quota(for: "preparation:gcsUpload", stage: .upload),
+            logger: logger,
             confirmUpload: {
-                let (data, response) = try await self.gcsMetadata(bucket: bucket, objectName: objectName, accessToken: accessToken)
+                let (data, response) = try await self.gcsMetadata(bucket: bucket, objectName: objectName, accessToken: accessToken, logger: logger)
                 guard response.statusCode == 200,
                       let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                       object["name"] as? String == objectName,
@@ -851,7 +853,12 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
     }
 
     /// 刪除 GCS 遠端暫存物件
-    private func gcsMetadata(bucket: String, objectName: String, accessToken: String) async throws -> (Data, HTTPURLResponse) {
+    private func gcsMetadata(
+        bucket: String,
+        objectName: String,
+        accessToken: String,
+        logger: ((_ level: String, _ message: String) -> Void)? = nil
+    ) async throws -> (Data, HTTPURLResponse) {
         guard let encoded = objectName.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
               let url = URL(string: "https://storage.googleapis.com/storage/v1/b/\(bucket)/o/\(encoded)") else {
             throw VertexAIError.invalidEndpointURL("GCS metadata URL 格式錯誤")
@@ -863,14 +870,20 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             session: urlSession,
             request: request,
             stage: "poll",
-            responseMode: .unaryJSON
+            responseMode: .unaryJSON,
+            logger: logger
         )
         guard let http = response as? HTTPURLResponse else { throw VertexAIError.invalidJSONResponse }
         return (data, http)
     }
 
-    private func gcsObjectIsMissing(bucket: String, objectName: String, accessToken: String) async throws -> Bool {
-        let (_, response) = try await gcsMetadata(bucket: bucket, objectName: objectName, accessToken: accessToken)
+    private func gcsObjectIsMissing(
+        bucket: String,
+        objectName: String,
+        accessToken: String,
+        logger: ((_ level: String, _ message: String) -> Void)? = nil
+    ) async throws -> Bool {
+        let (_, response) = try await gcsMetadata(bucket: bucket, objectName: objectName, accessToken: accessToken, logger: logger)
         return [404, 410].contains(response.statusCode)
     }
 

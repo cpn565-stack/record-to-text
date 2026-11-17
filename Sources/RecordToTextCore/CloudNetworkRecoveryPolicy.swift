@@ -139,6 +139,12 @@ public final class CloudNetworkRecoveryContext: @unchecked Sendable {
     var lastFailure: CloudFailureDiagnostic? { lock.withLock { status.lastFailure } }
     var isWaiting: Bool { lock.withLock { !waits.isEmpty } }
     var isReceivingResponse: Bool { lock.withLock { receivingResponse } }
+    var remainingWaitAllowanceSeconds: Double { lock.withLock { max(0, policy.maximumWaitSeconds - waitedSeconds) } }
+    var remainingBudgetSeconds: Double { budget.remaining().secondsValue }
+
+    static func resetsSession(for category: CloudFailureDiagnostic.Category) -> Bool {
+        [.connectionLost, .hostUnreachable, .dnsFailure, .transportFailure].contains(category)
+    }
     func setReceivingResponse(_ value: Bool) { lock.withLock { receivingResponse = value } }
     public var canRetryImmediately: Bool {
         lock.withLock {
@@ -286,7 +292,7 @@ public final class CloudNetworkRecoveryContext: @unchecked Sendable {
     func session(using original: URLSession, resetFor error: Error? = nil) -> URLSession {
         lock.withLock {
             if let error, !didReset,
-               [.connectionLost, .hostUnreachable, .dnsFailure, .transportFailure].contains(CloudFailureDiagnostic.classify(error).category) {
+               Self.resetsSession(for: CloudFailureDiagnostic.classify(error).category) {
                 replacementSession = environment.session(original.configuration.protocolClasses)
                 metadataSession?.invalidateAndCancel()
                 metadataSession = nil
