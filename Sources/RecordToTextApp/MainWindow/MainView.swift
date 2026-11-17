@@ -154,7 +154,35 @@ struct MainView: View {
         } message: {
             Text("只有明確選擇後，record-to-text 才會在不套用專有名詞的情況下重試。")
         }
+        .confirmationDialog(
+            "一鍵清除未成功項目與殘留檔？",
+            isPresented: $viewModel.isUnsuccessfulCleanupConfirmationPresented,
+            titleVisibility: .visible
+        ) {
+            Button("一鍵清除", role: .destructive) {
+                Task { await viewModel.cleanUpUnsuccessfulJobsAndResidualFiles() }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text(unsuccessfulCleanupConfirmationMessage)
+        }
         .tint(AppColors.accent)
+    }
+
+    private var unsuccessfulCleanupConfirmationMessage: String {
+        let recordCount = viewModel.unsuccessfulJobCount
+        let dirCount = viewModel.cleanableRecoveryItemCount
+        var targets: [String] = []
+        if recordCount > 0 {
+            targets.append("\(recordCount) 筆未成功紀錄（失敗／取消／中斷）")
+        }
+        if dirCount > 0 {
+            targets.append("\(dirCount) 個系統暫存／Temp-Recovery 殘留目錄")
+        }
+        let summary = targets.isEmpty
+            ? "將清除所有未成功紀錄與 App 暫存／Temp-Recovery 殘留目錄。"
+            : "將一併清除 " + targets.joined(separator: " 與 ") + "。"
+        return "\(summary)\n\n所有「完成」與「完成（含缺口）」紀錄、已輸出的 .txt 文字稿，以及原始錄音檔皆會完整保留。"
     }
 
     private var navigationSubtitleText: String {

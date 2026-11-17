@@ -99,11 +99,23 @@ struct JobListView: View {
                 let olderSlice = Array(finished.dropFirst(Self.visibleFinishedLimit))
 
                 VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                    HStack(alignment: .firstTextBaseline) {
+                    HStack(alignment: .center, spacing: AppSpacing.md) {
                         Text("已結束 · \(finished.count)")
                             .font(AppTypography.sectionTitle)
 
                         Spacer()
+
+                        if viewModel.hasUnsuccessfulItemsToClean {
+                            Button(role: .destructive) {
+                                viewModel.requestUnsuccessfulCleanup()
+                            } label: {
+                                Label(unsuccessfulCleanupButtonTitle, systemImage: "xmark.bin")
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .disabled(viewModel.isUnsuccessfulCleanupRunning)
+                            .help("一鍵清除失敗、取消、中斷紀錄與 App 暫存／Temp-Recovery 殘留檔；保留已完成紀錄、文字稿與原始錄音")
+                        }
 
                         if viewModel.hasFinishedJobs {
                             Button(role: .destructive) {
@@ -114,7 +126,7 @@ struct JobListView: View {
                             .buttonStyle(.borderless)
                             .font(.caption)
                             .foregroundStyle(AppColors.danger)
-                            .help("刪除佇列與最近工作中所有已結束的工作（失敗／取消／完成等）")
+                            .help("從列表移除所有已結束的工作紀錄（含已完成項目；不刪檔案）")
                         }
                     }
 
@@ -140,6 +152,8 @@ struct JobListView: View {
                         .padding(.top, AppSpacing.xs)
                     }
                 }
+            } else if viewModel.hasUnsuccessfulItemsToClean {
+                residualCleanupBanner
             }
         }
         .transcriptQuickLookPreview($previewURL)
@@ -274,5 +288,51 @@ struct JobListView: View {
             get: { storage.wrappedValue.isExpanded(id) },
             set: { storage.wrappedValue.setExpanded($0, for: id) }
         )
+    }
+
+    private var unsuccessfulCleanupButtonTitle: String {
+        let records = viewModel.unsuccessfulJobCount
+        if records > 0 {
+            return "清除未成功項目（\(records)）"
+        }
+        return "清除殘留暫存（\(viewModel.cleanableRecoveryItemCount)）"
+    }
+
+    private var residualCleanupBanner: some View {
+        InlineCallout(color: AppColors.warning) {
+            HStack(alignment: .center, spacing: AppSpacing.md) {
+                Image(systemName: "xmark.bin")
+                    .foregroundStyle(AppColors.warning)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(
+                        viewModel.unsuccessfulJobCount > 0
+                            ? "有 \(viewModel.unsuccessfulJobCount) 筆未完成／暫停紀錄與殘留暫存可清理"
+                            : "偵測到 \(viewModel.cleanableRecoveryItemCount) 項先前未完成留下的暫存／復原目錄"
+                    )
+                    .font(.caption.weight(.semibold))
+                    Text("一鍵清除不會動到原始錄音或已完成的文字稿。")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Button("檢視詳情…") {
+                    viewModel.refreshRecoveryScan()
+                }
+                .buttonStyle(.borderless)
+                .font(.caption)
+
+                Button(role: .destructive) {
+                    viewModel.requestUnsuccessfulCleanup()
+                } label: {
+                    Text("一鍵清除")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(viewModel.isUnsuccessfulCleanupRunning)
+            }
+        }
     }
 }

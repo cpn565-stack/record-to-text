@@ -4,6 +4,7 @@ import SwiftUI
 
 struct RecoveryScanView: View {
     @ObservedObject var viewModel: AppViewModel
+    @State private var isClearAllUnsuccessfulPresented = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -57,7 +58,13 @@ struct RecoveryScanView: View {
                     Button("清除孤立與損壞…", role: .destructive) {
                         viewModel.requestBulkCleanupNonRecoverable()
                     }
-                    .disabled(viewModel.isRecoveryScanRunning)
+                    .disabled(viewModel.isRecoveryScanRunning || viewModel.isUnsuccessfulCleanupRunning)
+                }
+                if viewModel.hasUnsuccessfulItemsToClean {
+                    Button("一鍵清除全部殘留…", role: .destructive) {
+                        isClearAllUnsuccessfulPresented = true
+                    }
+                    .disabled(viewModel.isRecoveryScanRunning || viewModel.isUnsuccessfulCleanupRunning)
                 }
                 Spacer()
                 if let scannedAt = viewModel.recoveryScanReport?.scannedAt {
@@ -101,6 +108,18 @@ struct RecoveryScanView: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("只會刪除「孤立暫存」與「損壞／異常」目錄，不會刪除「可取回／可重加」項目。此操作無法復原。")
+        }
+        .confirmationDialog(
+            "一鍵清除所有未成功紀錄與殘留目錄？",
+            isPresented: $isClearAllUnsuccessfulPresented,
+            titleVisibility: .visible
+        ) {
+            Button("一鍵清除", role: .destructive) {
+                Task { await viewModel.cleanUpUnsuccessfulJobsAndResidualFiles() }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("將一併清除所有「失敗、已取消、被中斷」工作紀錄，以及系統暫存與 Temp-Recovery 內的全部殘留目錄（含可取回項目）。所有「完成」與「完成（含缺口）」紀錄、已輸出的 .txt 文字稿，以及原始錄音檔皆會完整保留。")
         }
     }
 

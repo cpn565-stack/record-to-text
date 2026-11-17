@@ -116,6 +116,11 @@ struct RecordToTextApp: App {
                 Button("復原掃描…") {
                     viewModel.refreshRecoveryScan()
                 }
+
+                Button("清除未成功項目與殘留檔…") {
+                    viewModel.requestUnsuccessfulCleanup()
+                }
+                .disabled(!viewModel.hasUnsuccessfulItemsToClean || viewModel.isUnsuccessfulCleanupRunning)
             }
         }
 

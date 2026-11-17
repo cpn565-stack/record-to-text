@@ -93,6 +93,8 @@ final class AppViewModel: ObservableObject {
     /// Pending delete confirmation for recovery scan UI.
     @Published var recoveryItemPendingDeletion: RecoveryScanItem?
     @Published var isBulkCleanupConfirmationPresented = false
+    @Published var isUnsuccessfulCleanupConfirmationPresented = false
+    @Published private(set) var isUnsuccessfulCleanupRunning = false
 
     @Published private(set) var jobPersistenceError: String? { didSet { refreshQueueSleep() } }
     private var persistenceRevision: UInt64 = 0
@@ -116,6 +118,7 @@ final class AppViewModel: ObservableObject {
     let queueSleep: QueueCompletionSleepCoordinator
     private var fileOperations = 0 { didSet { refreshQueueSleep() } }
     private let paths: ApplicationPaths
+    private let systemTempRoot: URL?
     private let engineFactory: ((ResolvedRuntime) -> TranscriptionEngine)?
     private let settingsRepository: JSONRepository<AppSettings>
     private let glossaryRepository: JSONRepository<GlossaryCollection>
@@ -163,6 +166,7 @@ final class AppViewModel: ObservableObject {
 
     init(
         paths: ApplicationPaths = .live(),
+        systemTempRoot: URL? = nil,
         fileManager: FileManager = .default,
         credentialStore: any GoogleAIStudioCredentialStoring = KeychainGoogleAIStudioCredentialStore(),
         settingsSaveOverride: ((AppSettings) throws -> Void)? = nil,
@@ -172,6 +176,7 @@ final class AppViewModel: ObservableObject {
         outputDirectoryChooser: (() -> URL?)? = nil
     ) {
         self.paths = paths
+        self.systemTempRoot = systemTempRoot
         self.outputDirectoryChooser = outputDirectoryChooser
         self.queueSleep = queueSleep ?? QueueCompletionSleepCoordinator()
         self.engineFactory = engineFactory
@@ -1017,6 +1022,232 @@ final class AppViewModel: ObservableObject {
         jobs.contains(where: { $0.stage.isTerminal }) || !recentJobs.isEmpty
     }
 
+    /// Stages counted as unsuccessful (excludes `.completed`, including `.hasGaps`).
+    static func isUnsuccessfulStage(_ stage: TranscriptionStage) -> Bool {
+        stage == .failed || stage == .cancelled || stage == .interrupted
+    }
+
+    var unsuccessfulJobCount: Int {
+        let protected = protectedJobIDsForUnsuccessfulCleanup()
+        let liveUnsuccessfulIDs = Set(
+            jobs.lazy
+                .filter { !protected.contains($0.id) && Self.isUnsuccessfulStage($0.stage) }
+                .map(\.id)
+        )
+        let archivedUnsuccessfulIDs = Set(
+            recentJobs.lazy
+                .filter { !protected.contains($0.id) && Self.isUnsuccessfulStage($0.stage) }
+                .map(\.id)
+        )
+        return liveUnsuccessfulIDs.union(archivedUnsuccessfulIDs).count
+    }
+
+    var cleanableRecoveryItemCount: Int {
+        guard let report = recoveryScanReport else { return 0 }
+        let protected = protectedRecoveryScope(for: jobs.filter {
+            protectedJobIDsForUnsuccessfulCleanup().contains($0.id)
+        })
+        return report.items.filter { !Self.isRecoveryItemProtected($0, scope: protected) }.count
+    }
+
+    var hasUnsuccessfulItemsToClean: Bool {
+        unsuccessfulJobCount > 0 || cleanableRecoveryItemCount > 0
+    }
+
+    func requestUnsuccessfulCleanup() {
+        guard hasUnsuccessfulItemsToClean, !isUnsuccessfulCleanupRunning else { return }
+        isUnsuccessfulCleanupConfirmationPresented = true
+    }
+
+    /// One-click cleanup: removes failed / cancelled / interrupted / paused job records
+    /// and deletes all unprotected App-managed temp / Temp-Recovery directories.
+    /// Keeps completed jobs (including `.hasGaps`), output `.txt` files, and source audio untouched.
+    @discardableResult
+    func cleanUpUnsuccessfulJobsAndResidualFiles() async -> (removedRecords: Int, deletedDirectories: Int) {
+        isUnsuccessfulCleanupConfirmationPresented = false
+        guard !isUnsuccessfulCleanupRunning else { return (0, 0) }
+        isUnsuccessfulCleanupRunning = true
+        defer { isUnsuccessfulCleanupRunning = false }
+
+        let protectedIDs = protectedJobIDsForUnsuccessfulCleanup()
+        let removedLiveIDs = Set(
+            jobs.lazy
+                .filter { !protectedIDs.contains($0.id) }
+                .map(\.id)
+        )
+        let removedRecentIDs = Set(
+            recentJobs.lazy
+                .filter { !protectedIDs.contains($0.id) && Self.isUnsuccessfulStage($0.stage) }
+                .map(\.id)
+        )
+        let allRemovedRecordIDs = removedLiveIDs.union(removedRecentIDs)
+
+        for job in jobs where removedLiveIDs.contains(job.id) {
+            queueSleep.cancelWork(job.id)
+            authorizedContinuations.remove(job.id)
+        }
+        jobs.removeAll(where: { removedLiveIDs.contains($0.id) })
+        recentJobs.removeAll(where: { removedRecentIDs.contains($0.id) })
+
+        if !jobs.contains(where: \.isCloudRecoveryPaused),
+           continuationInFlight.isEmpty,
+           !hasQueuedJobs,
+           activeJobID == nil
+        {
+            manualDrainRequested = false
+        }
+
+        if !allRemovedRecordIDs.isEmpty {
+            persistJobs()
+        }
+
+        let protectedScope = protectedRecoveryScope(for: jobs)
+        let scanPaths = paths
+        let scanSystemTemp = systemTempRoot
+
+        let deletionOutcome = await Task.detached(priority: .utility) { () -> Result<(deleted: Int, failedCount: Int), Error> in
+            let fm = FileManager()
+            let report = RecoveryScanner.scan(
+                paths: scanPaths,
+                fileManager: fm,
+                systemTempRoot: scanSystemTemp
+            )
+            let targets = report.items.filter {
+                !Self.isRecoveryItemProtected($0, scope: protectedScope)
+            }
+            guard !targets.isEmpty else {
+                return .success((0, 0))
+            }
+            do {
+                let result = try RecoveryScanner.deleteItems(
+                    targets,
+                    paths: scanPaths,
+                    fileManager: fm,
+                    systemTempRoot: scanSystemTemp
+                )
+                return .success((result.deleted, result.failures.count))
+            } catch {
+                return .failure(error)
+            }
+        }.value
+
+        runRecoveryScan(presentIfNonEmpty: false)
+
+        switch deletionOutcome {
+        case let .success(stats):
+            if stats.failedCount > 0 {
+                alert = UserFacingAlert(
+                    title: "部分暫存目錄未能刪除",
+                    message: "已清除 \(allRemovedRecordIDs.count) 筆未成功紀錄、刪除 \(stats.deleted) 個暫存目錄；另有 \(stats.failedCount) 個目錄無法刪除，請稍後再試。"
+                )
+            }
+            return (allRemovedRecordIDs.count, stats.deleted)
+        case let .failure(error):
+            alert = UserFacingAlert(
+                title: "無法完整清除暫存資料",
+                message: error.localizedDescription
+            )
+            return (allRemovedRecordIDs.count, 0)
+        }
+    }
+
+    private struct ProtectedRecoveryScope: Sendable {
+        let jobIDs: Set<UUID>
+        let standardizedPaths: Set<String>
+    }
+
+    /// Protects all active/queued jobs, all `.completed` jobs (including `.hasGaps`),
+    /// and any ancestor in a live continuation chain. Unstarted placeholder continuations
+    /// belonging to a paused job are excluded so the paused job cleans up cleanly.
+    private func protectedJobIDsForUnsuccessfulCleanup() -> Set<UUID> {
+        let pendingPlaceholderChildIDs: Set<UUID> = Set(
+            jobs.compactMap { parent -> UUID? in
+                guard parent.isCloudRecoveryPaused,
+                      parent.continuationPending == true,
+                      !continuationInFlight.contains(parent.id),
+                      let childID = parent.cloudContinuationID,
+                      !authorizedContinuations.contains(childID),
+                      let child = jobs.first(where: { $0.id == childID }),
+                      child.stage == .queued
+                else {
+                    return nil
+                }
+                return childID
+            }
+        )
+
+        var protected = continuationInFlight
+        for job in jobs {
+            if job.stage == .completed {
+                protected.insert(job.id)
+            } else if !job.stage.isTerminal && !pendingPlaceholderChildIDs.contains(job.id) {
+                protected.insert(job.id)
+            }
+        }
+
+        var changed = true
+        while changed {
+            changed = false
+            for job in jobs {
+                if let child = job.cloudContinuationID,
+                   protected.contains(child),
+                   !pendingPlaceholderChildIDs.contains(child)
+                {
+                    if protected.insert(job.id).inserted { changed = true }
+                }
+                if let parent = job.continuationParentJobID,
+                   protected.contains(job.id)
+                {
+                    if protected.insert(parent).inserted { changed = true }
+                }
+            }
+        }
+        return protected
+    }
+
+    private func protectedRecoveryScope(for retainedJobs: [TranscriptionJob]) -> ProtectedRecoveryScope {
+        let tempBase = systemTempRoot ?? RecoveryScanner.systemTempJobsRoot(fileManager: fileManager)
+        var ids = Set<UUID>()
+        var pathsSet = Set<String>()
+
+        func insertPath(_ rawPath: String) {
+            let url = URL(fileURLWithPath: rawPath, isDirectory: true)
+            pathsSet.insert(url.standardizedFileURL.path)
+            pathsSet.insert(url.standardizedFileURL.resolvingSymlinksInPath().path)
+        }
+
+        for job in retainedJobs {
+            ids.insert(job.id)
+            insertPath(paths.tempRecovery.appendingPathComponent(job.id.uuidString, isDirectory: true).path)
+            insertPath(tempBase.appendingPathComponent(job.id.uuidString, isDirectory: true).path)
+            if let resumeDir = job.resumeFromRecoveryDirectory, !resumeDir.isEmpty {
+                insertPath(resumeDir)
+            }
+            if let recoveryDir = job.failure?.recoveryDirectory, !recoveryDir.isEmpty {
+                insertPath(recoveryDir)
+            }
+        }
+
+        return ProtectedRecoveryScope(jobIDs: ids, standardizedPaths: pathsSet)
+    }
+
+    private nonisolated static func isRecoveryItemProtected(
+        _ item: RecoveryScanItem,
+        scope: ProtectedRecoveryScope
+    ) -> Bool {
+        if let jobID = item.jobID, scope.jobIDs.contains(jobID) {
+            return true
+        }
+        let itemURL = URL(fileURLWithPath: item.directoryPath, isDirectory: true)
+        if scope.standardizedPaths.contains(itemURL.standardizedFileURL.path) {
+            return true
+        }
+        if scope.standardizedPaths.contains(itemURL.standardizedFileURL.resolvingSymlinksInPath().path) {
+            return true
+        }
+        return false
+    }
+
     func revealApplicationSupport() {
         try? fileManager.createDirectory(
             at: paths.root,
@@ -1769,7 +2000,8 @@ final class AppViewModel: ObservableObject {
             let target = try RecoveryScanner.validatedManagedJobDirectory(
                 for: item,
                 paths: paths,
-                fileManager: fileManager
+                fileManager: fileManager,
+                systemTempRoot: systemTempRoot
             )
             NSWorkspace.shared.activateFileViewerSelecting([target])
         } catch {
@@ -1797,7 +2029,8 @@ final class AppViewModel: ObservableObject {
             try RecoveryScanner.deleteItem(
                 item,
                 paths: paths,
-                fileManager: fileManager
+                fileManager: fileManager,
+                systemTempRoot: systemTempRoot
             )
             // Clear matching job failure recovery pointer if present.
             if let jobID = item.jobID,
@@ -1846,7 +2079,8 @@ final class AppViewModel: ObservableObject {
             let result = try RecoveryScanner.deleteItems(
                 targets,
                 paths: paths,
-                fileManager: fileManager
+                fileManager: fileManager,
+                systemTempRoot: systemTempRoot
             )
             runRecoveryScan(presentIfNonEmpty: false)
             if !result.failures.isEmpty {
@@ -1903,6 +2137,7 @@ final class AppViewModel: ObservableObject {
             }
         )
         let scanPaths = paths
+        let scanSystemTemp = systemTempRoot
         recoveryScanTask?.cancel()
         recoveryScanGeneration += 1
         let generation = recoveryScanGeneration
@@ -1913,7 +2148,8 @@ final class AppViewModel: ObservableObject {
                     paths: scanPaths,
                     activeRecoveryDirectoryPaths:
                         activeRecoveryDirectoryPaths,
-                    fileManager: FileManager()
+                    fileManager: FileManager(),
+                    systemTempRoot: scanSystemTemp
                 )
             }.value
             guard let self,

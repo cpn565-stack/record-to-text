@@ -151,6 +151,15 @@ struct ToolbarToolsMenu: View {
             } label: {
                 Label("復原掃描…", systemImage: "tray.and.arrow.down")
             }
+
+            Divider()
+
+            Button(role: .destructive) {
+                viewModel.requestUnsuccessfulCleanup()
+            } label: {
+                Label("清除未成功項目與殘留檔…", systemImage: "xmark.bin")
+            }
+            .disabled(!viewModel.hasUnsuccessfulItemsToClean || viewModel.isUnsuccessfulCleanupRunning)
         } label: {
             Label("工具", systemImage: "wrench.and.screwdriver")
         }
