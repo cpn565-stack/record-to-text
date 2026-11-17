@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Legacy card wrapper kept available for sheets until Phase 4.
+/// Shared card surface container.
 struct AppCard<Content: View>: View {
     @ViewBuilder let content: Content
 

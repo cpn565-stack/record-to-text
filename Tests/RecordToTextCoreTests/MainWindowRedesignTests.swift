@@ -390,4 +390,97 @@ final class MainWindowRedesignTests: XCTestCase {
 
         await model.stopAllForTermination()
     }
+
+    @MainActor
+    func testPhase4SecondarySheetsRenderAcrossBackendsAndEnforceGlossaryAndHistoryRules() async throws {
+        let root = try TestSupport.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = ApplicationPaths(root: root.appendingPathComponent("Support"))
+        let isolatedSysTemp = root.appendingPathComponent("SysTemp", isDirectory: true)
+        try FileManager.default.createDirectory(at: isolatedSysTemp, withIntermediateDirectories: true)
+
+        var recentSummaries: [RecentJobSummary] = []
+        for idx in 0..<4 {
+            let startOffset = Double(-200 - idx * 30)
+            let endOffset = Double(-100 - idx * 30)
+            recentSummaries.append(
+                RecentJobSummary(
+                    id: UUID(),
+                    sourcePath: root.appendingPathComponent("rec-\(idx).m4a").path,
+                    outputPath: root.appendingPathComponent("rec-\(idx).txt").path,
+                    stage: .completed,
+                    startedAt: Date().addingTimeInterval(startOffset),
+                    completedAt: Date().addingTimeInterval(endOffset),
+                    modelID: "gemini-4-hydrogen",
+                    glossaryName: nil,
+                    backendType: .vertexAI,
+                    outputCompleteness: .complete
+                )
+            )
+        }
+        try JobPersistenceStore(ledgerURL: paths.jobLedger, recentURL: paths.recentJobs).write(
+            .init(revision: 1, jobs: [], recentJobs: recentSummaries, recentHistoryLimit: 20)
+        )
+
+        let model = AppViewModel(
+            paths: paths,
+            systemTempRoot: isolatedSysTemp,
+            credentialStore: RedesignTestCredentialStore()
+        )
+        await model.waitForCredentialLoading()
+        model.refreshEnvironment()
+
+        // 1. Decreasing recentJobLimit immediately prunes recentJobs
+        XCTAssertEqual(model.recentJobs.count, 4)
+        model.setSetting(\.recentJobLimit, to: 2)
+        XCTAssertEqual(model.recentJobs.count, 2)
+
+        // 2. Duplicate project glossary name is rejected cleanly
+        let g1 = model.createGlossary(name: "半導體專有名詞", terms: ["CoWoS", "EUV"])
+        let g2 = model.createGlossary(name: "醫療專有名詞", terms: ["MRI"])
+        XCTAssertFalse(model.updateGlossary(id: g2, name: " 半導體專有名詞 ", termsText: "CT"))
+        XCTAssertNotNil(model.alert)
+        model.alert = nil
+        XCTAssertTrue(model.updateGlossary(id: g1, name: "半導體專有名詞", termsText: "CoWoS\nEUV\nHBM4"))
+
+        // 3. Render SettingsView across all 3 backends at 680pt width
+        for backend in ASRBackendType.allCases {
+            model.setSetting(\.backendType, to: backend)
+            let settingsHosting = NSHostingView(rootView: SettingsView(viewModel: model).tint(AppColors.accent))
+            settingsHosting.frame = NSRect(x: 0, y: 0, width: 680, height: 580)
+            settingsHosting.layoutSubtreeIfNeeded()
+            XCTAssertGreaterThan(settingsHosting.fittingSize.width, 0)
+        }
+
+        // 4. Render OnboardingView, GlossaryManagerView, EnvironmentCheckView, RecoveryScanView, PromptPreviewView
+        let onboardingHosting = NSHostingView(rootView: OnboardingView(viewModel: model).tint(AppColors.accent))
+        onboardingHosting.frame = NSRect(x: 0, y: 0, width: 680, height: 520)
+        onboardingHosting.layoutSubtreeIfNeeded()
+        XCTAssertGreaterThan(onboardingHosting.fittingSize.width, 0)
+
+        let glossaryHosting = NSHostingView(rootView: GlossaryManagerView(viewModel: model).tint(AppColors.accent))
+        glossaryHosting.frame = NSRect(x: 0, y: 0, width: 760, height: 540)
+        glossaryHosting.layoutSubtreeIfNeeded()
+        XCTAssertGreaterThan(glossaryHosting.fittingSize.width, 0)
+
+        let envHosting = NSHostingView(rootView: EnvironmentCheckView(viewModel: model).tint(AppColors.accent))
+        envHosting.frame = NSRect(x: 0, y: 0, width: 680, height: 520)
+        envHosting.layoutSubtreeIfNeeded()
+        XCTAssertGreaterThan(envHosting.fittingSize.width, 0)
+
+        let recoveryHosting = NSHostingView(rootView: RecoveryScanView(viewModel: model).tint(AppColors.accent))
+        recoveryHosting.frame = NSRect(x: 0, y: 0, width: 680, height: 560)
+        recoveryHosting.layoutSubtreeIfNeeded()
+        XCTAssertGreaterThan(recoveryHosting.fittingSize.width, 0)
+
+        let promptHosting = NSHostingView(
+            rootView: PromptPreviewView(prompt: "請忠實轉錄：CoWoS、EUV", termCount: 2, isJobSnapshot: false)
+                .tint(AppColors.accent)
+        )
+        promptHosting.frame = NSRect(x: 0, y: 0, width: 640, height: 480)
+        promptHosting.layoutSubtreeIfNeeded()
+        XCTAssertGreaterThan(promptHosting.fittingSize.width, 0)
+
+        await model.stopAllForTermination()
+    }
 }

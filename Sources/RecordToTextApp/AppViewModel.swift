@@ -637,6 +637,13 @@ final class AppViewModel: ObservableObject {
             \AppSettings.silenceAwareCloudSegmentation,
             \AppSettings.localSilenceAwareSegmentation]
         if engineKeys.contains(keyPath) { synchronizeQueuedEngineSettings() }
+        if (keyPath as AnyKeyPath) == (\AppSettings.recentJobLimit as AnyKeyPath) {
+            let cap = max(0, settings.recentJobLimit)
+            if recentJobs.count > cap {
+                recentJobs = Array(recentJobs.prefix(cap))
+            }
+            persistJobs()
+        }
         scheduleSettingsPersist()
     }
 
@@ -1276,12 +1283,86 @@ final class AppViewModel: ObservableObject {
             alert = UserFacingAlert(title: "詞庫名稱不能空白", message: "請輸入一個容易辨識的名稱。")
             return false
         }
+        if glossaryCollection.glossaries.contains(where: {
+            $0.id != id && $0.name.caseInsensitiveCompare(trimmedName) == .orderedSame
+        }) {
+            alert = UserFacingAlert(
+                title: "詞庫名稱重複",
+                message: "已有另一個名為「\(trimmedName)」的專案詞庫，請改用不同名稱。"
+            )
+            return false
+        }
 
         glossaryCollection.glossaries[index].name = trimmedName
         glossaryCollection.glossaries[index].terms = TermParser.parse(termsText)
         glossaryCollection.glossaries[index].updatedAt = Date()
         persistGlossaries()
         return true
+    }
+
+    func chooseAndImportGlossaryTerms() -> [String]? {
+        beginFileImport()
+        defer { endFileImport() }
+        let panel = NSOpenPanel()
+        panel.title = "匯入詞彙檔案（TXT 或 JSON）"
+        panel.prompt = "匯入詞彙"
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.plainText, .json]
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return nil
+        }
+
+        do {
+            let data = try Data(contentsOf: url)
+            if url.pathExtension.lowercased() == "json" {
+                if let decodedCollection = try? JSONDecoder().decode(GlossaryCollection.self, from: data) {
+                    let allTerms = decodedCollection.commonTerms
+                        + decodedCollection.glossaries.flatMap(\.terms)
+                    return TermParser.parse(allTerms.joined(separator: "\n"))
+                }
+                if let decodedPreset = try? JSONDecoder().decode(GlossaryPreset.self, from: data) {
+                    return TermParser.parse(decodedPreset.terms.joined(separator: "\n"))
+                }
+                if let stringArray = try? JSONDecoder().decode([String].self, from: data) {
+                    return TermParser.parse(stringArray.joined(separator: "\n"))
+                }
+            }
+            let rawText = String(decoding: data, as: UTF8.self)
+            return TermParser.parse(rawText)
+        } catch {
+            alert = UserFacingAlert(
+                title: "無法匯入詞彙",
+                message: error.localizedDescription
+            )
+            return nil
+        }
+    }
+
+    func exportGlossaryTerms(defaultFileName: String, terms: [String]) {
+        beginFileImport()
+        defer { endFileImport() }
+        let panel = NSSavePanel()
+        panel.title = "匯出詞彙清單"
+        panel.prompt = "匯出"
+        panel.nameFieldStringValue = "\(defaultFileName).txt"
+        panel.allowedContentTypes = [.plainText]
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return
+        }
+
+        do {
+            let content = terms.joined(separator: "\n") + (terms.isEmpty ? "" : "\n")
+            try AtomicFileWriter.writeText(content, to: url)
+        } catch {
+            alert = UserFacingAlert(
+                title: "無法匯出詞彙",
+                message: error.localizedDescription
+            )
+        }
     }
 
     func updateCommonTerms(_ termsText: String) {
@@ -2005,6 +2086,31 @@ final class AppViewModel: ObservableObject {
         } catch {
             alert = UserFacingAlert(
                 title: "拒絕開啟",
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    func openRecoveryPartialTranscript(_ item: RecoveryScanItem) {
+        do {
+            let targetDir = try RecoveryScanner.validatedManagedJobDirectory(
+                for: item,
+                paths: paths,
+                fileManager: fileManager,
+                systemTempRoot: systemTempRoot
+            )
+            let partialURL = targetDir.appendingPathComponent(RecoveryScanner.partialTranscriptFileName)
+            guard fileManager.fileExists(atPath: partialURL.path) else {
+                alert = UserFacingAlert(
+                    title: "找不到部分稿",
+                    message: "此復原目錄內未找到 \(RecoveryScanner.partialTranscriptFileName)。"
+                )
+                return
+            }
+            NSWorkspace.shared.open(partialURL)
+        } catch {
+            alert = UserFacingAlert(
+                title: "拒絕開啟部分稿",
                 message: error.localizedDescription
             )
         }

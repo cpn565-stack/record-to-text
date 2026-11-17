@@ -1,3 +1,4 @@
+import AppKit
 import RecordToTextCore
 import SwiftUI
 
@@ -30,22 +31,48 @@ enum GoogleAIStudioAPIKeyDraftPolicy {
 
 struct SettingsView: View {
     @ObservedObject var viewModel: AppViewModel
+    @Environment(\.colorSchemeContrast) private var contrast
+
     private var supportedThinkingLevels: [GeminiThinkingLevel] {
         GeminiGenerationConfig.supportedThinkingLevels(modelID: viewModel.settings.selectedGeminiModelID)
     }
+
     @State private var resetChoice: ResetChoice?
+
+    // Google AI Studio credential & connection test state
+    @State private var apiKeyDraft = ""
     @State private var isTestingAPIKey = false
     @State private var apiKeyTestResult: String?
     @State private var apiKeyTestSucceeded: Bool?
-    @State private var apiKeyDraft = ""
-    // Discovery parses PATH and stats several executables; run it once per
-    // appearance (plus explicit re-detect) instead of on every render.
+    @State private var apiKeyTestTask: Task<Void, Never>?
+
+    // Vertex AI draft & connection test state
+    @State private var vertexProjectDraft = ""
+    @State private var vertexLocationDraft = "global"
+    @State private var vertexBucketDraft = ""
+    @State private var customGCloudPathDraft = ""
+    @State private var isTestingVertexAuth = false
+    @State private var vertexAuthTestResult: String?
+    @State private var vertexAuthTestSucceeded: Bool?
+    @State private var vertexAuthTestTask: Task<Void, Never>?
+    @State private var environmentDebounceTask: Task<Void, Never>?
+
+    // Local Qwen developer runtime drafts & discovery
+    @State private var customPythonPathDraft = ""
+    @State private var customHelperPathDraft = ""
     @State private var developerRuntimeDiscovery = DeveloperRuntimeDiscovery(
         python: URL(fileURLWithPath: "/usr/bin/python3"),
         openCC: URL(fileURLWithPath: "/opt/homebrew/bin/opencc"),
         pythonWasDetected: false,
         openCCWasDetected: false
     )
+
+    // Output suffix draft
+    @State private var outputSuffixDraft = ""
+
+    // Copy feedback states
+    @State private var copiedAppSupportPath = false
+    @State private var copiedBundlePath = false
 
     var body: some View {
         TabView {
@@ -54,28 +81,50 @@ struct SettingsView: View {
                     Label("一般", systemImage: "switch.2")
                 }
 
+            engineSettings
+                .tabItem {
+                    Label("轉錄引擎", systemImage: "cpu")
+                }
+
             outputSettings
                 .tabItem {
                     Label("輸出", systemImage: "folder")
                 }
 
-            runtimeSettings
+            dataAndAboutSettings
                 .tabItem {
-                    Label("Runtime", systemImage: "cpu")
-                }
-
-            storageSettings
-                .tabItem {
-                    Label("儲存", systemImage: "externaldrive")
+                    Label("資料與關於", systemImage: "externaldrive")
                 }
         }
-        .padding(20)
-        .frame(width: 640, height: 520)
-        .onAppear {
-            apiKeyDraft = viewModel.settings.googleAIStudioAPIKey ?? ""
+        .padding(AppSpacing.xl)
+        .frame(width: 680)
+        .frame(minHeight: 500, idealHeight: 580)
+        .onAppear(perform: syncAllDraftsFromSettings)
+        .onDisappear {
+            commitPendingDrafts()
+            apiKeyTestTask?.cancel()
+            vertexAuthTestTask?.cancel()
+            environmentDebounceTask?.cancel()
         }
         .onChange(of: viewModel.settings.googleAIStudioAPIKey) { _, newValue in
             apiKeyDraft = newValue ?? ""
+        }
+        .onChange(of: viewModel.settings.vertexAIProjectID) { _, newValue in
+            let next = newValue ?? ""
+            if vertexProjectDraft.trimmingCharacters(in: .whitespacesAndNewlines) != next {
+                vertexProjectDraft = next
+            }
+        }
+        .onChange(of: viewModel.settings.vertexAILocation) { _, newValue in
+            if vertexLocationDraft.trimmingCharacters(in: .whitespacesAndNewlines) != newValue {
+                vertexLocationDraft = newValue
+            }
+        }
+        .onChange(of: viewModel.settings.vertexAIGCSBucket) { _, newValue in
+            let next = newValue ?? ""
+            if normalizedBucketString(vertexBucketDraft) != next {
+                vertexBucketDraft = next
+            }
         }
         .confirmationDialog(
             "重設 record-to-text？",
@@ -89,7 +138,7 @@ struct SettingsView: View {
                 Button(resetChoice.buttonTitle, role: .destructive) {
                     Task {
                         await viewModel.resetSettings(keepGlossaries: resetChoice == .keepGlossaries)
-                        apiKeyDraft = viewModel.settings.googleAIStudioAPIKey ?? ""
+                        syncAllDraftsFromSettings()
                         self.resetChoice = nil
                     }
                 }
@@ -102,37 +151,15 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: - Tab 1: 一般 (General)
+
     private var generalSettings: some View {
         Form {
-            Section("關於此 App") {
-                LabeledContent("版本") {
-                    Text(appVersionLabel)
-                        .textSelection(.enabled)
-                }
-                LabeledContent("建置") {
-                    Text(appBuildLabel)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                }
-                LabeledContent("長音預切") {
-                    Text(segmentPolicyLabel)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                }
-                LabeledContent("每段 token 上限") {
-                    Text("\(defaultMaximumTokens)")
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                }
-                Text("若「長音預切」不是 20 分鐘，代表你開的不是含此改動的建置。請關閉所有視窗後改開專案 dist/record-to-text.app。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
             Section("工作流程") {
-                Text("加入的檔案會先進入佇列，需按「開始轉文字」才會執行。")
+                Text("加入的錄音會先進入等待中佇列，按下「開始轉文字」才會開始執行。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
                 Toggle(
                     "完成後在 Finder 顯示",
                     isOn: setting(\.revealInFinderWhenCompleted)
@@ -155,7 +182,7 @@ struct SettingsView: View {
                         set: { viewModel.setNotificationPreference($0) }
                     )
                 )
-                Text("第一次開啟時，macOS 會詢問通知權限。未授權不影響轉錄。")
+                Text("首次開啟時 macOS 會詢問通知權限；未授權不影響轉錄流程。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -163,353 +190,366 @@ struct SettingsView: View {
         .formStyle(.grouped)
     }
 
-    private var appVersionLabel: String {
-        let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-            ?? "—"
-        return short
-    }
+    // MARK: - Tab 2: 轉錄引擎 (Transcription Engine)
 
-    private var appBuildLabel: String {
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
-        let path = Bundle.main.bundlePath
-        return "\(build) · \(path)"
-    }
+    private var engineSettings: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.md) {
+            VStack(alignment: .leading, spacing: 6) {
+                BackendSelectionRow(viewModel: viewModel)
 
-    private var segmentPolicyLabel: String {
-        let seconds = Int(AudioSegmentPlanner.productionMaximumDuration)
-        let minutes = seconds / 60
-        return "每段最長 \(minutes) 分鐘（\(seconds) 秒）"
-    }
-
-    private var defaultMaximumTokens: Int {
-        // Keep in sync with ASRRequest default.
-        16_384
-    }
-
-    private var outputSettings: some View {
-        Form {
-            Section("輸出位置") {
-                Picker(
-                    "模式",
-                    selection: setting(\.outputLocationMode)
-                ) {
-                    ForEach(OutputLocationMode.allCases, id: \.self) { mode in
-                        Text(mode.displayName).tag(mode)
-                    }
-                }
-
-                if viewModel.settings.outputLocationMode == .fixedDirectory {
-                    LabeledContent("預設資料夾") {
-                        HStack(spacing: 8) {
-                            Text(viewModel.settings.defaultOutputDirectory)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                                .foregroundStyle(.secondary)
-                                .frame(maxWidth: 320, alignment: .trailing)
-                            Button("選擇…") {
-                                viewModel.chooseDefaultOutputDirectory()
-                            }
-                        }
-                    }
-                }
-
-                Text(outputModeHelp)
+                Text("引擎與模型變更會套用至新錄音與待轉工作；執行中與檢查點續跑工作沿用原設定。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .padding(.horizontal, 2)
             }
 
-            Section("檔名格式") {
-                TextField(
-                    "檔名後綴",
-                    text: Binding(
-                        get: {
-                            viewModel.settings.outputFilenameSuffix
-                                ?? OutputNameBuilder.defaultFinalSuffix
-                        },
-                        set: { newValue in
-                            viewModel.setSetting(
-                                \.outputFilenameSuffix,
-                                to: OutputNameBuilder.sanitizedSuffix(
-                                    newValue,
-                                    fallback: OutputNameBuilder.defaultFinalSuffix
-                                )
-                            )
-                        }
-                    )
-                )
-                .textFieldStyle(.roundedBorder)
+            Form {
+                switch viewModel.settings.backendType {
+                case .googleAIStudio:
+                    googleAIStudioCredentialsSection
+                    cloudModelAndThinkingSection(modelBinding: setting(\.googleAIStudioModelID), isVertex: false)
+                    cloudSegmentationAndPostprocessingSection(isVertex: false)
 
-                LabeledContent("預覽") {
-                    Text(
-                        OutputNameBuilder.previewFileName(
-                            suffix: viewModel.settings.resolvedOutputFilenameSuffix
-                        )
-                    )
-                    .font(.body.monospaced())
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
+                case .vertexAI:
+                    vertexAICredentialsSection
+                    cloudModelAndThinkingSection(modelBinding: setting(\.vertexAIModelID), isVertex: true)
+                    cloudSegmentationAndPostprocessingSection(isVertex: true)
+
+                case .localQwen:
+                    localQwenRuntimeSection
+                    localQwenModelSection
+                    localQwenSegmentationSection
                 }
 
-                Text(
-                    "例：錄音.m4a → 錄音\(viewModel.settings.resolvedOutputFilenameSuffix).txt"
+                Section {
+                    HStack {
+                        Button("執行環境檢查…") {
+                            commitPendingDrafts()
+                            viewModel.refreshEnvironment()
+                            viewModel.isEnvironmentPresented = true
+                        }
+                        Spacer()
+                    }
+                }
+            }
+            .formStyle(.grouped)
+        }
+    }
+
+    private var googleAIStudioCredentialsSection: some View {
+        Section("連線與憑證") {
+            SecureField(
+                "Gemini API Key",
+                text: $apiKeyDraft,
+                prompt: Text("請貼上 Google AI Studio API Key (AIza...)")
+            )
+            .textFieldStyle(.roundedBorder)
+            .disabled(viewModel.isGoogleAIStudioCredentialLoading || viewModel.isGoogleAIStudioCredentialSaving)
+
+            HStack(spacing: AppSpacing.sm) {
+                Button("儲存到 Keychain") {
+                    Task { await viewModel.setGoogleAIStudioAPIKey(apiKeyDraft) }
+                    apiKeyTestResult = nil
+                    apiKeyTestSucceeded = nil
+                }
+                .disabled(
+                    viewModel.isGoogleAIStudioCredentialLoading
+                        || viewModel.isGoogleAIStudioCredentialSaving
+                        || GoogleAIStudioAPIKeyDraftPolicy.shouldDisableSave(
+                            normalizedDraft: normalizedAPIKeyDraft,
+                            normalizedInMemoryAPIKey: normalizedInMemoryAPIKey,
+                            storageState: viewModel.googleAIStudioCredentialStorageState,
+                            hasPendingMigration: viewModel.hasPendingGoogleAIStudioCredentialMigration
+                        )
                 )
+
+                Button("測試連線") {
+                    testGoogleAIStudioAPIKey()
+                }
+                .disabled(viewModel.isGoogleAIStudioCredentialLoading || isTestingAPIKey || normalizedAPIKeyDraft == nil)
+
+                Button("清除", role: .destructive) {
+                    Task {
+                        let attemptedDraft = apiKeyDraft
+                        let succeeded = await viewModel.setGoogleAIStudioAPIKey(nil)
+                        apiKeyDraft = GoogleAIStudioAPIKeyDraftPolicy.afterClearAttempt(
+                            succeeded: succeeded,
+                            attemptedDraft: attemptedDraft,
+                            inMemoryAPIKey: viewModel.settings.googleAIStudioAPIKey
+                        )
+                        apiKeyTestResult = nil
+                        apiKeyTestSucceeded = nil
+                    }
+                }
+                .disabled(
+                    viewModel.isGoogleAIStudioCredentialLoading || (
+                        viewModel.googleAIStudioCredentialStorageState == .absent
+                            && normalizedInMemoryAPIKey == nil
+                            && normalizedAPIKeyDraft == nil
+                    )
+                )
+
+                if isTestingAPIKey {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+
+            if let result = apiKeyTestResult {
+                Text(result)
+                    .font(.caption)
+                    .foregroundStyle(apiKeyTestSucceeded == true ? AppColors.success : AppColors.danger)
+            }
+
+            Text(viewModel.googleAIStudioCredentialStorageDescription)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            }
-
-            Section("檔案編碼") {
-                LabeledContent("格式") {
-                    Text("UTF-8・LF・無 BOM")
-                        .foregroundStyle(.secondary)
-                }
-            }
         }
-        .formStyle(.grouped)
     }
 
-    private var runtimeSettings: some View {
-        Form {
-            Section("轉錄引擎管道 (ASR Backend)") {
-                Text("引擎設定套用至新錄音與尚未開始的工作；執行中及檢查點續跑工作沿用原設定，實際模型會顯示在工作卡片。")
+    private var vertexAICredentialsSection: some View {
+        Section("連線與憑證") {
+            TextField(
+                "GCP Project ID",
+                text: $vertexProjectDraft,
+                prompt: Text("留空則自動讀取 gcloud 當前專案")
+            )
+            .textFieldStyle(.roundedBorder)
+            .onChange(of: vertexProjectDraft) { _, newValue in
+                let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                viewModel.setSetting(\.vertexAIProjectID, to: trimmed.isEmpty ? nil : trimmed)
+            }
+
+            TextField(
+                "GCP 區域 (Location)",
+                text: $vertexLocationDraft,
+                prompt: Text("global")
+            )
+            .textFieldStyle(.roundedBorder)
+            .onSubmit(commitVertexLocationDraft)
+            .onChange(of: vertexLocationDraft) { _, newValue in
+                let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    viewModel.setSetting(\.vertexAILocation, to: trimmed)
+                }
+            }
+
+            TextField(
+                "GCS Bucket 名稱（可選）",
+                text: $vertexBucketDraft,
+                prompt: Text("例：my-transcription-bucket（超過 20MB 音訊分流上傳用）")
+            )
+            .textFieldStyle(.roundedBorder)
+            .onSubmit(commitVertexBucketDraft)
+            .onChange(of: vertexBucketDraft) { _, newValue in
+                let clean = normalizedBucketString(newValue)
+                viewModel.setSetting(\.vertexAIGCSBucket, to: clean.isEmpty ? nil : clean)
+            }
+
+            TextField(
+                "自訂 gcloud 路徑",
+                text: $customGCloudPathDraft,
+                prompt: Text("留空則自動搜尋 /opt/homebrew/bin/gcloud 等標準路徑")
+            )
+            .textFieldStyle(.roundedBorder)
+            .onChange(of: customGCloudPathDraft) { _, newValue in
+                let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                viewModel.setSetting(\.customGCloudPath, to: trimmed.isEmpty ? nil : trimmed)
+                scheduleDebouncedEnvironmentRefresh()
+            }
+
+            HStack(spacing: AppSpacing.sm) {
+                Button("測試 gcloud 與專案連線") {
+                    testVertexAIAuthentication()
+                }
+                .disabled(isTestingVertexAuth)
+
+                if isTestingVertexAuth {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+
+            if let vertexResult = vertexAuthTestResult {
+                Text(vertexResult)
+                    .font(.caption)
+                    .foregroundStyle(vertexAuthTestSucceeded == true ? AppColors.success : AppColors.danger)
+            }
+        }
+    }
+
+    private func cloudModelAndThinkingSection(
+        modelBinding: Binding<String>,
+        isVertex: Bool
+    ) -> some View {
+        Section("模型與思考強度") {
+            GeminiModelPicker(modelID: modelBinding)
+
+            if isVertex, viewModel.settings.vertexAIModelID == "gemini-4-hydrogen" {
+                Text("Hydrogen 支援 global、us、eu 區域；請確認上方 Location 與專案權限。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            if !supportedThinkingLevels.isEmpty {
                 Picker(
-                    "管道模式",
-                    selection: Binding(
-                        get: { viewModel.settings.backendType },
-                        set: {
-                            viewModel.setSetting(\.backendType, to: $0)
-                            viewModel.refreshEnvironment()
-                        }
-                    )
+                    "Gemini 思考強度",
+                    selection: setting(\.geminiThinkingLevel)
                 ) {
-                    ForEach(ASRBackendType.allCases, id: \.self) { backend in
-                        Text(backend.displayName).tag(backend)
+                    ForEach(supportedThinkingLevels, id: \.self) { level in
+                        Text(level.displayName).tag(level)
                     }
                 }
-                .pickerStyle(.segmented)
+                .accessibilityIdentifier("gemini-thinking-level-picker")
+            } else {
+                Text("此自訂模型尚無已確認的思考強度選項，不會傳送思考設定。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
-                if viewModel.settings.backendType == .localQwen {
-                    Text("本機模式：錄音與模型皆留在這台 Mac，不上雲。需要先下載 Qwen ASR 模型。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                if viewModel.settings.backendType == .googleAIStudio {
-                    VStack(alignment: .leading, spacing: 8) {
-                        SecureField(
-                            "Google AI Studio API Key",
-                            text: $apiKeyDraft,
-                            prompt: Text("請貼上 Gemini API Key (AIza...)")
-                        )
-                        .textFieldStyle(.roundedBorder)
-                        .disabled(viewModel.isGoogleAIStudioCredentialLoading || viewModel.isGoogleAIStudioCredentialSaving)
-
-                        HStack {
-                            Button("儲存到 Keychain") {
-                                Task { await viewModel.setGoogleAIStudioAPIKey(apiKeyDraft) }
-                                apiKeyTestResult = nil
-                                apiKeyTestSucceeded = nil
-                            }
-                            .disabled(
-                                viewModel.isGoogleAIStudioCredentialLoading || viewModel.isGoogleAIStudioCredentialSaving || GoogleAIStudioAPIKeyDraftPolicy.shouldDisableSave(
-                                    normalizedDraft: normalizedAPIKeyDraft,
-                                    normalizedInMemoryAPIKey: normalizedInMemoryAPIKey,
-                                    storageState: viewModel
-                                        .googleAIStudioCredentialStorageState,
-                                    hasPendingMigration: viewModel
-                                        .hasPendingGoogleAIStudioCredentialMigration
-                                )
-                            )
-
-                            Button("測試 API Key 連線") {
-                                testGoogleAIStudioAPIKey()
-                            }
-                            .disabled(viewModel.isGoogleAIStudioCredentialLoading || isTestingAPIKey || normalizedAPIKeyDraft == nil)
-
-                            Button("清除", role: .destructive) {
-                                Task {
-                                let attemptedDraft = apiKeyDraft
-                                let succeeded = await viewModel.setGoogleAIStudioAPIKey(nil)
-                                apiKeyDraft = GoogleAIStudioAPIKeyDraftPolicy
-                                    .afterClearAttempt(
-                                        succeeded: succeeded,
-                                        attemptedDraft: attemptedDraft,
-                                        inMemoryAPIKey: viewModel.settings
-                                            .googleAIStudioAPIKey
-                                    )
-                                apiKeyTestResult = nil
-                                apiKeyTestSucceeded = nil
-                                }
-                            }
-                            .disabled(
-                                viewModel.isGoogleAIStudioCredentialLoading || (
-                                    viewModel.googleAIStudioCredentialStorageState == .absent
-                                    && normalizedInMemoryAPIKey == nil
-                                    && normalizedAPIKeyDraft == nil
-                                )
-                            )
-
-                            if isTestingAPIKey {
-                                ProgressView()
-                                    .controlSize(.small)
-                            }
-
-                            if let result = apiKeyTestResult {
-                                Text(result)
-                                    .font(.caption)
-                                    .foregroundStyle(apiKeyTestSucceeded == true ? .green : .red)
-                            }
-                        }
-
-                        Text(viewModel.googleAIStudioCredentialStorageDescription)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    }
-
-                    GeminiModelPicker(modelID: setting(\.googleAIStudioModelID))
-
-                    Text("Google AI Studio API 採用標準 Gemini API Key，免裝 gcloud、免設定 GCP 專案。長錄音會自動分段上傳並依順序合併，輸出台灣繁體中文。預設模型與其餘設定會自動儲存；自訂模型 ID 需按「套用」，API Key 需按「儲存到 Keychain」。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                if viewModel.settings.backendType == .vertexAI {
-                    TextField(
-                        "GCP Project ID",
-                        text: Binding(
-                            get: { viewModel.settings.vertexAIProjectID ?? "" },
-                            set: { viewModel.setSetting(\.vertexAIProjectID, to: $0.isEmpty ? nil : $0) }
-                        ),
-                        prompt: Text("留空則自動讀取 gcloud 當前專案")
-                    )
-                    .textFieldStyle(.roundedBorder)
-
-                    TextField(
-                        "GCP 區域 (Location)",
-                        text: Binding(
-                            get: { viewModel.settings.vertexAILocation },
-                            set: { viewModel.setSetting(\.vertexAILocation, to: $0.isEmpty ? "global" : $0) }
-                        )
-                    )
-                    .textFieldStyle(.roundedBorder)
-
-                    TextField(
-                        "GCS Bucket 名稱（可選）",
-                        text: Binding(
-                            get: { viewModel.settings.vertexAIGCSBucket ?? "" },
-                            set: { viewModel.setSetting(\.vertexAIGCSBucket, to: $0.isEmpty ? nil : $0) }
-                        ),
-                        prompt: Text("例：my-transcription-bucket（音訊分離上傳用）")
-                    )
-                    .textFieldStyle(.roundedBorder)
-
-                    GeminiModelPicker(modelID: setting(\.vertexAIModelID))
-
-                    if viewModel.settings.vertexAIModelID == "gemini-4-hydrogen" {
-                        Text("Hydrogen 支援 global、us、eu 區域；請確認上述 Location 與專案權限。")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Toggle(
-                        "附加內容摘要（輸出不再是純逐字稿）",
-                        isOn: setting(\.vertexAIIncludeSummary)
-                    )
-                    Text("預設關閉。開啟後，Vertex AI 會在逐字稿後附加摘要；若要保留純原始逐字稿，請維持關閉。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    TextField(
-                        "自訂 gcloud 路徑",
-                        text: Binding(
-                            get: { viewModel.settings.customGCloudPath ?? "" },
-                            set: {
-                                viewModel.setSetting(\.customGCloudPath, to: $0.isEmpty ? nil : $0)
-                                viewModel.refreshEnvironment()
-                            }
-                        ),
-                        prompt: Text("留空則自動搜尋 /opt/homebrew/bin/gcloud 等標準路徑")
-                    )
-                    .textFieldStyle(.roundedBorder)
-
-                    Text("Vertex AI 使用本機 `gcloud` 認證與 GCP 專案。所有設定皆會即時自動儲存。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                if viewModel.settings.backendType != .localQwen {
-                    Divider()
-
-                    if !supportedThinkingLevels.isEmpty {
-                    Picker(
-                        "Gemini 思考強度",
-                        selection: setting(\.geminiThinkingLevel)
-                    ) {
-                        ForEach(supportedThinkingLevels, id: \.self) { level in
-                            Text(level.displayName).tag(level)
-                        }
-                    }
-                    .accessibilityIdentifier("gemini-thinking-level-picker")
-                    Text("各模型分別記住強度，AI Studio 與 Vertex AI 共用；Hydrogen 首次預設極高。較高強度通常更耗時、消耗更多 token，不保證逐字稿更準。尚未開始的一般排隊工作會跟隨設定；執行中及續跑工作保留原設定。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    } else {
-                        Text("此自訂模型尚無已確認的思考強度選項，不會傳送思考設定。")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Picker(
-                        "模型不可用時",
-                        selection: setting(\.cloudFallbackPolicy)
-                    ) {
-                        ForEach(CloudFallbackPolicy.allCases, id: \.self) { policy in
-                            Text(policy.displayName).tag(policy)
-                        }
-                    }
-                    Text("預設不自動換模型，避免同一份長錄音混用不同模型。允許 fallback 時只會從 3.8/3.7 改用 3.6 Flash，不會自動改用 Pro。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    Toggle(
-                        "在單段上限前優先尋找靜音切點",
-                        isOn: setting(\.silenceAwareCloudSegmentation)
-                    )
-                    Text("開啟後會掃描單段上限前 30 秒，優先在至少 0.35 秒的靜音中切分；找不到時安全退回硬切。一般模型最多 20 分鐘，Gemini 3.5 Transcribe 最多 14 分鐘。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    LabeledContent("雲端單段輸出上限") {
-                        Text("\(GeminiGenerationConfig.transcriptionOutputTokens(modelID: viewModel.settings.backendType == .vertexAI ? viewModel.settings.vertexAIModelID : viewModel.settings.googleAIStudioModelID).formatted()) tokens")
-                            .foregroundStyle(.secondary)
-                    }
-                    Text("Cloud 最終稿會在本機經 OpenCC s2tw 統一成繁體字形（保留原始用詞），因此環境檢查會要求 OpenCC。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                if viewModel.settings.backendType == .localQwen {
-                    localQwenModelSettings
+            Picker(
+                "模型忙碌時",
+                selection: setting(\.cloudFallbackPolicy)
+            ) {
+                ForEach(CloudFallbackPolicy.allCases, id: \.self) { policy in
+                    Text(policy.displayName).tag(policy)
                 }
             }
 
-            Section {
-                Button("執行環境檢查…") {
-                    viewModel.refreshEnvironment()
-                    viewModel.isEnvironmentPresented = true
+            DisclosureGroup("思考強度與自動切換說明") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("• 各模型分別記住思考強度（Hydrogen 預設極高）；較高強度通常更耗時並消耗更多輸出 token。")
+                    Text("• 預設不自動切換模型，避免同一份長錄音混用不同模型；允許時僅從 3.8／3.7 退回 3.6 Flash。")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.top, 4)
+            }
+            .font(.caption)
+        }
+    }
+
+    private func cloudSegmentationAndPostprocessingSection(isVertex: Bool) -> some View {
+        let activeModelID = isVertex
+            ? viewModel.settings.vertexAIModelID
+            : viewModel.settings.googleAIStudioModelID
+        let maxTokens = GeminiGenerationConfig.transcriptionOutputTokens(modelID: activeModelID)
+
+        return Section("分段與後處理") {
+            Toggle(
+                "在單段上限前優先尋找靜音切點",
+                isOn: setting(\.silenceAwareCloudSegmentation)
+            )
+            Text("單段上限 20 分鐘；開啟後會掃描上限前 30 秒尋找自然停頓切分，找不到則安全硬切。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if isVertex {
+                Toggle(
+                    "附加內容摘要（輸出不再是純逐字稿）",
+                    isOn: setting(\.vertexAIIncludeSummary)
+                )
+            }
+
+            LabeledContent("雲端單段輸出上限") {
+                Text("\(maxTokens.formatted()) tokens")
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+
+            Text("雲端最終稿會經本機 OpenCC（s2tw）統一為台灣繁體字形，保留講者原始用詞。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: - Local Qwen Sections
+
+    private var localQwenRuntimeSection: some View {
+        Section("本機 Runtime 環境") {
+            Toggle(
+                "使用這台 Mac 的開發 Runtime",
+                isOn: Binding(
+                    get: { viewModel.settings.developerMode },
+                    set: { enabled in
+                        viewModel.setSetting(\.developerMode, to: enabled)
+                        viewModel.refreshEnvironment()
+                    }
+                )
+            )
+
+            if viewModel.settings.developerMode {
+                TextField(
+                    "Python 執行檔",
+                    text: $customPythonPathDraft,
+                    prompt: Text(developerRuntimeDiscovery.python.path)
+                )
+                .textFieldStyle(.roundedBorder)
+                .onChange(of: customPythonPathDraft) { _, newValue in
+                    let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                    viewModel.setSetting(\.customPythonPath, to: trimmed.isEmpty ? nil : trimmed)
+                    scheduleDebouncedEnvironmentRefresh()
+                }
+
+                TextField(
+                    "自訂 Qwen Helper 路徑",
+                    text: $customHelperPathDraft,
+                    prompt: Text("留空使用 App 內建 Helper")
+                )
+                .textFieldStyle(.roundedBorder)
+                .onChange(of: customHelperPathDraft) { _, newValue in
+                    let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                    viewModel.setSetting(\.customHelperPath, to: trimmed.isEmpty ? nil : trimmed)
+                    scheduleDebouncedEnvironmentRefresh()
+                }
+
+                LabeledContent("OpenCC（自動偵測）") {
+                    HStack(spacing: 6) {
+                        StatusBadge(
+                            text: developerRuntimeDiscovery.openCCWasDetected ? "已找到" : "未找到",
+                            color: developerRuntimeDiscovery.openCCWasDetected ? AppColors.success : AppColors.danger
+                        )
+                        Text(developerRuntimeDiscovery.openCC.path)
+                            .font(AppTypography.monoDetail)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                    }
+                }
+
+                HStack(spacing: AppSpacing.sm) {
+                    Button("重新自動偵測") {
+                        useAutoDetectedDeveloperRuntime()
+                    }
+                    Text(
+                        developerRuntimeDiscovery.pythonWasDetected
+                            ? "已找到 Python：\(developerRuntimeDiscovery.python.path)"
+                            : "未找到專用 Python（預期：\(developerRuntimeDiscovery.python.path)）"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(developerRuntimeDiscovery.pythonWasDetected ? Color.secondary : AppColors.danger)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                }
+            } else {
+                Label(
+                    "受管理 Runtime 須通過簽章與完整性驗證才會執行；亦可改用本機開發環境。",
+                    systemImage: "lock.shield"
+                )
+                .font(.caption)
+                .foregroundStyle(AppColors.warning)
+
+                Button("改用自動偵測的開發 Runtime") {
+                    useAutoDetectedDeveloperRuntime()
                 }
             }
         }
-        .formStyle(.grouped)
+        .onAppear(perform: refreshDeveloperRuntimeDiscovery)
     }
 
-    private var localQwenModelSettings: some View {
-        Group {
-            localQwenRuntimeSettings
-
-            Divider()
-
+    private var localQwenModelSection: some View {
+        Section("模型與快取") {
             Picker(
                 "模型",
                 selection: Binding(
@@ -529,7 +569,7 @@ struct SettingsView: View {
             }
             .disabled(viewModel.modelDownloadPhase.isBusy)
 
-            HStack(spacing: 10) {
+            HStack(spacing: AppSpacing.sm) {
                 Button(viewModel.modelDownloadButtonTitle) {
                     viewModel.downloadSelectedModel()
                 }
@@ -541,12 +581,15 @@ struct SettingsView: View {
                     Button("取消") {
                         viewModel.cancelModelDownload()
                     }
+                } else if viewModel.isModelCacheStatusRefreshing {
+                    ProgressView()
+                        .controlSize(.small)
                 } else if viewModel.isSelectedModelCached {
                     Label("App 模型目錄已就緒", systemImage: "checkmark.circle.fill")
                         .font(.caption)
-                        .foregroundStyle(.green)
+                        .foregroundStyle(AppColors.success)
                 } else if viewModel.isSelectedModelInDefaultHFCache {
-                    Label("本機 Hugging Face cache 可匯入", systemImage: "externaldrive.fill.badge.checkmark")
+                    Label("可從 ~/.cache/huggingface 直接匯入", systemImage: "externaldrive.fill.badge.checkmark")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -554,10 +597,9 @@ struct SettingsView: View {
 
             LabeledContent("模型 ID") {
                 Text(viewModel.settings.selectedModelID)
-                    .font(.caption.monospaced())
+                    .font(AppTypography.monoDetail)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
-                    .multilineTextAlignment(.trailing)
             }
 
             if let detail = viewModel.selectedModelDetail {
@@ -568,39 +610,25 @@ struct SettingsView: View {
 
             if !viewModel.modelDownloadProgressLine.isEmpty {
                 Text(viewModel.modelDownloadProgressLine)
-                    .font(.caption.monospaced())
+                    .font(AppTypography.monoDetail)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
-                    .lineLimit(4)
+                    .lineLimit(3)
             }
 
             switch viewModel.modelDownloadPhase {
             case let .succeeded(message):
                 Text(message)
                     .font(.caption)
-                    .foregroundStyle(.green)
+                    .foregroundStyle(AppColors.success)
             case let .failed(message):
                 Text(message)
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(AppColors.danger)
                     .textSelection(.enabled)
             case .idle, .importingLocal, .downloading:
                 EmptyView()
             }
-
-            Text("下載位置：App 的 Models 目錄。若 ~/.cache/huggingface 已有同模型，會優先本機匯入，避免重複下載。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Divider()
-
-            Toggle(
-                "實驗性：本機切塊優先尋找靜音切點",
-                isOn: setting(\.localSilenceAwareSegmentation)
-            )
-            Text("開啟後會在 20 分鐘外層上限、120 秒內層上限與 token 遞迴中點附近找至少 0.35 秒的停頓，嘗試減少切斷字詞；找不到時退回原本的固定切點。只影響新加入佇列的工作，已凍結的計畫不會被重算。此功能預設關閉，可主動開啟測試；切點效果尚未通過真實模型 A/B 與人工核對。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
 
             if CPUArchitecture.current == .x86_64 {
                 Label(
@@ -608,191 +636,270 @@ struct SettingsView: View {
                     systemImage: "exclamationmark.triangle.fill"
                 )
                 .font(.caption)
-                .foregroundStyle(.orange)
-            } else if viewModel.settings.selectedModelID
-                == ASRModelDescriptor.appleSiliconBF16.id
-            {
-                Text("BF16 體積較大，並需要更多統一記憶體。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                .foregroundStyle(AppColors.warning)
             }
         }
         .onAppear {
             viewModel.refreshSelectedModelCacheStatus()
         }
-        .overlay(alignment: .topTrailing) {
-            if viewModel.isModelCacheStatusRefreshing {
-                ProgressView()
-                    .controlSize(.small)
-                    .help("正在背景檢查模型快取")
-            }
+    }
+
+    private var localQwenSegmentationSection: some View {
+        Section("分段與後處理") {
+            Toggle(
+                "實驗性：本機切塊優先尋找靜音切點",
+                isOn: setting(\.localSilenceAwareSegmentation)
+            )
+            Text("於 20 分鐘外層與 120 秒內層切點附近尋找至少 0.35 秒停頓，減少切斷字詞；僅套用至新加入工作。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
-    private var localQwenRuntimeSettings: some View {
-        Group {
-            Toggle(
-                "使用這台 Mac 的開發 Runtime",
-                isOn: Binding(
-                    get: { viewModel.settings.developerMode },
-                    set: { enabled in
-                        viewModel.setSetting(\.developerMode, to: enabled)
-                        viewModel.refreshEnvironment()
-                    }
-                )
-            )
+    // MARK: - Tab 3: 輸出 (Output)
 
-            if viewModel.settings.developerMode {
-                Text("你已明確允許 App 使用這台 Mac 上的工具。App 會檢查檔案是否可用，但不會把開發工具誤標成已簽章的受管理 Runtime。")
+    private var outputSettings: some View {
+        Form {
+            Section("輸出位置") {
+                Picker(
+                    "模式",
+                    selection: setting(\.outputLocationMode)
+                ) {
+                    ForEach(OutputLocationMode.allCases, id: \.self) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+
+                if viewModel.settings.outputLocationMode == .fixedDirectory {
+                    LabeledContent("預設資料夾") {
+                        HStack(spacing: AppSpacing.sm) {
+                            Text(viewModel.settings.defaultOutputDirectory)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: 300, alignment: .trailing)
+
+                            Button("選擇…") {
+                                viewModel.chooseDefaultOutputDirectory()
+                            }
+
+                            Button("在 Finder 顯示") {
+                                viewModel.revealDefaultOutputDirectory()
+                            }
+                        }
+                    }
+                }
+
+                Text(outputModeHelp)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
 
+            Section("檔名格式") {
                 TextField(
-                    "Python 執行檔",
-                    text: runtimePathSetting(\.customPythonPath),
-                    prompt: Text(developerRuntimeDiscovery.python.path)
+                    "檔名後綴",
+                    text: $outputSuffixDraft,
+                    prompt: Text(OutputNameBuilder.defaultFinalSuffix)
                 )
                 .textFieldStyle(.roundedBorder)
-
-                LabeledContent("OpenCC（自動偵測）") {
-                    VStack(alignment: .trailing, spacing: 2) {
-                        Text(developerRuntimeDiscovery.openCC.path)
-                            .font(.caption.monospaced())
-                            .lineLimit(2)
-                            .truncationMode(.middle)
-                            .textSelection(.enabled)
-                        Text(
-                            developerRuntimeDiscovery.openCCWasDetected
-                                ? "已找到"
-                                : "未找到；請先安裝 Homebrew opencc"
+                .onSubmit(commitOutputSuffixDraft)
+                .onChange(of: outputSuffixDraft) { _, newValue in
+                    viewModel.setSetting(
+                        \.outputFilenameSuffix,
+                        to: OutputNameBuilder.sanitizedSuffix(
+                            newValue,
+                            fallback: OutputNameBuilder.defaultFinalSuffix
                         )
-                        .font(.caption2)
-                        .foregroundStyle(
-                            developerRuntimeDiscovery.openCCWasDetected
-                                ? Color.green
-                                : Color.red
-                        )
-                    }
+                    )
                 }
 
-                TextField(
-                    "自訂 Qwen Helper 路徑",
-                    text: runtimePathSetting(\.customHelperPath),
-                    prompt: Text("留空使用 App 內建 Helper")
-                )
-                .textFieldStyle(.roundedBorder)
+                filenamePreviewCard
+            }
 
-                HStack(spacing: 10) {
-                    Button("重新自動偵測") {
-                        useAutoDetectedDeveloperRuntime()
-                    }
-
-                    Text(
-                        developerRuntimeDiscovery.pythonWasDetected
-                            ? "已找到 Python：\(developerRuntimeDiscovery.python.path)"
-                            : "未找到專用 Python；預期位置：\(developerRuntimeDiscovery.python.path)"
-                    )
-                    .font(.caption)
-                    .foregroundStyle(
-                        developerRuntimeDiscovery.pythonWasDetected
-                            ? Color.secondary
-                            : Color.red
-                    )
-                    .lineLimit(2)
-                    .truncationMode(.middle)
-                    .textSelection(.enabled)
-                }
-            } else {
-                Label(
-                    "受管理 Runtime 必須通過完整性與簽章驗證才會執行；僅有檔案存在並不算可信。若尚未安裝受信任 Runtime，可明確改用這台 Mac 的開發環境。",
-                    systemImage: "lock.shield"
-                )
-                .font(.caption)
-                .foregroundStyle(.orange)
-
-                Button("改用自動偵測的開發 Runtime") {
-                    useAutoDetectedDeveloperRuntime()
+            Section("檔案編碼") {
+                LabeledContent("格式") {
+                    Text("UTF-8 · LF · 無 BOM")
+                        .foregroundStyle(.secondary)
                 }
             }
         }
-        .onAppear(perform: refreshDeveloperRuntimeDiscovery)
+        .formStyle(.grouped)
     }
 
-    private func refreshDeveloperRuntimeDiscovery() {
-        developerRuntimeDiscovery = RuntimeEnvironment.discoverDeveloperRuntime()
-    }
-
-    private func runtimePathSetting(
-        _ keyPath: WritableKeyPath<AppSettings, String?>
-    ) -> Binding<String> {
-        Binding(
-            get: { viewModel.settings[keyPath: keyPath] ?? "" },
-            set: { newValue in
-                let normalized = newValue.trimmingCharacters(
-                    in: .whitespacesAndNewlines
-                )
-                viewModel.setSetting(
-                    keyPath,
-                    to: normalized.isEmpty ? nil : normalized
-                )
-                viewModel.refreshEnvironment()
-            }
+    private var filenamePreviewCard: some View {
+        let previewOutput = OutputNameBuilder.previewFileName(
+            suffix: viewModel.settings.resolvedOutputFilenameSuffix
         )
+        return HStack(spacing: AppSpacing.md) {
+            HStack(spacing: 6) {
+                Image(systemName: "waveform")
+                    .foregroundStyle(.secondary)
+                Text("錄音.m4a")
+                    .font(AppTypography.monoDetail)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(AppColors.insetSurface, in: RoundedRectangle(cornerRadius: AppRadius.badge))
+
+            Image(systemName: "arrow.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 6) {
+                Image(systemName: "doc.text.fill")
+                    .foregroundStyle(AppColors.accent)
+                Text(previewOutput)
+                    .font(AppTypography.monoDetail.weight(.medium))
+                    .foregroundStyle(.primary)
+                    .textSelection(.enabled)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(AppColors.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: AppRadius.badge))
+            .overlay {
+                RoundedRectangle(cornerRadius: AppRadius.badge)
+                    .stroke(AppColors.accent.opacity(0.30), lineWidth: 1)
+            }
+
+            Spacer()
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("檔名預覽：由 錄音.m4a 轉為 \(previewOutput)")
     }
 
-    private func useAutoDetectedDeveloperRuntime() {
-        viewModel.setSetting(\.customPythonPath, to: nil)
-        viewModel.setSetting(\.customHelperPath, to: nil)
-        viewModel.setSetting(\.developerMode, to: true)
-        refreshDeveloperRuntimeDiscovery()
-        viewModel.refreshEnvironment()
-    }
+    // MARK: - Tab 4: 資料與關於 (Data & About)
 
-    private var storageSettings: some View {
+    private var dataAndAboutSettings: some View {
         Form {
             Section("最近工作") {
                 Stepper(
-                    "保留 \(viewModel.settings.recentJobLimit) 筆",
+                    "保留 \(viewModel.settings.recentJobLimit) 筆已完成紀錄",
                     value: setting(\.recentJobLimit),
                     in: 0...50
                 )
 
-                Button("清除已完成與失敗的記錄") {
-                    viewModel.clearRecentJobs()
-                }
-                .disabled(
-                    viewModel.recentJobs.isEmpty
-                        && !viewModel.jobs.contains(where: { $0.stage.isTerminal })
-                )
+                HStack(spacing: AppSpacing.sm) {
+                    Button("清除已完成與失敗的記錄") {
+                        viewModel.clearRecentJobs()
+                    }
+                    .disabled(!viewModel.hasFinishedJobs)
 
-                Text("清除記錄不會刪除錄音、文字檔或失敗時保留的 WAV。")
+                    if viewModel.hasUnsuccessfulItemsToClean {
+                        Button("清除未成功項目與殘留檔…", role: .destructive) {
+                            viewModel.requestUnsuccessfulCleanup()
+                        }
+                        .disabled(viewModel.isUnsuccessfulCleanupRunning)
+                    }
+                }
+
+                Text("「清除已完成與失敗的記錄」僅移除列表項目，不會刪除原始錄音或文字檔。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
             Section("App 資料") {
-                LabeledContent("位置") {
+                LabeledContent("Application Support") {
                     Text(viewModel.applicationSupportURL.path)
+                        .font(AppTypography.monoDetail)
                         .lineLimit(2)
                         .truncationMode(.middle)
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
+                        .multilineTextAlignment(.trailing)
                 }
-                Button("在 Finder 顯示") {
-                    viewModel.revealApplicationSupport()
+
+                HStack(spacing: AppSpacing.sm) {
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(viewModel.applicationSupportURL.path, forType: .string)
+                        copiedAppSupportPath = true
+                    } label: {
+                        Label(
+                            copiedAppSupportPath ? "已複製路徑" : "複製路徑",
+                            systemImage: copiedAppSupportPath ? "checkmark" : "doc.on.doc"
+                        )
+                    }
+
+                    Button("在 Finder 顯示") {
+                        viewModel.revealApplicationSupport()
+                    }
+                }
+            }
+
+            Section("關於此 App") {
+                LabeledContent("版本") {
+                    Text("\(appVersionLabel) (\(appBuildNumber))")
+                        .monospacedDigit()
+                        .textSelection(.enabled)
+                }
+
+                LabeledContent("執行路徑") {
+                    HStack(spacing: AppSpacing.sm) {
+                        Text(Bundle.main.bundlePath)
+                            .font(AppTypography.monoDetail)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(Bundle.main.bundlePath, forType: .string)
+                            copiedBundlePath = true
+                        } label: {
+                            Image(systemName: copiedBundlePath ? "checkmark" : "doc.on.doc")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("複製執行路徑")
+                    }
+                }
+
+                LabeledContent("長音預切策略") {
+                    Text(segmentPolicyLabel)
+                        .foregroundStyle(.secondary)
+                }
+
+                LabeledContent("本機單段輸出上限") {
+                    Text("\(defaultMaximumTokens.formatted()) tokens")
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
                 }
             }
 
             Section("重設") {
-                Button("重設設定，保留詞庫…") {
-                    resetChoice = .keepGlossaries
-                }
-                Button("重設設定與詞庫…", role: .destructive) {
-                    resetChoice = .everything
+                HStack(spacing: AppSpacing.sm) {
+                    Button("重設設定，保留詞庫…") {
+                        resetChoice = .keepGlossaries
+                    }
+                    Button("重設設定與詞庫…", role: .destructive) {
+                        resetChoice = .everything
+                    }
                 }
             }
         }
         .formStyle(.grouped)
+    }
+
+    // MARK: - Helpers & Actions
+
+    private var appVersionLabel: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+    }
+
+    private var appBuildNumber: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
+    }
+
+    private var segmentPolicyLabel: String {
+        let seconds = Int(AudioSegmentPlanner.productionMaximumDuration)
+        let minutes = seconds / 60
+        return "每段最長 \(minutes) 分鐘（\(seconds) 秒）"
+    }
+
+    private var defaultMaximumTokens: Int {
+        16_384
     }
 
     private var outputModeHelp: String {
@@ -806,24 +913,85 @@ struct SettingsView: View {
         }
     }
 
+    private func syncAllDraftsFromSettings() {
+        apiKeyDraft = viewModel.settings.googleAIStudioAPIKey ?? ""
+        vertexProjectDraft = viewModel.settings.vertexAIProjectID ?? ""
+        vertexLocationDraft = viewModel.settings.vertexAILocation
+        vertexBucketDraft = viewModel.settings.vertexAIGCSBucket ?? ""
+        customGCloudPathDraft = viewModel.settings.customGCloudPath ?? ""
+        customPythonPathDraft = viewModel.settings.customPythonPath ?? ""
+        customHelperPathDraft = viewModel.settings.customHelperPath ?? ""
+        outputSuffixDraft = viewModel.settings.outputFilenameSuffix ?? OutputNameBuilder.defaultFinalSuffix
+    }
+
+    private func commitPendingDrafts() {
+        commitVertexLocationDraft()
+        commitVertexBucketDraft()
+        commitOutputSuffixDraft()
+    }
+
+    private func commitVertexLocationDraft() {
+        let trimmed = vertexLocationDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolved = trimmed.isEmpty ? "global" : trimmed
+        vertexLocationDraft = resolved
+        viewModel.setSetting(\.vertexAILocation, to: resolved)
+    }
+
+    private func commitVertexBucketDraft() {
+        let clean = normalizedBucketString(vertexBucketDraft)
+        vertexBucketDraft = clean
+        viewModel.setSetting(\.vertexAIGCSBucket, to: clean.isEmpty ? nil : clean)
+    }
+
+    private func commitOutputSuffixDraft() {
+        let sanitized = OutputNameBuilder.sanitizedSuffix(
+            outputSuffixDraft,
+            fallback: OutputNameBuilder.defaultFinalSuffix
+        )
+        outputSuffixDraft = sanitized
+        viewModel.setSetting(\.outputFilenameSuffix, to: sanitized)
+    }
+
+    private func normalizedBucketString(_ raw: String) -> String {
+        var trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.lowercased().hasPrefix("gs://") {
+            trimmed.removeFirst(5)
+            while trimmed.hasSuffix("/") {
+                trimmed.removeLast()
+            }
+        }
+        return trimmed
+    }
+
+    private func scheduleDebouncedEnvironmentRefresh() {
+        environmentDebounceTask?.cancel()
+        environmentDebounceTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled else { return }
+            viewModel.refreshEnvironment()
+        }
+    }
+
+    private func refreshDeveloperRuntimeDiscovery() {
+        developerRuntimeDiscovery = RuntimeEnvironment.discoverDeveloperRuntime()
+    }
+
+    private func useAutoDetectedDeveloperRuntime() {
+        customPythonPathDraft = ""
+        customHelperPathDraft = ""
+        viewModel.setSetting(\.customPythonPath, to: nil)
+        viewModel.setSetting(\.customHelperPath, to: nil)
+        viewModel.setSetting(\.developerMode, to: true)
+        refreshDeveloperRuntimeDiscovery()
+        viewModel.refreshEnvironment()
+    }
+
     private func setting<Value>(
         _ keyPath: WritableKeyPath<AppSettings, Value>
     ) -> Binding<Value> {
         Binding(
             get: { viewModel.settings[keyPath: keyPath] },
             set: { viewModel.setSetting(keyPath, to: $0) }
-        )
-    }
-
-    private func optionalStringSetting(
-        _ keyPath: WritableKeyPath<AppSettings, String?>
-    ) -> Binding<String> {
-        Binding(
-            get: { viewModel.settings[keyPath: keyPath] ?? "" },
-            set: {
-                let value = $0.trimmingCharacters(in: .whitespacesAndNewlines)
-                viewModel.setSetting(keyPath, to: value.isEmpty ? nil : value)
-            }
         )
     }
 
@@ -834,24 +1002,81 @@ struct SettingsView: View {
             return
         }
 
+        apiKeyTestTask?.cancel()
         isTestingAPIKey = true
         apiKeyTestResult = nil
         apiKeyTestSucceeded = nil
 
-        Task {
+        let needsSaveWarning = GoogleAIStudioAPIKeyDraftPolicy.shouldDisableSave(
+            normalizedDraft: key,
+            normalizedInMemoryAPIKey: normalizedInMemoryAPIKey,
+            storageState: viewModel.googleAIStudioCredentialStorageState,
+            hasPendingMigration: viewModel.hasPendingGoogleAIStudioCredentialMigration
+        ) == false
+
+        apiKeyTestTask = Task {
             let backend = GoogleAIStudioBackend()
             do {
                 _ = try await backend.validateAPIKey(key)
+                guard !Task.isCancelled else { return }
                 await MainActor.run {
                     isTestingAPIKey = false
-                    apiKeyTestResult = "✅ 連線成功！API Key 有效。"
                     apiKeyTestSucceeded = true
+                    apiKeyTestResult = needsSaveWarning
+                        ? "連線成功，API Key 有效（請記得按「儲存到 Keychain」以套用至工作）。"
+                        : "連線成功，API Key 有效。"
                 }
+            } catch is CancellationError {
+                return
             } catch {
+                guard !Task.isCancelled else { return }
                 await MainActor.run {
                     isTestingAPIKey = false
-                    apiKeyTestResult = "❌ 驗證失敗：\(error.localizedDescription)"
                     apiKeyTestSucceeded = false
+                    apiKeyTestResult = "驗證失敗：\(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func testVertexAIAuthentication() {
+        commitVertexLocationDraft()
+        commitVertexBucketDraft()
+
+        let explicitProject = vertexProjectDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let customGCloud = customGCloudPathDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        vertexAuthTestTask?.cancel()
+        isTestingVertexAuth = true
+        vertexAuthTestResult = nil
+        vertexAuthTestSucceeded = nil
+
+        vertexAuthTestTask = Task {
+            let auth = GCloudAuthService(
+                customGCloudPath: customGCloud.isEmpty ? nil : customGCloud
+            )
+            do {
+                let resolvedProject: String
+                if !explicitProject.isEmpty {
+                    resolvedProject = explicitProject
+                } else {
+                    resolvedProject = try await auth.getDefaultProjectID(forceRefresh: true)
+                }
+                _ = try await auth.getAccessToken(forceRefresh: true)
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    isTestingVertexAuth = false
+                    vertexAuthTestSucceeded = true
+                    vertexAuthTestResult = "驗證成功：已取得 gcloud OAuth 憑證（專案：\(resolvedProject)）。"
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    isTestingVertexAuth = false
+                    vertexAuthTestSucceeded = false
+                    vertexAuthTestResult = "驗證失敗：\(error.localizedDescription)"
                 }
             }
         }
@@ -887,7 +1112,7 @@ private enum ResetChoice {
     var message: String {
         switch self {
         case .keepGlossaries:
-            return "一般、輸出與 Runtime 設定會回到預設值，詞庫會保留。"
+            return "一般、轉錄引擎與輸出設定會回到預設值，詞庫會保留。"
         case .everything:
             return "設定與所有詞庫都會清除。既有錄音與文字檔不受影響。"
         }

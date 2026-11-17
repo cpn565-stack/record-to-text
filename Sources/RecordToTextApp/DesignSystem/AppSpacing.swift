@@ -15,5 +15,6 @@ enum AppSpacing {
 enum AppRadius {
     static let badge: CGFloat = 6
     static let row: CGFloat = 10
+    static let card: CGFloat = 12
     static let composer: CGFloat = 14
 }
