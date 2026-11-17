@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Legacy Phase-1 card wrapper preserving the exact pre-redesign appearance until Phase 2–3.
+/// Legacy card wrapper kept available for sheets until Phase 4.
 struct AppCard<Content: View>: View {
     @ViewBuilder let content: Content
 
@@ -79,50 +79,181 @@ struct InlineCallout<Content: View>: View {
             .padding(AppSpacing.md)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(color.opacity(AppColors.statusTintOpacity), in: RoundedRectangle(cornerRadius: AppRadius.row))
+            .overlay {
+                RoundedRectangle(cornerRadius: AppRadius.row)
+                    .stroke(color.opacity(0.24), lineWidth: 1)
+            }
     }
 }
 
 /// Capsule chip button styling primitive for Composer settings.
 struct SettingChip<LabelContent: View>: View {
+    let isActive: Bool
     let isError: Bool
-    let isDisabled: Bool
+    let isLocked: Bool
     let action: () -> Void
     @ViewBuilder let label: LabelContent
 
     @Environment(\.colorSchemeContrast) private var contrast
 
     init(
+        isActive: Bool = false,
         isError: Bool = false,
-        isDisabled: Bool = false,
+        isLocked: Bool = false,
         action: @escaping () -> Void,
         @ViewBuilder label: () -> LabelContent
     ) {
+        self.isActive = isActive
         self.isError = isError
-        self.isDisabled = isDisabled
+        self.isLocked = isLocked
         self.action = action
         self.label = label()
     }
 
     var body: some View {
-        Button(action: action) {
+        Button {
+            guard !isLocked else { return }
+            action()
+        } label: {
             label
                 .font(AppTypography.chipLabel)
+                .foregroundStyle(chipForeground)
                 .padding(.horizontal, AppSpacing.md)
                 .padding(.vertical, 6)
-                .background(
-                    isError ? AppColors.danger.opacity(AppColors.statusTintOpacity) : AppColors.cardBackground,
-                    in: Capsule()
-                )
+                .background(chipBackground, in: Capsule())
                 .overlay {
                     Capsule()
-                        .stroke(
-                            isError ? AppColors.danger : AppColors.hairlineBorder(colorSchemeContrast: contrast),
-                            lineWidth: 1
-                        )
+                        .stroke(chipBorder, lineWidth: 1)
                 }
         }
         .buttonStyle(.plain)
-        .disabled(isDisabled)
-        .opacity(isDisabled ? 0.6 : 1)
+        .opacity(isLocked ? 0.68 : 1)
+    }
+
+    private var chipForeground: Color {
+        if isError {
+            return AppColors.danger
+        }
+        if isLocked {
+            return .secondary
+        }
+        return .primary
+    }
+
+    private var chipBackground: Color {
+        if isError {
+            return AppColors.danger.opacity(AppColors.statusTintOpacity)
+        }
+        if isActive {
+            return AppColors.accent.opacity(0.10)
+        }
+        return AppColors.windowBackground.opacity(0.75)
+    }
+
+    private var chipBorder: Color {
+        if isError {
+            return AppColors.danger
+        }
+        if isActive {
+            return AppColors.accent.opacity(0.45)
+        }
+        return AppColors.hairlineBorder(colorSchemeContrast: contrast)
+    }
+}
+
+/// Left-aligned wrapping flow layout for capsule chips and compact action buttons.
+struct FlowLayout: Layout {
+    var horizontalSpacing: CGFloat = AppSpacing.sm
+    var verticalSpacing: CGFloat = AppSpacing.sm
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        let rows = computeRows(maxWidth: maxWidth, subviews: subviews)
+        guard !rows.isEmpty else { return .zero }
+
+        var totalHeight: CGFloat = 0
+        var widestRow: CGFloat = 0
+        for (index, row) in rows.enumerated() {
+            widestRow = max(widestRow, row.width)
+            totalHeight += row.height
+            if index > 0 {
+                totalHeight += verticalSpacing
+            }
+        }
+        let resolvedWidth = proposal.width ?? widestRow
+        return CGSize(width: resolvedWidth, height: totalHeight)
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        let rows = computeRows(maxWidth: bounds.width, subviews: subviews)
+        var y = bounds.minY
+        for row in rows {
+            var x = bounds.minX
+            for item in row.items {
+                let itemY = y + (row.height - item.size.height) / 2
+                item.subview.place(
+                    at: CGPoint(x: x, y: itemY),
+                    anchor: .topLeading,
+                    proposal: ProposedViewSize(item.size)
+                )
+                x += item.size.width + horizontalSpacing
+            }
+            y += row.height + verticalSpacing
+        }
+    }
+
+    private struct RowItem {
+        let subview: LayoutSubview
+        let size: CGSize
+    }
+
+    private struct Row {
+        var items: [RowItem] = []
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+    }
+
+    private func computeRows(maxWidth: CGFloat, subviews: Subviews) -> [Row] {
+        var rows: [Row] = []
+        var current = Row()
+
+        for subview in subviews {
+            let natural = subview.sizeThatFits(.unspecified)
+            let clampedWidth = maxWidth.isFinite ? min(natural.width, maxWidth) : natural.width
+            let size = natural.width > clampedWidth
+                ? subview.sizeThatFits(ProposedViewSize(width: clampedWidth, height: nil))
+                : natural
+
+            let nextWidth = current.items.isEmpty
+                ? size.width
+                : current.width + horizontalSpacing + size.width
+
+            if !current.items.isEmpty && nextWidth > maxWidth {
+                rows.append(current)
+                current = Row(
+                    items: [RowItem(subview: subview, size: size)],
+                    width: size.width,
+                    height: size.height
+                )
+            } else {
+                current.items.append(RowItem(subview: subview, size: size))
+                current.width = nextWidth
+                current.height = max(current.height, size.height)
+            }
+        }
+
+        if !current.items.isEmpty {
+            rows.append(current)
+        }
+        return rows
     }
 }

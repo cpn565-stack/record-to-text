@@ -11,20 +11,17 @@ struct MainView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                titleBlock
+            VStack(alignment: .leading, spacing: AppSpacing.xl) {
                 if let error = viewModel.jobPersistenceError {
-                    HStack {
-                        VStack(alignment: .leading) {
-                            Text("工作紀錄尚未儲存").font(.headline)
-                            Text(error).font(.caption).textSelection(.enabled)
-                        }
-                        Spacer()
-                        Button("重試儲存") { Task { await viewModel.retryJobPersistence() } }
-                    }
-                    .foregroundStyle(.orange)
+                    persistenceErrorCallout(error)
                 }
+
+                if viewModel.isWaitingForStartup {
+                    waitingForStartupCallout
+                }
+
                 ComposerView(viewModel: viewModel, isDropTargeted: isDropTargeted)
+
                 JobListView(
                     viewModel: viewModel,
                     logExpansion: $logExpansion,
@@ -32,10 +29,16 @@ struct MainView: View {
                 )
             }
             .frame(maxWidth: 920, alignment: .leading)
-            .padding(24)
+            .padding(.horizontal, AppSpacing.xxl)
+            .padding(.vertical, AppSpacing.xl)
             .frame(maxWidth: .infinity)
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(AppColors.windowBackground)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if QueueActionBar.shouldShow(for: viewModel) {
+                QueueActionBar(viewModel: viewModel)
+            }
+        }
         .contentShape(Rectangle())
         // Keep one file-drop destination on the entire viewport, including
         // the queue and empty margins. Finder supplies `public.file-url`;
@@ -45,55 +48,42 @@ struct MainView: View {
         }
         .overlay {
             if isDropTargeted {
-                RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(Color.accentColor, lineWidth: 2)
-                    .padding(4)
+                RoundedRectangle(cornerRadius: AppRadius.composer)
+                    .strokeBorder(AppColors.accent, lineWidth: 2)
+                    .padding(AppSpacing.xs)
                     .overlay(alignment: .top) {
                         Label("放開以加入錄音佇列", systemImage: "arrow.down.doc.fill")
                             .font(.callout.weight(.semibold))
-                            .padding(.horizontal, 16)
+                            .foregroundStyle(AppColors.accent)
+                            .padding(.horizontal, AppSpacing.lg)
                             .padding(.vertical, 10)
-                            .background(.regularMaterial, in: Capsule())
-                            .padding(.top, 12)
+                            .adaptiveGlassSurface(in: Capsule())
+                            .padding(.top, AppSpacing.md)
                     }
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
             }
         }
+        .navigationSubtitle(navigationSubtitleText)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
+                ToolbarModelMenu(viewModel: viewModel)
+
                 Button {
                     viewModel.isGlossaryManagerPresented = true
                 } label: {
                     Label("詞庫管理", systemImage: "text.book.closed")
                 }
-                .help("詞庫管理：編輯共用詞彙與專案詞庫，供轉錄 Prompt 使用")
+                .help("詞庫管理（⌘⇧L）：編輯共用詞彙與專案詞庫")
                 .accessibilityLabel("詞庫管理")
                 .accessibilityHint("開啟詞庫管理視窗")
 
-                Button {
-                    viewModel.refreshEnvironment()
-                    viewModel.isEnvironmentPresented = true
-                } label: {
-                    Label("環境檢查", systemImage: "checkmark.shield")
-                }
-                .help("環境檢查：確認 ffmpeg／ffprobe 是否就緒（Google AI Studio 使用 App 內建版本）")
-                .accessibilityLabel("環境檢查")
-                .accessibilityHint("開啟執行環境檢查")
-
-                Button {
-                    viewModel.refreshRecoveryScan()
-                } label: {
-                    Label("復原掃描", systemImage: "externaldrive.badge.timemachine")
-                }
-                .help("復原掃描：檢查系統暫存與 Temp-Recovery，可刪除殘留或重新加入來源音檔")
-                .accessibilityLabel("復原掃描")
-                .accessibilityHint("掃描並管理未清理的暫存與復原資料")
+                ToolbarToolsMenu(viewModel: viewModel)
 
                 SettingsLink {
                     Label("設定", systemImage: "gearshape")
                 }
-                .help("設定：輸出位置、檔名後綴、模型選擇、通知與 Developer Mode")
+                .help("設定（⌘,）：輸出位置、轉錄引擎、模型與進階選項")
                 .accessibilityLabel("設定")
                 .accessibilityHint("開啟 App 設定")
             }
@@ -103,18 +93,23 @@ struct MainView: View {
                 prompt: viewModel.promptPreview,
                 termCount: viewModel.promptTermCount
             )
+            .tint(AppColors.accent)
         }
         .sheet(isPresented: $viewModel.isGlossaryManagerPresented) {
             GlossaryManagerView(viewModel: viewModel)
+                .tint(AppColors.accent)
         }
         .sheet(isPresented: $viewModel.isEnvironmentPresented) {
             EnvironmentCheckView(viewModel: viewModel)
+                .tint(AppColors.accent)
         }
         .sheet(isPresented: $viewModel.isRecoveryScanPresented) {
             RecoveryScanView(viewModel: viewModel)
+                .tint(AppColors.accent)
         }
         .sheet(isPresented: $viewModel.isOnboardingPresented) {
             OnboardingView(viewModel: viewModel)
+                .tint(AppColors.accent)
                 .interactiveDismissDisabled()
         }
         .alert(item: $viewModel.alert) { item in
@@ -159,43 +154,64 @@ struct MainView: View {
         } message: {
             Text("只有明確選擇後，record-to-text 才會在不套用專有名詞的情況下重試。")
         }
+        .tint(AppColors.accent)
     }
 
-    private var titleBlock: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text("record-to-text")
-                    .font(.system(size: 28, weight: .semibold, design: .rounded))
-                    .accessibilityAddTraits(.isHeader)
-                Text(viewModel.appSubtitle)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                if viewModel.isWaitingForStartup {
-                    Text("正在載入啟動資料，完成後會開始")
+    private var navigationSubtitleText: String {
+        if viewModel.isWaitingForStartup {
+            return "正在載入啟動資料，完成後會開始"
+        }
+        if let active = viewModel.activeJob {
+            let totalPending = max(1, 1 + viewModel.queuedJobCount)
+            if totalPending > 1 {
+                return "轉錄中（1／\(totalPending)）：\(active.displayName)"
+            }
+            return "轉錄中：\(active.displayName)"
+        }
+        if viewModel.jobs.contains(where: \.isCloudRecoveryPaused) {
+            return "已暫停 · 等待恢復或手動重送"
+        }
+        if viewModel.hasQueuedJobs {
+            let backend = JobModelDisplayHelper.shortBackendName(viewModel.settings.backendType)
+            return "等待中 \(viewModel.queuedJobCount) 筆 · 準備使用 \(backend)"
+        }
+        return "就緒 · \(JobModelDisplayHelper.currentEngineSummary(viewModel.settings))"
+    }
+
+    private func persistenceErrorCallout(_ error: String) -> some View {
+        InlineCallout(color: AppColors.warning) {
+            HStack(alignment: .center, spacing: AppSpacing.md) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(AppColors.warning)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("工作紀錄尚未儲存")
+                        .font(.subheadline.weight(.semibold))
+                    Text(error)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Button("取消開始", action: viewModel.cancelPendingStart)
-                        .buttonStyle(.link)
+                        .textSelection(.enabled)
                 }
+                Spacer()
+                Button("重試儲存") {
+                    Task { await viewModel.retryJobPersistence() }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
+        }
+    }
 
-            Spacer()
-
-            VStack(alignment: .trailing, spacing: 4) {
-                Text("新錄音與尚未開始的工作")
-                    .font(.caption2).foregroundStyle(.secondary)
-                QuickModelMenu(viewModel: viewModel)
-                if viewModel.selectedQuickTranscriptionChoice == .aiStudioGemini35Transcribe ||
-                    viewModel.selectedQuickTranscriptionChoice == .vertexGemini35Transcribe {
-                    Text("專用轉錄：有詞庫時不區分講者；不使用背景與自訂提示")
-                        .font(.caption2).foregroundStyle(.secondary)
-                }
-                if let active = viewModel.jobs.first(where: { $0.id == viewModel.activeJobID }) {
-                    Text("正在執行：\(active.snapshot.engineDisplayName)")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Text("切換選單不會改變執行中或檢查點續跑的工作")
-                        .font(.caption2).foregroundStyle(.secondary)
-                }
+    private var waitingForStartupCallout: some View {
+        InlineCallout(color: AppColors.accent) {
+            HStack(spacing: AppSpacing.md) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("正在載入啟動資料，完成後會開始")
+                    .font(AppTypography.rowMeta)
+                Spacer()
+                Button("取消開始", action: viewModel.cancelPendingStart)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
             }
         }
     }

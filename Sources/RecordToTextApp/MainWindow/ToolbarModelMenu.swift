@@ -1,49 +1,161 @@
 import RecordToTextCore
 import SwiftUI
 
-struct QuickModelMenu: View {
+/// Grouped provider/model selector for the unified macOS toolbar.
+struct ToolbarModelMenu: View {
     @ObservedObject var viewModel: AppViewModel
+
+    private static let aiStudioChoices: [QuickTranscriptionChoice] = [
+        .aiStudioGemini4Hydrogen,
+        .aiStudioGemini4Carbon,
+        .aiStudioGemini4Argon,
+        .aiStudioGemini38Flash,
+        .aiStudioGemini37Flash,
+        .aiStudioGemini35Transcribe
+    ]
+
+    private static let vertexChoices: [QuickTranscriptionChoice] = [
+        .vertexGemini4Hydrogen,
+        .vertexGemini4Carbon,
+        .vertexGemini4Argon,
+        .vertexGemini38Flash,
+        .vertexGemini37Flash,
+        .vertexGemini35Transcribe
+    ]
 
     var body: some View {
         Menu {
-            ForEach(QuickTranscriptionChoice.allCases) { choice in
-                Button {
-                    viewModel.selectQuickTranscriptionChoice(choice)
-                } label: {
-                    Label(
-                        choice.displayName,
-                        systemImage: quickModelMenuIcon(for: choice)
-                    )
+            if viewModel.selectedQuickTranscriptionChoice == nil {
+                Section("目前自訂／進階選擇") {
+                    Button {} label: {
+                        Label(
+                            JobModelDisplayHelper.currentEngineSummary(viewModel.settings),
+                            systemImage: "checkmark"
+                        )
+                    }
+                    .disabled(true)
                 }
+            }
+
+            Section("Google AI Studio") {
+                ForEach(Self.aiStudioChoices) { choice in
+                    choiceButton(for: choice)
+                }
+            }
+
+            Section("Google Cloud Vertex AI") {
+                ForEach(Self.vertexChoices) { choice in
+                    choiceButton(for: choice)
+                }
+            }
+
+            Section("本機 Qwen（不上雲）") {
+                ForEach(viewModel.availableModels) { model in
+                    Button {
+                        selectLocalModel(model.id)
+                    } label: {
+                        if isLocalModelSelected(model.id) {
+                            Label(model.displayName, systemImage: "checkmark")
+                        } else {
+                            Text(model.displayName)
+                        }
+                    }
+                }
+            }
+
+            Divider()
+
+            SettingsLink {
+                Label("更多模型與引擎設定…", systemImage: "slider.horizontal.3")
             }
         } label: {
             HStack(spacing: 6) {
-                Image(systemName: viewModel.selectedModelIcon)
-                Text(viewModel.selectedModelName)
+                Image(systemName: JobModelDisplayHelper.backendIcon(viewModel.settings.backendType))
+                    .foregroundStyle(AppColors.accent)
+                Text(JobModelDisplayHelper.currentEngineSummary(viewModel.settings))
                     .lineLimit(1)
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.secondary)
             }
-            .font(.caption.weight(.medium))
+            .font(AppTypography.chipLabel)
         }
         .menuStyle(.button)
         .buttonStyle(.bordered)
         .buttonBorderShape(.capsule)
-        .controlSize(.small)
         .fixedSize()
-        .help("切換新錄音與尚未開始工作的模型；執行中及檢查點續跑工作維持原設定")
+        .help(modelMenuHelpText)
         .accessibilityLabel("轉錄模型")
-        .accessibilityValue(viewModel.selectedModelName)
-        .accessibilityHint("點擊以切換 Qwen、Vertex AI 或 Google AI Studio")
+        .accessibilityValue(JobModelDisplayHelper.currentEngineSummary(viewModel.settings))
+        .accessibilityHint("切換新錄音與等待中工作的後端與模型")
     }
 
-    private func quickModelMenuIcon(
-        for choice: QuickTranscriptionChoice
-    ) -> String {
-        if viewModel.selectedQuickTranscriptionChoice == choice {
-            return "checkmark"
+    @ViewBuilder
+    private func choiceButton(for choice: QuickTranscriptionChoice) -> some View {
+        Button {
+            viewModel.selectQuickTranscriptionChoice(choice)
+        } label: {
+            if viewModel.selectedQuickTranscriptionChoice == choice {
+                Label(JobModelDisplayHelper.choiceMenuTitle(choice), systemImage: "checkmark")
+            } else {
+                Text(JobModelDisplayHelper.choiceMenuTitle(choice))
+            }
         }
-        return choice.backendType == .localQwen ? "apple.logo" : "cloud.fill"
+    }
+
+    private func isLocalModelSelected(_ modelID: String) -> Bool {
+        viewModel.settings.backendType == .localQwen && viewModel.settings.selectedModelID == modelID
+    }
+
+    private func selectLocalModel(_ modelID: String) {
+        if modelID == ASRModelDescriptor.appleSiliconBF16.id {
+            viewModel.selectQuickTranscriptionChoice(.qwen3ASR1_7BBF16)
+        } else {
+            viewModel.setSetting(\.backendType, to: .localQwen)
+            viewModel.setSelectedModelID(modelID)
+            viewModel.refreshEnvironment()
+        }
+    }
+
+    private var modelMenuHelpText: String {
+        if JobModelDisplayHelper.isDedicatedTranscribeModel(viewModel.settings) {
+            return "目前為專用轉錄模型：不使用錄音背景與自訂提示；切換不會影響執行中或續跑工作"
+        }
+        return "切換新錄音與尚未開始工作的模型；執行中及檢查點續跑工作維持原設定"
+    }
+}
+
+/// Toolbar overflow menu grouping lower-frequency utility actions.
+struct ToolbarToolsMenu: View {
+    @ObservedObject var viewModel: AppViewModel
+
+    var body: some View {
+        Menu {
+            Button {
+                viewModel.chooseAndMergeTranscriptFiles()
+            } label: {
+                Label("合併文字稿…", systemImage: "arrow.triangle.merge")
+            }
+
+            Divider()
+
+            Button {
+                viewModel.refreshEnvironment()
+                viewModel.isEnvironmentPresented = true
+            } label: {
+                Label("環境檢查…", systemImage: "checkmark.shield")
+            }
+
+            Button {
+                viewModel.refreshRecoveryScan()
+            } label: {
+                Label("復原掃描…", systemImage: "tray.and.arrow.down")
+            }
+        } label: {
+            Label("工具", systemImage: "wrench.and.screwdriver")
+        }
+        .help("工具：合併文字稿（⌘⇧M）、環境檢查與復原掃描")
+        .accessibilityLabel("工具選單")
+        .accessibilityHint("開啟合併文字稿、環境檢查與復原掃描選單")
     }
 }

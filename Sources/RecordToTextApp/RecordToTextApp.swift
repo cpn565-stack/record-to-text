@@ -66,6 +66,7 @@ struct RecordToTextApp: App {
     var body: some Scene {
         WindowGroup("record-to-text") {
             MainView(viewModel: viewModel)
+                .tint(AppColors.accent)
                 .frame(minWidth: 760, minHeight: 680)
                 .onAppear {
                     appDelegate.viewModel = viewModel
@@ -85,7 +86,7 @@ struct RecordToTextApp: App {
                     viewModel.startQueuedJobs()
                 }
                 .keyboardShortcut(.return, modifiers: .command)
-                .disabled(!viewModel.hasQueuedJobs)
+                .disabled(!viewModel.hasQueuedJobs || viewModel.isWaitingForStartup)
 
                 Button("取消目前工作") {
                     viewModel.cancelCurrentJob()
@@ -95,15 +96,32 @@ struct RecordToTextApp: App {
 
                 Divider()
 
+                Button("詞庫管理…") {
+                    viewModel.isGlossaryManagerPresented = true
+                }
+                .keyboardShortcut("l", modifiers: [.command, .shift])
+
+                Button("合併文字稿…") {
+                    viewModel.chooseAndMergeTranscriptFiles()
+                }
+                .keyboardShortcut("m", modifiers: [.command, .shift])
+
+                Divider()
+
                 Button("環境檢查…") {
                     viewModel.refreshEnvironment()
                     viewModel.isEnvironmentPresented = true
+                }
+
+                Button("復原掃描…") {
+                    viewModel.refreshRecoveryScan()
                 }
             }
         }
 
         Settings {
             SettingsView(viewModel: viewModel)
+                .tint(AppColors.accent)
         }
     }
 }

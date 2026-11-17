@@ -5,411 +5,482 @@ struct JobRowView: View {
     let job: TranscriptionJob
     @ObservedObject var viewModel: AppViewModel
     @Binding var isLogExpanded: Bool
+    var isPrimaryCompleted: Bool = false
+    var isCompletionHighlighted: Bool = false
+    var onQuickLook: ((URL) -> Void)? = nil
+
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorSchemeContrast) private var contrast
+
     @State private var isDeleteRecoveryPresented = false
     @State private var isDeleteJobPresented = false
-    @State private var trackedSegment: Int?
-    @State private var currentSegmentStartedAt = Date()
-    @State private var cloudResumeIsAvailable = false
     @State private var isPromptPresented = false
+
+    // Cached disk/checkpoint checks — never query FileManager inside `body`.
+    @State private var fileStatus: RecentJobFileStatus = .available
+    @State private var sourceIsAvailable = false
+    @State private var outputIsAvailable = false
+    @State private var cloudResumeIsAvailable = false
+    @State private var localQwenResumeIsAvailable = false
+
+    private var isRunningJob: Bool {
+        job.id == viewModel.activeJobID || (!job.stage.isTerminal && job.stage != .queued)
+    }
+
+    private var hasLogsOrDiagnostics: Bool {
+        !job.logLines.isEmpty || job.cloudDiagnostics != nil
+    }
 
     var body: some View {
         rowContent
-        .padding(12)
-        .background(
-            Color(nsColor: .controlBackgroundColor),
-            in: RoundedRectangle(cornerRadius: 10)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(
-                    Color(nsColor: .separatorColor).opacity(0.48),
-                    lineWidth: 1
+            .padding(AppSpacing.md)
+            .background(rowBackground, in: RoundedRectangle(cornerRadius: AppRadius.row))
+            .overlay {
+                RoundedRectangle(cornerRadius: AppRadius.row)
+                    .stroke(rowBorderColor, lineWidth: isCompletionHighlighted ? 1.5 : 1)
+            }
+            .overlay(alignment: .leading) {
+                if isRunningJob {
+                    Capsule()
+                        .fill(AppColors.accent)
+                        .frame(width: 3)
+                        .padding(.vertical, 10)
+                        .padding(.leading, 2)
+                        .allowsHitTesting(false)
+                }
+            }
+            .contextMenu {
+                contextMenuItems
+            }
+            .sheet(isPresented: $isPromptPresented) {
+                PromptPreviewView(
+                    prompt: viewModel.promptPreview(for: job.snapshot),
+                    termCount: job.snapshot.terms.count,
+                    isJobSnapshot: true
                 )
-        }
-        .overlay(alignment: .leading) {
-            if isActiveJob {
-                Capsule()
-                    .fill(Color.accentColor)
-                    .frame(width: 3)
-                    .padding(.vertical, 10)
-                    .padding(.leading, 2)
-                    .allowsHitTesting(false)
+                .tint(AppColors.accent)
             }
-        }
-        .contextMenu {
-            Button("檢視轉錄提示") { isPromptPresented = true }
-            if job.stage == .completed {
-                Button("打開文字檔") {
-                    viewModel.openOutput(for: job)
+            .confirmationDialog(
+                "刪除這筆工作的復原資料？",
+                isPresented: $isDeleteRecoveryPresented,
+                titleVisibility: .visible
+            ) {
+                Button("刪除復原資料", role: .destructive) {
+                    viewModel.deleteRecovery(for: job)
                 }
-                Button("在 Finder 顯示") {
-                    viewModel.revealOutput(for: job)
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("只會刪除 record-to-text 管理的復原資料，不會刪除原始錄音或文字稿。")
+            }
+            .confirmationDialog(
+                "從列表刪除這筆工作？",
+                isPresented: $isDeleteJobPresented,
+                titleVisibility: .visible
+            ) {
+                Button("刪除", role: .destructive) {
+                    viewModel.removeFinishedJob(job.id)
                 }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("只會從佇列／最近工作移除紀錄，不會刪除原始錄音或已輸出的文字檔。")
             }
-            if job.stage == .failed || job.stage == .cancelled || job.stage == .interrupted {
-                Button("用原工作設定重試") {
-                    viewModel.retryJob(job.id)
-                }
-                Button("用目前設定建立新工作") {
-                    viewModel.retryJob(job.id, usingCurrentSettings: true)
-                }
-            }
-            if !job.logLines.isEmpty || job.cloudDiagnostics != nil {
-                Button("複製除錯資訊") {
-                    JobDebugClipboard.copy(job)
-                }
-            }
-            if job.stage.isTerminal {
-                Divider()
-                Button("從列表刪除", role: .destructive) {
-                    isDeleteJobPresented = true
-                }
-            }
-        }
-        .sheet(isPresented: $isPromptPresented) {
-            PromptPreviewView(prompt: viewModel.promptPreview(for: job.snapshot),
-                termCount: job.snapshot.terms.count, isJobSnapshot: true)
-        }
-        .confirmationDialog(
-            "刪除這筆工作的復原資料？",
-            isPresented: $isDeleteRecoveryPresented,
-            titleVisibility: .visible
-        ) {
-            Button("刪除復原資料", role: .destructive) {
-                viewModel.deleteRecovery(for: job)
-            }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("只會刪除 record-to-text 管理的復原資料，不會刪除原始錄音或文字稿。")
-        }
-        .confirmationDialog(
-            "從列表刪除這筆工作？",
-            isPresented: $isDeleteJobPresented,
-            titleVisibility: .visible
-        ) {
-            Button("刪除", role: .destructive) {
-                viewModel.removeFinishedJob(job.id)
-            }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("只會從佇列／最近工作移除紀錄，不會刪除原始錄音或已輸出的文字檔。")
-        }
     }
 
-    private var isActiveJob: Bool {
-        job.id == viewModel.activeJobID
+    private var rowBackground: Color {
+        if isCompletionHighlighted {
+            return AppColors.success.opacity(0.08)
+        }
+        if isRunningJob {
+            return AppColors.accent.opacity(AppColors.activeRowTintOpacity)
+        }
+        return AppColors.cardBackground
     }
 
-    @ViewBuilder
+    private var rowBorderColor: Color {
+        if isCompletionHighlighted {
+            return AppColors.success.opacity(0.60)
+        }
+        return AppColors.hairlineBorder(colorSchemeContrast: contrast)
+    }
+
     private var rowContent: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            rowHeader
-            progressSection
-            failureSection
-            if let notice = job.cloudDiagnostics?.timestampNotice {
-                Text(notice)
-                    .font(.caption)
-                    .foregroundStyle(.orange)
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            headerRow
+
+            if isRunningJob {
+                ActiveJobProgressView(job: job, viewModel: viewModel)
             }
-            logSection
+
+            if job.stage == .completed {
+                completedOutputLine
+                completedWarningsCallout
+            } else if job.stage.isTerminal || job.isCloudRecoveryPaused {
+                terminalFailureOrRecoveryCallout
+            }
+
+            logAndDiagnosticsSection
         }
-        .onAppear(perform: rememberCurrentSegment)
+        .onAppear(perform: refreshCachedState)
+        .onChange(of: job.stage) { _, _ in refreshCachedState() }
+        .onChange(of: job.outputPath) { _, _ in refreshCachedState() }
+        .onChange(of: job.failure) { _, _ in refreshCachedState() }
         .task(id: job.failure) {
+            guard job.snapshot.backendType != .localQwen else {
+                cloudResumeIsAvailable = false
+                return
+            }
             let available = await viewModel.cloudResumeAvailability(job)
             guard !Task.isCancelled else { return }
             cloudResumeIsAvailable = available
         }
-        .onChange(of: job.progressUnit) { _, _ in
-            rememberCurrentSegment()
-        }
     }
 
-    private var rowHeader: some View {
-        HStack(alignment: .top, spacing: 11) {
-            Image(systemName: statusSymbol)
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(statusColor)
+    // MARK: - Header & Metadata
+
+    private var headerRow: some View {
+        HStack(alignment: .top, spacing: AppSpacing.md) {
+            statusIconView
                 .frame(width: 22, height: 22)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(job.displayName)
-                    .font(.subheadline.weight(.semibold))
+                    .font(AppTypography.rowTitle)
                     .lineLimit(1)
                     .truncationMode(.middle)
 
-                Text(job.snapshot.engineDisplayName)
+                metadataLine
+            }
+
+            Spacer(minLength: AppSpacing.sm)
+
+            HStack(spacing: AppSpacing.sm) {
+                if job.id == viewModel.activeJobID {
+                    JobElapsedView(startedAt: job.startedAt)
+                }
+                actionButtons
+            }
+            .fixedSize()
+        }
+    }
+
+    @ViewBuilder
+    private var statusIconView: some View {
+        let base = Image(systemName: statusSymbol)
+            .font(.system(size: 17, weight: .semibold))
+            .foregroundStyle(statusColor)
+
+        if isRunningJob && statusSymbol == "waveform.circle.fill" {
+            base.symbolEffect(.variableColor.iterative, isActive: !reduceMotion)
+        } else {
+            base
+        }
+    }
+
+    @ViewBuilder
+    private var metadataLine: some View {
+        let backendAndModel = JobModelDisplayHelper.displayBackendAndModel(for: job)
+        let fallbackHelp = JobModelDisplayHelper.fallbackTooltip(for: job)
+
+        if job.stage == .queued {
+            Text(queuedMetadataString(backendAndModel: backendAndModel))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        } else if isRunningJob {
+            Text(runningMetadataString(backendAndModel: backendAndModel))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .help(fallbackHelp ?? "")
+        } else if job.stage == .completed {
+            HStack(spacing: 0) {
+                Text(job.statusWithCompletionTime())
+                    .foregroundStyle(statusColor)
+                    .fontWeight(.medium)
+                Text(completedTrailingMetadata(backendAndModel: backendAndModel))
+                    .foregroundStyle(.secondary)
+            }
+            .font(.caption)
+            .lineLimit(2)
+            .help(fallbackHelp ?? "")
+        } else {
+            HStack(spacing: 0) {
+                Text(terminalStatusLabel)
+                    .foregroundStyle(statusColor)
+                    .fontWeight(.medium)
+                Text(nonCompletedTrailingMetadata(backendAndModel: backendAndModel))
+                    .foregroundStyle(.secondary)
+            }
+            .font(.caption)
+            .lineLimit(2)
+            .help(fallbackHelp ?? "")
+        }
+    }
+
+    private func queuedMetadataString(backendAndModel: String) -> String {
+        var parts = ["等待中", backendAndModel]
+        if let glossary = job.snapshot.glossaryName, !glossary.isEmpty {
+            parts.append("詞庫：\(glossary)")
+        }
+        if job.resumeFromRecoveryDirectory != nil {
+            parts.append("檢查點續跑")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private func runningMetadataString(backendAndModel: String) -> String {
+        var parts = [backendAndModel]
+        if let seg = CloudSegmentProgressState(unit: job.progressUnit) {
+            parts.append("第 \(seg.currentSegment)／\(seg.totalSegments) 段")
+        }
+        if let glossary = job.snapshot.glossaryName, !glossary.isEmpty {
+            parts.append("詞庫：\(glossary)")
+        }
+        if job.resumeFromRecoveryDirectory != nil {
+            parts.append("檢查點續跑")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private func completedTrailingMetadata(backendAndModel: String) -> String {
+        var parts: [String] = []
+        if let duration = JobModelDisplayHelper.formattedDuration(
+            startedAt: job.startedAt,
+            completedAt: job.completedAt
+        ) {
+            parts.append("耗時 \(duration)")
+        }
+        parts.append(backendAndModel)
+        if let tokens = job.cloudTokenSummary {
+            parts.append(tokens)
+        }
+        if let glossary = job.snapshot.glossaryName, !glossary.isEmpty {
+            parts.append("詞庫：\(glossary)")
+        }
+        return parts.isEmpty ? "" : " · " + parts.joined(separator: " · ")
+    }
+
+    private func nonCompletedTrailingMetadata(backendAndModel: String) -> String {
+        var parts = [backendAndModel]
+        if let tokens = job.cloudTokenSummary {
+            parts.append(tokens)
+        }
+        if let glossary = job.snapshot.glossaryName, !glossary.isEmpty {
+            parts.append("詞庫：\(glossary)")
+        }
+        return " · " + parts.joined(separator: " · ")
+    }
+
+    private var terminalStatusLabel: String {
+        if job.serviceRecovery?.state == .paused {
+            return "Google 忙碌，已暫停"
+        }
+        if job.networkRecovery?.state == .paused {
+            return "網路恢復逾限，已暫停"
+        }
+        return job.statusWithCompletionTime()
+    }
+
+    // MARK: - Completed Output & Warning Callouts
+
+    @ViewBuilder
+    private var completedOutputLine: some View {
+        if let outputPath = job.outputPath {
+            let outputName = URL(fileURLWithPath: outputPath).lastPathComponent
+            HStack(spacing: 5) {
+                Image(systemName: "doc.text")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                if outputIsAvailable {
+                    Button {
+                        viewModel.openOutput(for: job)
+                    } label: {
+                        Text("輸出：\(outputName)")
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .buttonStyle(.plain)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                if job.resumeFromRecoveryDirectory != nil {
-                    Text("檢查點續跑：沿用原後端與模型")
-                        .font(.caption2).foregroundStyle(.secondary)
-                }
-
-                HStack(spacing: 7) {
-                    Text(job.serviceRecovery?.state == .paused ? "Google 忙碌，已暫停" : job.networkRecovery?.state == .paused ? "網路恢復逾限，已暫停" : job.statusWithCompletionTime())
+                    .help(outputPath)
+                } else {
+                    Text("輸出：\(outputName)")
                         .font(.caption)
-                        .foregroundStyle(statusColor)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            .padding(.leading, 34)
+        }
+    }
 
-                    // Only show a live timer while the job is running.
-                    // Completed jobs stay as plain「完成」with no counting clock.
-                    if job.id == viewModel.activeJobID {
-                        JobElapsedView(startedAt: job.startedAt)
+    @ViewBuilder
+    private var completedWarningsCallout: some View {
+        let gapMessage = job.failure?.userMessage
+        let timestampNotice = job.cloudDiagnostics?.timestampNotice
+        let missingFileNotice = fileStatus.displayName
+        let hasWarnings = gapMessage != nil || timestampNotice != nil || missingFileNotice != nil
+
+        if hasWarnings {
+            InlineCallout(color: AppColors.warning) {
+                VStack(alignment: .leading, spacing: 6) {
+                    if let missingFileNotice {
+                        Label(missingFileNotice, systemImage: "folder.badge.questionmark")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(AppColors.warning)
                     }
-                    if let cloudModel = job.cloudModelSummary {
-                        Text("・\(cloudModel)")
-                            .font(.caption.monospaced())
+                    if let gapMessage {
+                        Label(gapMessage, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(AppColors.warning)
+                    }
+                    if let timestampNotice {
+                        Label(timestampNotice, systemImage: "clock.badge.exclamationmark")
+                            .font(.caption)
+                            .foregroundStyle(AppColors.warning)
+                    }
+                    if job.failure?.recoveryDirectory != nil {
+                        recoveryArtifactButtons
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Failed / Cancelled / Interrupted Callouts
+
+    @ViewBuilder
+    private var terminalFailureOrRecoveryCallout: some View {
+        let hasResultUnknown = job.networkRecovery?.resultUnknown == true
+            || job.serviceRecovery?.resultUnknown == true
+
+        if job.failure != nil || hasResultUnknown {
+            let calloutColor = job.stage == .failed ? AppColors.danger : AppColors.warning
+            InlineCallout(color: calloutColor) {
+                VStack(alignment: .leading, spacing: 6) {
+                    if let failure = job.failure {
+                        Text(failure.userMessage)
+                            .font(.caption)
+                            .foregroundStyle(job.stage == .failed ? AppColors.danger : .primary)
+                    }
+                    if hasResultUnknown {
+                        Text("先前請求結果未知，重送未完成片段可能再次計費。")
+                            .font(.caption2)
                             .foregroundStyle(.secondary)
-                            .lineLimit(1)
                     }
-                    if let tokenSummary = job.cloudTokenSummary {
-                        Text("・\(tokenSummary)")
+                    if job.failure?.recoveryDirectory != nil {
+                        recoveryArtifactButtons
+                    }
+                }
+            }
+        }
+    }
+
+    private var recoveryArtifactButtons: some View {
+        FlowLayout(horizontalSpacing: AppSpacing.sm, verticalSpacing: 6) {
+            if job.failure?.partialTranscriptPath != nil {
+                Button("打開未完成稿") {
+                    viewModel.openPartialTranscript(for: job)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+
+            if localQwenResumeIsAvailable {
+                Button("從已完成 Qwen chunk 續跑") {
+                    viewModel.resumeLocalQwenJobFromCheckpoint(job.id)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+
+            Button("在 Finder 顯示復原資料") {
+                viewModel.revealRecovery(for: job)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+
+            Button("刪除保留資料…", role: .destructive) {
+                isDeleteRecoveryPresented = true
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+    }
+
+    // MARK: - Logs & Diagnostics
+
+    @ViewBuilder
+    private var logAndDiagnosticsSection: some View {
+        if hasLogsOrDiagnostics {
+            if job.stage == .completed {
+                // Completed rows omit noisy summary text unless explicitly expanded via `⋯`.
+                if isLogExpanded {
+                    VStack(alignment: .leading, spacing: 6) {
+                        logHeaderControls
+                        expandedDebugPanel
+                    }
+                }
+            } else if job.stage != .queued || isLogExpanded {
+                VStack(alignment: .leading, spacing: 6) {
+                    if isRunningJob, let status = JobDebugClipboard.statusSummary(from: job.logLines) {
+                        Text(status)
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                            .lineLimit(1)
+                            .lineLimit(3)
+                    }
+
+                    logHeaderControls
+
+                    if isLogExpanded {
+                        expandedDebugPanel
                     }
                 }
             }
-
-            Spacer()
-            actionButtons
         }
     }
 
-    @ViewBuilder
-    private var progressSection: some View {
-        if let recovery = job.serviceRecovery, recovery.state == .coolingDown || recovery.state == .retrying {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(recovery.message).font(.caption)
-                if let retryAt = recovery.nextRetryAt {
-                    TimelineView(.periodic(from: .now, by: 1)) { context in
-                        Text("約 \(max(0, Int(ceil(retryAt.timeIntervalSince(context.date))))) 秒後再嘗試；已發送 \(recovery.attempts)／4 次")
-                            .font(.caption2).foregroundStyle(.secondary)
-                    }
-                }
-            }
-        } else if let recovery = job.networkRecovery, recovery.state == .waiting || recovery.state == .retrying {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(recovery.message).font(.caption)
-                if recovery.resultUnknown {
-                    Text("前次請求的結果未知；重送可能產生重複費用。")
-                        .font(.caption2).foregroundStyle(.secondary)
-                }
-                if let retryAt = recovery.nextRetryAt {
-                    TimelineView(.periodic(from: .now, by: 1)) { context in
-                        Text("約 \(max(0, Int(ceil(retryAt.timeIntervalSince(context.date))))) 秒後重試")
-                            .font(.caption2).foregroundStyle(.secondary)
-                    }
-                }
-                if recovery.state == .waiting, job.id == viewModel.activeJobID {
-                    Button("立刻重試") { viewModel.retryNetworkImmediately(job.id) }
-                        .controlSize(.small)
-                        .disabled(!viewModel.canRetryNetworkImmediately(job.id))
-                        .help("跳過目前的網路等待倒數，重新嘗試目前片段")
-                }
-            }
-        } else if job.snapshot.backendType != .localQwen,
-           job.id == viewModel.activeJobID,
-           let segmentProgress = CloudSegmentProgressState(
-               unit: job.progressUnit
-           )
-        {
-            cloudSegmentProgress(segmentProgress)
-        } else if let current = job.progressCurrent,
-                  let total = job.progressTotal,
-                  total > 0 {
-            ProgressView(value: min(current, total), total: total) {
-                Text(progressLabel(current: current, total: total, unit: job.progressUnit))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            .animation(.easeInOut(duration: 0.2), value: current)
-        } else if job.id == viewModel.activeJobID {
-            ProgressView()
-                .controlSize(.small)
-                .accessibilityLabel(job.stage.displayName)
-        }
-    }
-
-    @ViewBuilder
-    private func cloudSegmentProgress(
-        _ progress: CloudSegmentProgressState
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            BreathingProgressBar(
-                completedSegments: progress.completedSegments,
-                totalSegments: progress.totalSegments,
-                currentSegmentStartedAt: currentSegmentStartedAt,
-                estimatedSegmentSeconds: estimatedSegmentSeconds,
-                isCurrentSegmentInFlight: progress.phase == .preparing
-                    || progress.phase == .waiting
-            )
-
-            Text(cloudSegmentProgressLabel(progress))
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(cloudSegmentProgressLabel(progress))
-    }
-
-    private func cloudSegmentProgressLabel(
-        _ progress: CloudSegmentProgressState
-    ) -> String {
-        let completed = "已完成 \(progress.completedSegments)／\(progress.totalSegments) 段"
-        switch progress.phase {
-        case .preparing:
-            return "正在準備第 \(progress.currentSegment)／\(progress.totalSegments) 段 · \(completed)"
-        case .waiting:
-            return "Gemini 轉錄中 · 第 \(progress.currentSegment)／\(progress.totalSegments) 段 · \(completed)"
-        case .completed:
-            return "Gemini \(completed)"
-        case .postProcessing:
-            return "所有分段已完成 · \(job.stage.displayName) · \(completed)"
-        }
-    }
-
-    private var estimatedSegmentSeconds: TimeInterval {
-        let latencies = job.resolvedCloudSegmentMetadata.compactMap(\.latencySeconds)
-            .filter { $0 > 1 }
-        if let median = Self.median(latencies) {
-            return max(median, 20)
-        }
-        return 90
-    }
-
-    private func rememberCurrentSegment() {
-        let segment = CloudSegmentProgressState(unit: job.progressUnit)?.currentSegment
-        guard segment != trackedSegment else {
-            return
-        }
-        trackedSegment = segment
-        currentSegmentStartedAt = Date()
-    }
-
-    private static func median(_ values: [Double]) -> Double? {
-        guard !values.isEmpty else {
-            return nil
-        }
-        let sorted = values.sorted()
-        return sorted[sorted.count / 2]
-    }
-
-    @ViewBuilder
-    private var failureSection: some View {
-        if job.snapshot.backendType != .localQwen, job.stage.isTerminal,
-           job.stage != .completed || job.hasPendingGapRecovery {
-            HStack {
-                Button(viewModel.cloudResendStatus(job.id) ?? (cloudResumeIsAvailable ? "重送未完成片段" : "重新送出")) {
-                    viewModel.resendCloudJob(job.id)
-                }
-                .buttonStyle(.link)
-                .disabled(viewModel.cloudResendStatus(job.id) != nil)
-                if job.isCloudRecoveryPaused {
-                    Button("取消這筆工作") { viewModel.cancelNetworkPausedJob(job.id) }.buttonStyle(.link)
-                }
-            }
-        }
-        if job.networkRecovery?.resultUnknown == true || job.serviceRecovery?.resultUnknown == true {
-            Text("先前請求結果未知，重送未完成片段可能再次計費。")
-                .font(.caption2).foregroundStyle(.secondary)
-        }
-        if let failure = job.failure {
-            VStack(alignment: .leading, spacing: 5) {
-                Text(failure.userMessage)
-                    .font(.caption)
-                    .foregroundStyle(
-                        job.stage == .failed || job.stage == .interrupted
-                            ? Color.red
-                            : Color.secondary
+    private var logHeaderControls: some View {
+        HStack(spacing: AppSpacing.md) {
+            Button {
+                toggleLogExpansion()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: isLogExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption2.weight(.semibold))
+                    Text(
+                        JobDebugClipboard.logToggleTitle(
+                            isExpanded: isLogExpanded,
+                            lineCount: job.logLines.count,
+                            hasDiagnostics: job.cloudDiagnostics != nil
+                        )
                     )
-                if failure.recoveryDirectory != nil {
-                    HStack(spacing: 12) {
-                        if failure.partialTranscriptPath != nil {
-                            Button("打開未完成稿") {
-                                viewModel.openPartialTranscript(for: job)
-                            }
-                        }
-
-                        if viewModel.canResumeLocalQwenJob(job) {
-                            Button("從已完成 Qwen chunk 續跑") {
-                                viewModel.resumeLocalQwenJobFromCheckpoint(job.id)
-                            }
-                            .buttonStyle(.link)
-                        }
-
-                        Button("在 Finder 顯示復原資料") {
-                            viewModel.revealRecovery(for: job)
-                        }
-                        .buttonStyle(.link)
-
-                        Button("刪除保留資料…", role: .destructive) {
-                            isDeleteRecoveryPresented = true
-                        }
-                        .buttonStyle(.link)
-                    }
-                    .font(.caption)
                 }
             }
-            .padding(9)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                (job.stage == .failed || job.stage == .interrupted
-                    ? Color.red
-                    : Color.orange)
-                    .opacity(0.07),
-                in: RoundedRectangle(cornerRadius: 7)
-            )
+            .buttonStyle(.link)
+            .font(.caption)
+            .help(isLogExpanded ? "收合執行日誌與分段診斷" : "在畫面上展開查看完整執行日誌與分段診斷")
+            .accessibilityLabel(isLogExpanded ? "收合日誌" : "展開日誌")
+
+            Button("複製除錯資訊") {
+                JobDebugClipboard.copy(job)
+            }
+            .buttonStyle(.link)
+            .font(.caption)
+            .help("複製完整執行日誌、模型與失敗訊息，方便貼給除錯用")
         }
     }
 
-    @ViewBuilder
-    private var logSection: some View {
-        if !job.logLines.isEmpty || job.cloudDiagnostics != nil {
-            VStack(alignment: .leading, spacing: 6) {
-                if let status = JobDebugClipboard.statusSummary(from: job.logLines) {
-                    Text(status)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(4)
-                }
-
-                HStack(spacing: 12) {
-                    Button {
-                        toggleLogExpansion()
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: isLogExpanded ? "chevron.down" : "chevron.right")
-                                .font(.caption2.weight(.semibold))
-                            Text(JobDebugClipboard.logToggleTitle(
-                                isExpanded: isLogExpanded,
-                                lineCount: job.logLines.count,
-                                hasDiagnostics: job.cloudDiagnostics != nil
-                            ))
-                        }
-                    }
-                    .buttonStyle(.link)
-                    .font(.caption)
-                    .help(isLogExpanded ? "收合執行日誌與分段診斷" : "在畫面上展開查看完整執行日誌與分段診斷")
-                    .accessibilityLabel(isLogExpanded ? "收合日誌" : "展開日誌")
-
-                    Button("複製除錯資訊") {
-                        JobDebugClipboard.copy(job)
-                    }
-                    .buttonStyle(.link)
-                    .font(.caption)
-                    .help("複製完整執行日誌、模型與失敗訊息，方便貼給除錯用")
-                }
-
-                if isLogExpanded {
-                    ExpandableDebugTextPanel(
-                        text: JobDebugClipboard.expandedContent(for: job),
-                        showJumpToLatest: job.logLines.count > 4
-                    )
-                    .padding(.top, 2)
-                }
-            }
-        }
+    private var expandedDebugPanel: some View {
+        let isDev = viewModel.settings.developerMode
+        return ExpandableDebugTextPanel(
+            text: JobDebugClipboard.expandedContent(for: job),
+            showJumpToLatest: job.logLines.count > 4,
+            developerJobID: isDev ? job.id : nil,
+            developerBadges: isDev ? JobDebugClipboard.developerBadges(for: job) : []
+        )
+        .padding(.top, 2)
     }
 
     private func toggleLogExpansion() {
@@ -422,6 +493,8 @@ struct JobRowView: View {
         }
     }
 
+    // MARK: - Explicit Action Buttons & Overflow Menu
+
     @ViewBuilder
     private var actionButtons: some View {
         if job.id == viewModel.activeJobID {
@@ -429,111 +502,381 @@ struct JobRowView: View {
                 viewModel.cancelCurrentJob()
             } label: {
                 Image(systemName: "stop.fill")
+                    .foregroundStyle(AppColors.danger)
             }
-            .buttonStyle(.borderless)
-            .foregroundStyle(.red)
-            .help("取消目前工作")
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("取消目前工作（⌘.）")
+            .accessibilityLabel("取消目前工作")
         } else if job.stage == .queued {
+            if job.sourceSlice == nil {
+                Menu {
+                    Button {
+                        viewModel.splitQueuedAudioFileInHalf(job.id)
+                    } label: {
+                        Label("切分再依序轉", systemImage: "scissors")
+                    }
+                    Button {
+                        isPromptPresented = true
+                    } label: {
+                        Label("檢視轉錄提示", systemImage: "doc.text.magnifyingglass")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .frame(width: 24)
+                .help("更多佇列操作")
+            }
+
             Button {
                 viewModel.removeQueuedJob(job.id)
             } label: {
                 Image(systemName: "xmark")
             }
             .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
             .help("從佇列移除")
+            .accessibilityLabel("從佇列移除")
         } else if job.stage == .completed {
-            Button {
-                viewModel.revealOutput(for: job)
-            } label: {
-                Image(systemName: "folder")
+            TranscriptQuickLookButton(
+                outputPath: job.outputPath,
+                isOutputAvailable: outputIsAvailable
+            ) { url in
+                onQuickLook?(url)
             }
-            .buttonStyle(.borderless)
-            .help("在 Finder 顯示")
 
-            Button {
-                viewModel.openOutput(for: job)
-            } label: {
-                Image(systemName: "doc.text")
+            if isPrimaryCompleted && outputIsAvailable {
+                Button("打開文字檔") {
+                    viewModel.openOutput(for: job)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            } else {
+                Button("打開文字檔") {
+                    viewModel.openOutput(for: job)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(!outputIsAvailable)
             }
-            .buttonStyle(.borderless)
-            .help("打開文字檔")
 
-            Button(role: .destructive) {
-                isDeleteJobPresented = true
-            } label: {
-                Image(systemName: "trash")
+            if job.hasPendingGapRecovery && job.snapshot.backendType != .localQwen {
+                let resendStatus = viewModel.cloudResendStatus(job.id)
+                Button(resendStatus ?? (cloudResumeIsAvailable ? "重送未完成片段" : "重新送出")) {
+                    viewModel.resendCloudJob(job.id)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(resendStatus != nil)
             }
-            .buttonStyle(.borderless)
-            .help("從列表刪除這筆工作")
+
+            completedOverflowMenu
         } else if job.stage == .failed || job.stage == .cancelled || job.stage == .interrupted {
+            terminalPrimaryRetryButton
+
+            if job.isCloudRecoveryPaused {
+                Button("取消工作") {
+                    viewModel.cancelNetworkPausedJob(job.id)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+
+            terminalOverflowMenu
+        }
+    }
+
+    @ViewBuilder
+    private var terminalPrimaryRetryButton: some View {
+        if job.snapshot.backendType != .localQwen {
+            let resendStatus = viewModel.cloudResendStatus(job.id)
+            Button {
+                viewModel.resendCloudJob(job.id)
+            } label: {
+                Label(
+                    resendStatus ?? (cloudResumeIsAvailable ? "重送未完成片段" : "重試"),
+                    systemImage: "arrow.clockwise"
+                )
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(resendStatus != nil)
+        } else if localQwenResumeIsAvailable {
+            Button {
+                viewModel.resumeLocalQwenJobFromCheckpoint(job.id)
+            } label: {
+                Label("從檢查點續跑", systemImage: "arrow.clockwise")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        } else {
             Button {
                 viewModel.retryJob(job.id)
             } label: {
-                Image(systemName: "arrow.clockwise")
+                Label("重試", systemImage: "arrow.clockwise")
             }
-            .buttonStyle(.borderless)
-            .help("沿用原工作設定重試")
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+    }
+
+    private var completedOverflowMenu: some View {
+        Menu {
+            if outputIsAvailable {
+                Button {
+                    viewModel.revealOutput(for: job)
+                } label: {
+                    Label("在 Finder 顯示", systemImage: "folder")
+                }
+            }
+
+            if hasLogsOrDiagnostics {
+                Button {
+                    toggleLogExpansion()
+                } label: {
+                    Label(
+                        isLogExpanded ? "收合日誌／診斷" : "展開日誌／診斷",
+                        systemImage: "text.alignleft"
+                    )
+                }
+
+                Button {
+                    JobDebugClipboard.copy(job)
+                } label: {
+                    Label("複製除錯資訊", systemImage: "doc.on.doc")
+                }
+            }
+
+            Button {
+                isPromptPresented = true
+            } label: {
+                Label("檢視轉錄提示", systemImage: "doc.text.magnifyingglass")
+            }
+
+            if sourceIsAvailable {
+                Button {
+                    viewModel.retryJob(job.id, usingCurrentSettings: true)
+                } label: {
+                    Label("用目前設定建立新工作", systemImage: "plus.circle")
+                }
+            }
+
+            Divider()
 
             Button(role: .destructive) {
                 isDeleteJobPresented = true
             } label: {
-                Image(systemName: "trash")
+                Label("從列表刪除", systemImage: "trash")
             }
-            .buttonStyle(.borderless)
-            .help("從列表刪除這筆工作")
+        } label: {
+            Image(systemName: "ellipsis")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .frame(width: 24)
+        .help("更多操作")
+        .accessibilityLabel("更多操作")
+    }
+
+    private var terminalOverflowMenu: some View {
+        Menu {
+            if job.snapshot.backendType == .localQwen && localQwenResumeIsAvailable {
+                Button {
+                    viewModel.retryJob(job.id)
+                } label: {
+                    Label("用原工作設定從頭重試", systemImage: "arrow.clockwise")
+                }
+            }
+
+            if sourceIsAvailable {
+                Button {
+                    viewModel.retryJob(job.id, usingCurrentSettings: true)
+                } label: {
+                    Label("用目前設定建立新工作", systemImage: "plus.circle")
+                }
+            }
+
+            Button {
+                isPromptPresented = true
+            } label: {
+                Label("檢視轉錄提示", systemImage: "doc.text.magnifyingglass")
+            }
+
+            if hasLogsOrDiagnostics {
+                Button {
+                    toggleLogExpansion()
+                } label: {
+                    Label(
+                        isLogExpanded ? "收合日誌／診斷" : "展開日誌／診斷",
+                        systemImage: "text.alignleft"
+                    )
+                }
+
+                Button {
+                    JobDebugClipboard.copy(job)
+                } label: {
+                    Label("複製除錯資訊", systemImage: "doc.on.doc")
+                }
+            }
+
+            Divider()
+
+            Button(role: .destructive) {
+                isDeleteJobPresented = true
+            } label: {
+                Label("從列表刪除", systemImage: "trash")
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .frame(width: 24)
+        .help("更多操作")
+        .accessibilityLabel("更多操作")
+    }
+
+    @ViewBuilder
+    private var contextMenuItems: some View {
+        Button("檢視轉錄提示") {
+            isPromptPresented = true
+        }
+        if job.stage == .completed {
+            if let outputPath = job.outputPath, outputIsAvailable {
+                Button("快速預覽（Quick Look）") {
+                    onQuickLook?(URL(fileURLWithPath: outputPath))
+                }
+                Button("打開文字檔") {
+                    viewModel.openOutput(for: job)
+                }
+                Button("在 Finder 顯示") {
+                    viewModel.revealOutput(for: job)
+                }
+            }
+            if sourceIsAvailable {
+                Button("用目前設定建立新工作") {
+                    viewModel.retryJob(job.id, usingCurrentSettings: true)
+                }
+            }
+        }
+        if job.stage == .failed || job.stage == .cancelled || job.stage == .interrupted {
+            Button("用原工作設定重試") {
+                viewModel.retryJob(job.id)
+            }
+            if sourceIsAvailable {
+                Button("用目前設定建立新工作") {
+                    viewModel.retryJob(job.id, usingCurrentSettings: true)
+                }
+            }
+        }
+        if hasLogsOrDiagnostics {
+            Button(isLogExpanded ? "收合日誌／診斷" : "展開日誌／診斷") {
+                toggleLogExpansion()
+            }
+            Button("複製除錯資訊") {
+                JobDebugClipboard.copy(job)
+            }
+        }
+        if job.stage.isTerminal {
+            Divider()
+            Button("從列表刪除", role: .destructive) {
+                isDeleteJobPresented = true
+            }
         }
     }
 
-    private func progressLabel(current: Double, total: Double, unit: String?) -> String {
-        let rawUnit = unit ?? ""
-        if rawUnit == "percent" || rawUnit.hasPrefix("percent|") {
-            let percent = Int(min(max(current, 0), total).rounded())
-            let parts = rawUnit.split(separator: "|", omittingEmptySubsequences: false)
-            if parts.count == 3, let segment = Int(parts[1]), let count = Int(parts[2]) {
-                return "整體 \(percent)% · 第 \(segment)／\(count) 段"
+    // MARK: - Cached State & Status Styling
+
+    private func refreshCachedState() {
+        let sourceExists = FileManager.default.fileExists(atPath: job.sourcePath)
+        sourceIsAvailable = sourceExists
+        if job.stage == .completed {
+            let outExists = job.outputPath.map { FileManager.default.fileExists(atPath: $0) } ?? false
+            outputIsAvailable = outExists
+            switch (sourceExists, outExists) {
+            case (false, false):
+                fileStatus = .sourceAndOutputMissing
+            case (false, true):
+                fileStatus = .sourceMissing
+            case (true, false):
+                fileStatus = .outputMissing
+            case (true, true):
+                fileStatus = .available
             }
-            return "整體 \(percent)%"
+        } else {
+            outputIsAvailable = false
+            fileStatus = .available
         }
-        if rawUnit == "segments" {
-            return "第 \(Int(current.rounded()))／\(Int(total.rounded())) 段"
-        }
-        if rawUnit.isEmpty {
-            return "\(Int(current.rounded())) / \(Int(total.rounded()))"
-        }
-        return "\(Int(current.rounded())) / \(Int(total.rounded())) \(rawUnit)"
+        localQwenResumeIsAvailable = viewModel.canResumeLocalQwenJob(job)
     }
 
     private var statusSymbol: String {
-        if job.stage == .completed && job.resolvedOutputCompleteness == .hasGaps {
-            return "exclamationmark.triangle.fill"
+        if isRunningJob {
+            if job.serviceRecovery?.state == .coolingDown || job.networkRecovery?.state == .waiting {
+                return "pause.circle.fill"
+            }
+            if job.serviceRecovery?.state == .retrying || job.networkRecovery?.state == .retrying {
+                return "arrow.clockwise.circle.fill"
+            }
+            return "waveform.circle.fill"
+        }
+        if job.isCloudRecoveryPaused {
+            return "pause.circle.fill"
+        }
+        if job.stage == .completed {
+            if fileStatus == .outputMissing || fileStatus == .sourceAndOutputMissing {
+                return "folder.badge.questionmark"
+            }
+            if job.resolvedOutputCompleteness == .hasGaps {
+                return "exclamationmark.triangle.fill"
+            }
+            return "checkmark.circle.fill"
         }
         switch job.stage {
-        case .completed:
-            return "checkmark.circle.fill"
-        case .failed:
-            return "exclamationmark.circle.fill"
-        case .cancelled, .interrupted:
-            return "minus.circle.fill"
         case .queued:
             return "clock"
+        case .failed:
+            return "exclamationmark.circle.fill"
+        case .interrupted:
+            return "arrow.clockwise.circle.fill"
+        case .cancelled:
+            return "minus.circle.fill"
         default:
             return "waveform.circle.fill"
         }
     }
 
     private var statusColor: Color {
-        if job.stage == .completed && job.resolvedOutputCompleteness == .hasGaps { return .orange }
+        if isRunningJob {
+            if job.serviceRecovery?.state == .coolingDown
+                || job.serviceRecovery?.state == .retrying
+                || job.networkRecovery?.state == .waiting
+                || job.networkRecovery?.state == .retrying
+            {
+                return AppColors.warning
+            }
+            return AppColors.accent
+        }
+        if job.isCloudRecoveryPaused {
+            return AppColors.warning
+        }
+        if job.stage == .completed {
+            if fileStatus != .available || job.resolvedOutputCompleteness == .hasGaps {
+                return AppColors.warning
+            }
+            return AppColors.success
+        }
         switch job.stage {
-        case .completed:
-            return .green
+        case .queued, .cancelled:
+            return AppColors.neutral
         case .failed:
-            return .red
-        case .cancelled, .interrupted:
-            return .secondary
-        case .queued:
-            return .secondary
+            return AppColors.danger
+        case .interrupted:
+            return AppColors.warning
         default:
-            return .accentColor
+            return AppColors.accent
         }
     }
 }

@@ -29,28 +29,60 @@ struct JobLogExpansionState: Equatable, Sendable {
 struct ExpandableDebugTextPanel: View {
     let text: String
     let showJumpToLatest: Bool
+    var developerJobID: UUID? = nil
+    var developerBadges: [String] = []
+
+    @Environment(\.colorSchemeContrast) private var contrast
+    @State private var copiedUUID = false
 
     var body: some View {
         ScrollViewReader { proxy in
             VStack(alignment: .leading, spacing: 6) {
-                if showJumpToLatest {
-                    HStack {
-                        Text("完整執行日誌")
+                if showJumpToLatest || developerJobID != nil || !developerBadges.isEmpty {
+                    HStack(spacing: AppSpacing.sm) {
+                        Text("完整執行日誌與診斷")
                             .font(.caption2.weight(.semibold))
                             .foregroundStyle(.secondary)
-                        Spacer()
-                        Button("跳至最新") {
-                            proxy.scrollTo("debug-panel-bottom", anchor: .bottom)
+
+                        if let developerJobID {
+                            Button {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(developerJobID.uuidString, forType: .string)
+                                copiedUUID = true
+                            } label: {
+                                HStack(spacing: 3) {
+                                    Image(systemName: copiedUUID ? "checkmark" : "doc.on.doc")
+                                    Text(copiedUUID ? "已複製 UUID" : String(developerJobID.uuidString.prefix(8)))
+                                        .font(AppTypography.monoDetail)
+                                }
+                            }
+                            .buttonStyle(.borderless)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .help("複製工作 UUID：\(developerJobID.uuidString)")
                         }
-                        .buttonStyle(.link)
-                        .font(.caption2)
-                        .help("捲動到最新一則日誌")
+
+                        ForEach(developerBadges, id: \.self) { badge in
+                            StatusBadge(text: badge, color: AppColors.neutral)
+                        }
+
+                        Spacer()
+
+                        if showJumpToLatest {
+                            Button("跳至最新") {
+                                proxy.scrollTo("debug-panel-bottom", anchor: .bottom)
+                            }
+                            .buttonStyle(.link)
+                            .font(.caption2)
+                            .help("捲動到最新一則日誌")
+                        }
                     }
                 }
+
                 ScrollView(.vertical) {
                     VStack(alignment: .leading, spacing: 0) {
                         Text(text)
-                            .font(.caption.monospaced())
+                            .font(AppTypography.monoDetail)
                             .foregroundStyle(.primary)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -59,16 +91,16 @@ struct ExpandableDebugTextPanel: View {
                             .frame(height: 1)
                             .id("debug-panel-bottom")
                     }
-                    .padding(8)
+                    .padding(AppSpacing.sm)
                 }
                 .frame(maxHeight: 220)
                 .background(
-                    Color(nsColor: .textBackgroundColor).opacity(0.65),
-                    in: RoundedRectangle(cornerRadius: 7)
+                    AppColors.insetSurface,
+                    in: RoundedRectangle(cornerRadius: AppRadius.row)
                 )
                 .overlay {
-                    RoundedRectangle(cornerRadius: 7)
-                        .stroke(Color(nsColor: .separatorColor).opacity(0.45), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: AppRadius.row)
+                        .stroke(AppColors.hairlineBorder(colorSchemeContrast: contrast), lineWidth: 1)
                 }
             }
         }
@@ -207,6 +239,35 @@ enum JobDebugClipboard {
             lines.append(contentsOf: job.logLines)
         }
         return lines.joined(separator: "\n")
+    }
+
+    static func developerBadges(for job: TranscriptionJob) -> [String] {
+        let metadata = job.resolvedCloudSegmentMetadata
+        guard !metadata.isEmpty else { return [] }
+        var badges: [String] = []
+        let retries = CloudTranscriptionMetadataAggregator.totalRetryCount(metadata)
+        if retries > 0 {
+            badges.append("重試 \(retries)")
+        }
+        if let usage = CloudTranscriptionMetadataAggregator.totalUsage(metadata),
+           let cost = usage.estimatedCostUSD(modelID: job.snapshot.requestedModelID)
+        {
+            badges.append("預估 \(CloudUsageMetadata.formatCostUSD(cost))")
+        }
+        return badges
+    }
+
+    static func developerBadges(for summary: RecentJobSummary) -> [String] {
+        var badges: [String] = []
+        if let retries = summary.cloudRetryCount, retries > 0 {
+            badges.append("重試 \(retries)")
+        }
+        if let usage = summary.cloudUsage,
+           let cost = usage.estimatedCostUSD(modelID: summary.effectiveModelIDs?.first ?? summary.modelID)
+        {
+            badges.append("預估 \(CloudUsageMetadata.formatCostUSD(cost))")
+        }
+        return badges
     }
 
     private static var bundleVersionLabel: String {

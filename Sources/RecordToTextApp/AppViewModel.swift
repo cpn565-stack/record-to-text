@@ -43,6 +43,7 @@ final class AppViewModel: ObservableObject {
         didSet {
             jobsMutationRevision &+= 1
             refreshQueueSleep()
+            refreshDockBadge()
         }
     }
     @Published private(set) var recentJobs: [RecentJobSummary] {
@@ -344,6 +345,7 @@ final class AppViewModel: ObservableObject {
         self.legacyLedgerCredentialMigrationPending = hasLegacyLedgerCredential
         self.googleAIStudioCredentialStorageState =
             loadedSettings.googleAIStudioAPIKey == nil ? .absent : .memoryOnly
+        refreshDockBadge()
 
         if !startupMessages.isEmpty {
             self.alert = UserFacingAlert(
@@ -565,6 +567,14 @@ final class AppViewModel: ObservableObject {
 
     var hasQueuedJobs: Bool {
         jobs.contains(where: { $0.stage == .queued })
+    }
+
+    var queuedJobCount: Int {
+        jobs.reduce(0) { $0 + ($1.stage == .queued ? 1 : 0) }
+    }
+
+    var pendingWorkCount: Int {
+        jobs.reduce(0) { $0 + ($1.stage.isTerminal ? 0 : 1) }
     }
 
     var splittableQueuedJobs: [TranscriptionJob] {
@@ -1015,6 +1025,15 @@ final class AppViewModel: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([paths.root])
     }
 
+    func revealDefaultOutputDirectory() {
+        let outputURL = URL(fileURLWithPath: settings.defaultOutputDirectory, isDirectory: true)
+        try? fileManager.createDirectory(
+            at: outputURL,
+            withIntermediateDirectories: true
+        )
+        NSWorkspace.shared.activateFileViewerSelecting([outputURL])
+    }
+
     // MARK: - Glossaries
 
     @discardableResult
@@ -1292,6 +1311,15 @@ final class AppViewModel: ObservableObject {
         hasQueuedJobs
     }
     private func refreshQueueSleep() { queueSleep.refresh(jobs: jobs, blocked: sleepIsBlocked) }
+
+    private func refreshDockBadge() {
+        let count = isTerminating ? 0 : pendingWorkCount
+        let label = count > 0 ? "\(count)" : nil
+        guard let app = NSApp else { return }
+        if app.dockTile.badgeLabel != label {
+            app.dockTile.badgeLabel = label
+        }
+    }
 
     func startQueuedJobs() {
         queuePausedForEnvironment = false
@@ -1680,6 +1708,7 @@ final class AppViewModel: ObservableObject {
     func stopAllForTermination() async {
         setSleepAfterCompletion(false)
         isTerminating = true
+        refreshDockBadge()
         terminationGeneration += 1
         manualDrainRequested = false
         let preserveNetworkQueue = queuePausedForRecovery || jobs.contains { $0.networkRecovery?.state == .waiting || $0.networkRecovery?.state == .retrying || $0.serviceRecovery != nil }
@@ -1707,6 +1736,7 @@ final class AppViewModel: ObservableObject {
         isTerminating = false
         manualDrainRequested = false
         refreshQueueSleep()
+        refreshDockBadge()
     }
 
     // MARK: - Environment and onboarding
