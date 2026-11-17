@@ -8,6 +8,8 @@ struct MainView: View {
     @State private var isDropTargeted = false
     @State private var isClearFinishedJobsPresented = false
     @State private var isTranscriptionSettingsExpanded = false
+    @State private var logExpansion = JobLogExpansionState()
+    @State private var recentDiagnosticsExpansion = JobLogExpansionState()
 
     var body: some View {
         ScrollView {
@@ -563,7 +565,11 @@ struct MainView: View {
                 } else {
                     LazyVStack(spacing: 10) {
                         ForEach(viewModel.jobs) { job in
-                            JobRowView(job: job, viewModel: viewModel)
+                            JobRowView(
+                                job: job,
+                                viewModel: viewModel,
+                                isLogExpanded: expansionBinding(in: $logExpansion, for: job.id)
+                            )
                         }
                     }
                 }
@@ -578,7 +584,11 @@ struct MainView: View {
 
                     LazyVStack(spacing: 8) {
                         ForEach(archivedRecentJobs) { summary in
-                            RecentJobRow(summary: summary, viewModel: viewModel)
+                            RecentJobRow(
+                                summary: summary,
+                                viewModel: viewModel,
+                                isDiagnosticsExpanded: expansionBinding(in: $recentDiagnosticsExpansion, for: summary.id)
+                            )
                         }
                     }
                 }
@@ -606,6 +616,16 @@ struct MainView: View {
                 ($0.completedAt ?? $0.startedAt ?? .distantPast)
                     > ($1.completedAt ?? $1.startedAt ?? .distantPast)
             }
+    }
+
+    private func expansionBinding(
+        in storage: Binding<JobLogExpansionState>,
+        for id: UUID
+    ) -> Binding<Bool> {
+        Binding(
+            get: { storage.wrappedValue.isExpanded(id) },
+            set: { storage.wrappedValue.setExpanded($0, for: id) }
+        )
     }
 
     @ViewBuilder
@@ -855,6 +875,8 @@ private struct CloudSegmentProgressState {
 private struct JobRowView: View {
     let job: TranscriptionJob
     @ObservedObject var viewModel: AppViewModel
+    @Binding var isLogExpanded: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isDeleteRecoveryPresented = false
     @State private var isDeleteJobPresented = false
     @State private var trackedSegment: Int?
@@ -1214,7 +1236,7 @@ private struct JobRowView: View {
 
     @ViewBuilder
     private var logSection: some View {
-        if !job.logLines.isEmpty {
+        if !job.logLines.isEmpty || job.cloudDiagnostics != nil {
             VStack(alignment: .leading, spacing: 6) {
                 if let status = JobDebugClipboard.statusSummary(from: job.logLines) {
                     Text(status)
@@ -1223,12 +1245,50 @@ private struct JobRowView: View {
                         .lineLimit(4)
                 }
 
-                Button("複製除錯資訊") {
-                    JobDebugClipboard.copy(job)
+                HStack(spacing: 12) {
+                    Button {
+                        toggleLogExpansion()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: isLogExpanded ? "chevron.down" : "chevron.right")
+                                .font(.caption2.weight(.semibold))
+                            Text(JobDebugClipboard.logToggleTitle(
+                                isExpanded: isLogExpanded,
+                                lineCount: job.logLines.count,
+                                hasDiagnostics: job.cloudDiagnostics != nil
+                            ))
+                        }
+                    }
+                    .buttonStyle(.link)
+                    .font(.caption)
+                    .help(isLogExpanded ? "收合執行日誌與分段診斷" : "在畫面上展開查看完整執行日誌與分段診斷")
+                    .accessibilityLabel(isLogExpanded ? "收合日誌" : "展開日誌")
+
+                    Button("複製除錯資訊") {
+                        JobDebugClipboard.copy(job)
+                    }
+                    .buttonStyle(.link)
+                    .font(.caption)
+                    .help("複製完整執行日誌、模型與失敗訊息，方便貼給除錯用")
                 }
-                .buttonStyle(.link)
-                .font(.caption)
-                .help("複製完整執行日誌、模型與失敗訊息，方便貼給除錯用")
+
+                if isLogExpanded {
+                    ExpandableDebugTextPanel(
+                        text: JobDebugClipboard.expandedContent(for: job),
+                        showJumpToLatest: job.logLines.count > 4
+                    )
+                    .padding(.top, 2)
+                }
+            }
+        }
+    }
+
+    private func toggleLogExpansion() {
+        if reduceMotion {
+            isLogExpanded.toggle()
+        } else {
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isLogExpanded.toggle()
             }
         }
     }
@@ -1374,6 +1434,8 @@ private struct JobElapsedView: View {
 private struct RecentJobRow: View {
     let summary: RecentJobSummary
     @ObservedObject var viewModel: AppViewModel
+    @Binding var isDiagnosticsExpanded: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isDeletePresented = false
     // Filesystem stats are captured once per row (and when the summary
     // changes) instead of on every render of every row.
@@ -1382,7 +1444,56 @@ private struct RecentJobRow: View {
     @State private var outputIsAvailable = false
 
     var body: some View {
-        statusList
+        VStack(alignment: .leading, spacing: 8) {
+            statusList
+            if isDiagnosticsExpanded,
+               let diagnosticsText = JobDebugClipboard.expandedContent(for: summary)
+            {
+                ExpandableDebugTextPanel(
+                    text: diagnosticsText,
+                    showJumpToLatest: false
+                )
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 9))
+        .confirmationDialog(
+            "從列表刪除這筆工作？",
+            isPresented: $isDeletePresented,
+            titleVisibility: .visible
+        ) {
+            Button("刪除", role: .destructive) {
+                viewModel.removeFinishedJob(summary.id)
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("只會從最近工作移除紀錄，不會刪除原始錄音或已輸出的文字檔。")
+        }
+        .contextMenu {
+            if outputIsAvailable {
+                Button("打開文字檔") {
+                    viewModel.openOutput(for: summary)
+                }
+                Button("在 Finder 顯示") {
+                    viewModel.revealOutput(for: summary)
+                }
+            }
+            if sourceIsAvailable {
+                Button("用目前設定建立新工作") {
+                    viewModel.retryRecentJob(summary)
+                }
+            }
+            if summary.cloudDiagnostics != nil {
+                Button("複製除錯資訊") {
+                    JobDebugClipboard.copy(summary)
+                }
+            }
+            Divider()
+            Button("從列表刪除", role: .destructive) {
+                isDeletePresented = true
+            }
+        }
         .onAppear(perform: refreshAvailability)
         .onChange(of: summary) { refreshAvailability() }
     }
@@ -1438,6 +1549,38 @@ private struct RecentJobRow: View {
                             .lineLimit(1)
                     }
                 }
+
+                if summary.cloudDiagnostics != nil {
+                    HStack(spacing: 12) {
+                        Button {
+                            if reduceMotion {
+                                isDiagnosticsExpanded.toggle()
+                            } else {
+                                withAnimation(.easeInOut(duration: 0.15)) {
+                                    isDiagnosticsExpanded.toggle()
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: isDiagnosticsExpanded ? "chevron.down" : "chevron.right")
+                                    .font(.caption2.weight(.semibold))
+                                Text(JobDebugClipboard.recentDiagnosticsToggleTitle(isExpanded: isDiagnosticsExpanded))
+                            }
+                        }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                        .help(isDiagnosticsExpanded ? "收合完成工作分段診斷" : "在畫面上展開查看完成工作分段診斷")
+                        .accessibilityLabel(isDiagnosticsExpanded ? "收合診斷" : "展開診斷")
+
+                        Button("複製除錯資訊") {
+                            JobDebugClipboard.copy(summary)
+                        }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                        .help("複製完成工作分段診斷，方便貼給除錯用")
+                    }
+                    .padding(.top, 2)
+                }
             }
 
             Spacer()
@@ -1477,45 +1620,6 @@ private struct RecentJobRow: View {
             }
             .buttonStyle(.borderless)
             .help("從列表刪除這筆工作")
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 9))
-        .confirmationDialog(
-            "從列表刪除這筆工作？",
-            isPresented: $isDeletePresented,
-            titleVisibility: .visible
-        ) {
-            Button("刪除", role: .destructive) {
-                viewModel.removeFinishedJob(summary.id)
-            }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("只會從最近工作移除紀錄，不會刪除原始錄音或已輸出的文字檔。")
-        }
-        .contextMenu {
-            if outputIsAvailable {
-                Button("打開文字檔") {
-                    viewModel.openOutput(for: summary)
-                }
-                Button("在 Finder 顯示") {
-                    viewModel.revealOutput(for: summary)
-                }
-            }
-            if sourceIsAvailable {
-                Button("用目前設定建立新工作") {
-                    viewModel.retryRecentJob(summary)
-                }
-            }
-            if summary.cloudDiagnostics != nil {
-                Button("複製除錯資訊") {
-                    JobDebugClipboard.copy(summary)
-                }
-            }
-            Divider()
-            Button("從列表刪除", role: .destructive) {
-                isDeletePresented = true
-            }
         }
     }
 
@@ -1560,6 +1664,79 @@ private struct RecentJobRow: View {
     }
 }
 
+struct JobLogExpansionState: Equatable, Sendable {
+    private(set) var expandedIDs: Set<UUID> = []
+
+    func isExpanded(_ id: UUID) -> Bool {
+        expandedIDs.contains(id)
+    }
+
+    mutating func setExpanded(_ expanded: Bool, for id: UUID) {
+        if expanded {
+            expandedIDs.insert(id)
+        } else {
+            expandedIDs.remove(id)
+        }
+    }
+
+    mutating func toggle(_ id: UUID) {
+        setExpanded(!isExpanded(id), for: id)
+    }
+
+    mutating func prune(retaining ids: Set<UUID>) {
+        expandedIDs.formIntersection(ids)
+    }
+}
+
+private struct ExpandableDebugTextPanel: View {
+    let text: String
+    let showJumpToLatest: Bool
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            VStack(alignment: .leading, spacing: 6) {
+                if showJumpToLatest {
+                    HStack {
+                        Text("完整執行日誌")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("跳至最新") {
+                            proxy.scrollTo("debug-panel-bottom", anchor: .bottom)
+                        }
+                        .buttonStyle(.link)
+                        .font(.caption2)
+                        .help("捲動到最新一則日誌")
+                    }
+                }
+                ScrollView(.vertical) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(text)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.primary)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Color.clear
+                            .frame(height: 1)
+                            .id("debug-panel-bottom")
+                    }
+                    .padding(8)
+                }
+                .frame(maxHeight: 220)
+                .background(
+                    Color(nsColor: .textBackgroundColor).opacity(0.65),
+                    in: RoundedRectangle(cornerRadius: 7)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 7)
+                        .stroke(Color(nsColor: .separatorColor).opacity(0.45), lineWidth: 1)
+                }
+            }
+        }
+    }
+}
+
 enum JobDebugClipboard {
     static func copy(_ summary: RecentJobSummary) {
         NSPasteboard.general.clearContents()
@@ -1576,6 +1753,36 @@ enum JobDebugClipboard {
     static func copy(_ job: TranscriptionJob) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(dump(job), forType: .string)
+    }
+
+    static func logToggleTitle(isExpanded: Bool, lineCount: Int, hasDiagnostics: Bool) -> String {
+        if lineCount > 0 {
+            return isExpanded ? "收合日誌" : "展開日誌（\(lineCount)）"
+        }
+        if hasDiagnostics {
+            return isExpanded ? "收合診斷" : "展開診斷"
+        }
+        return ""
+    }
+
+    static func recentDiagnosticsToggleTitle(isExpanded: Bool) -> String {
+        isExpanded ? "收合診斷" : "展開診斷"
+    }
+
+    static func expandedContent(for job: TranscriptionJob) -> String {
+        var sections: [String] = []
+        if !job.logLines.isEmpty {
+            sections.append(job.logLines.joined(separator: "\n"))
+        }
+        if let diagnostics = job.cloudDiagnostics {
+            let prefix = sections.isEmpty ? "" : "--- 分段診斷 ---\n"
+            sections.append(prefix + diagnostics.debugSummary)
+        }
+        return sections.isEmpty ? "（無）" : sections.joined(separator: "\n\n")
+    }
+
+    static func expandedContent(for summary: RecentJobSummary) -> String? {
+        summary.cloudDiagnostics?.debugSummary
     }
 
     static func statusSummary(from lines: [String]) -> String? {
@@ -1610,7 +1817,9 @@ enum JobDebugClipboard {
             "轉錄請求送出",
             "location global",
             "Gemini 回應無法形成逐字稿",
-            "實際模型"
+            "實際模型",
+            "budget created",
+            "budget root="
         ]
         return markers.contains { line.contains($0) }
     }

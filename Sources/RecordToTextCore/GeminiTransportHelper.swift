@@ -9,6 +9,7 @@ public enum GeminiTransportHelper {
         responseMode: CloudResponseMode? = nil,
         streamingLimits: GeminiStreamingLimits = .default,
         attempts: CloudRequestAttempts? = nil,
+        logger: ((_ level: String, _ message: String) -> Void)? = nil,
         confirmUpload: (() async throws -> (Data, URLResponse)?)? = nil,
         restartUpload: (() async throws -> URLRequest)? = nil
     ) async throws -> (Data, URLResponse) {
@@ -38,6 +39,7 @@ public enum GeminiTransportHelper {
             responseMode: resolvedMode,
             streamingLimits: streamingLimits,
             attempts: attempts,
+            logger: logger,
             confirmUpload: confirmUpload,
             restartUpload: restartUpload
         )
@@ -49,7 +51,8 @@ public enum GeminiTransportHelper {
         stage: String,
         responseMode: CloudResponseMode = .unaryJSON,
         streamingLimits: GeminiStreamingLimits = .default,
-        attempts: CloudRequestAttempts? = nil
+        attempts: CloudRequestAttempts? = nil,
+        logger: ((_ level: String, _ message: String) -> Void)? = nil
     ) async throws -> (Data, URLResponse) {
         try await send(
             session: session,
@@ -58,7 +61,8 @@ public enum GeminiTransportHelper {
             stage: stage,
             responseMode: responseMode,
             streamingLimits: streamingLimits,
-            attempts: attempts
+            attempts: attempts,
+            logger: logger
         )
     }
 
@@ -70,6 +74,7 @@ public enum GeminiTransportHelper {
         responseMode: CloudResponseMode = .unaryJSON,
         streamingLimits: GeminiStreamingLimits = .default,
         attempts: CloudRequestAttempts? = nil,
+        logger: ((_ level: String, _ message: String) -> Void)? = nil,
         confirmUpload: (() async throws -> (Data, URLResponse)?)? = nil,
         restartUpload: (() async throws -> URLRequest)? = nil
     ) async throws -> (Data, URLResponse) {
@@ -152,18 +157,23 @@ public enum GeminiTransportHelper {
                             stage: diagnosticStage)
                     }
                     if !generation, http.statusCode == 429, let context {
+                        let sends = quota?.count ?? attempt
                         context.requestSucceeded()
-                        try await context.service.rateLimited(after: quota?.count ?? attempt,
+                        try await context.service.rateLimited(after: sends,
                             stage: diagnosticStage,
                             serverDelay: retryAfterSeconds(response: http, data: result.0),
                             dailyQuota: isDailyQuotaExceeded(data: result.0, message: ""),
-                            canRetry: attempt < 4, resultUnknown: context.snapshot().resultUnknown)
+                            canRetry: attempt < 4, resultUnknown: context.snapshot().resultUnknown) { delay in
+                            logger?("info", "\(stageDisplayName(diagnosticStage))收到 HTTP 429（已發送 \(sends)／4 次），依服務冷卻政策約 \(Int(ceil(delay))) 秒後重試。")
+                        }
                         continue
                     }
                     // Upload and metadata requests own their retry scope. Generation
                     // HTTP/model policy remains in the backend; sends still share quota.
                     if !generation, RetryPolicy.isRetryableStatusCode(http.statusCode), attempt < 4 {
                         let delay = RetryPolicy.backoffSeconds(forAttempt: attempt, retryAfterSeconds: retryAfterSeconds(response: http, data: result.0))
+                        try CloudBudgetContext.validateBackoff(seconds: delay)
+                        logger?("info", "\(stageDisplayName(diagnosticStage))收到 HTTP \(http.statusCode)（第 \(attempt)／4 次嘗試），約 \(Int(ceil(delay))) 秒後重試。")
                         try await CloudBudgetContext.backoff(seconds: delay)
                         continue
                     }
@@ -210,13 +220,71 @@ public enum GeminiTransportHelper {
                 if posix {
                     guard !context.sessionWasReset else { throw error }
                     _ = context.session(using: session, resetFor: NSError(domain: NSPOSIXErrorDomain, code: 40))
+                    let posixSummary = classified.errorChain.contains(where: { $0.code == 40 })
+                        ? failureReasonSummary(classified)
+                        : "本機傳輸通道失敗，NSPOSIXErrorDomain:40"
+                    logger?("warning", "\(stageDisplayName(diagnosticStage))第 \(sends)／4 次失敗（\(posixSummary)），已重設連線並重新嘗試。")
                 } else {
+                    try context.check()
+                    let willReset = !context.sessionWasReset
+                        && CloudNetworkRecoveryContext.resetsSession(for: classified.category)
+                    let availableSeconds = min(context.remainingBudgetSeconds, context.remainingWaitAllowanceSeconds)
+                    let waitSeconds: Double? = availableSeconds > context.policy.retryDelaySeconds
+                        ? context.policy.retryDelaySeconds : nil
+                    logger?("info", transientRetryLogMessage(
+                        stage: diagnosticStage,
+                        diagnostic: classified,
+                        sends: sends,
+                        waitSeconds: waitSeconds,
+                        willResetSession: willReset
+                    ))
                     try await context.retry(after: sends, error: error, generation: generation)
                 }
                 previousError = error
             }
         }
         throw CloudRequestLimitExceeded(stage: diagnosticStage)
+    }
+
+    private static func stageDisplayName(_ stage: CloudDiagnosticStage) -> String {
+        switch stage {
+        case .generation: return "雲端生成"
+        case .upload: return "上傳音訊"
+        case .poll: return "查詢雲端檔案狀態"
+        default: return "雲端請求"
+        }
+    }
+
+    /// Formats only allowlisted diagnostic codes/enums so raw URLs, headers or
+    /// arbitrary NSError userInfo strings can never enter user-visible logs.
+    private static func failureReasonSummary(_ diagnostic: CloudFailureDiagnostic) -> String {
+        let baseMessage = diagnostic.userMessage.hasSuffix("。")
+            ? String(diagnostic.userMessage.dropLast())
+            : diagnostic.userMessage
+        let code: String
+        if let first = diagnostic.errorChain.first {
+            code = "\(first.domain):\(first.code)"
+        } else if let status = diagnostic.httpStatus {
+            code = "HTTP \(status)"
+        } else {
+            code = diagnostic.category.rawValue
+        }
+        return "\(baseMessage)，\(code)"
+    }
+
+    private static func transientRetryLogMessage(
+        stage: CloudDiagnosticStage,
+        diagnostic: CloudFailureDiagnostic,
+        sends: Int,
+        waitSeconds: Double?,
+        willResetSession: Bool
+    ) -> String {
+        let prefix = "\(stageDisplayName(stage))第 \(sends)／4 次未完成（\(failureReasonSummary(diagnostic))）"
+        guard let waitSeconds else {
+            return "\(prefix)。"
+        }
+        let resetPrefix = willResetSession ? "準備重設連線並於" : ""
+        return "\(prefix)，\(resetPrefix)約 \(Int(ceil(waitSeconds))) 秒後重試。"
     }
 
     /// 檢查錯誤是否為 POSIX 40 (EMSGSIZE: Message too long) 或相關底層 CFStream 錯誤
