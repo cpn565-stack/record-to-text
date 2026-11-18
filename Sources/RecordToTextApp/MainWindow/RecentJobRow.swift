@@ -17,6 +17,7 @@ struct RecentJobRow: View {
     @State private var fileStatus: RecentJobFileStatus = .available
     @State private var sourceIsAvailable = false
     @State private var outputIsAvailable = false
+    @State private var availabilityTask: Task<Void, Never>?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
@@ -74,6 +75,7 @@ struct RecentJobRow: View {
             }
         }
         .onAppear(perform: refreshAvailability)
+        .onDisappear { availabilityTask?.cancel() }
         .onChange(of: summary) { _, _ in refreshAvailability() }
     }
 
@@ -356,12 +358,41 @@ struct RecentJobRow: View {
     // MARK: - Availability & Status Styling
 
     private func refreshAvailability() {
-        fileStatus = summary.fileStatus()
-        sourceIsAvailable = FileManager.default.fileExists(atPath: summary.sourcePath)
-        if summary.stage == .completed, let outputPath = summary.outputPath {
-            outputIsAvailable = FileManager.default.fileExists(atPath: outputPath)
-        } else {
-            outputIsAvailable = false
+        let snapshotSummary = summary
+        availabilityTask?.cancel()
+        availabilityTask = Task { @MainActor in
+            let computed = await Task.detached(priority: .utility) { () -> (
+                status: RecentJobFileStatus,
+                sourceExists: Bool,
+                outputExists: Bool
+            ) in
+                let fm = FileManager()
+                let sourceExists = fm.fileExists(atPath: snapshotSummary.sourcePath)
+                let outputExists: Bool
+                let status: RecentJobFileStatus
+                if snapshotSummary.stage == .completed {
+                    outputExists = snapshotSummary.outputPath.map { fm.fileExists(atPath: $0) } ?? false
+                    switch (sourceExists, outputExists) {
+                    case (false, false):
+                        status = .sourceAndOutputMissing
+                    case (false, true):
+                        status = .sourceMissing
+                    case (true, false):
+                        status = .outputMissing
+                    case (true, true):
+                        status = .available
+                    }
+                } else {
+                    outputExists = false
+                    status = sourceExists ? .available : .sourceMissing
+                }
+                return (status, sourceExists, outputExists)
+            }.value
+
+            guard !Task.isCancelled else { return }
+            fileStatus = computed.status
+            sourceIsAvailable = computed.sourceExists
+            outputIsAvailable = computed.outputExists
         }
     }
 

@@ -153,7 +153,7 @@ public struct LocalSampleSpan: Hashable, Sendable, Codable {
     }
 
     public func validatedWithin(work: LocalSampleSpan, field: String) throws -> LocalSampleSpan {
-        try validated(field: field)
+        _ = try validated(field: field)
         guard work.contains(self) else {
             throw LocalCoordinateError.spanOutsideWork(
                 field: field,

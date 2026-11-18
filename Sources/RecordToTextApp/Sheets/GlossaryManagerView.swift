@@ -14,6 +14,7 @@ struct GlossaryManagerView: View {
     @State private var savedBaselineName = ""
     @State private var savedBaselineTerms = ""
     @State private var glossaryPendingDeletion: GlossaryPreset?
+    @State private var inlineErrorMessage: String?
     @State private var showSavedToast = false
     @State private var savedToastTask: Task<Void, Never>?
 
@@ -310,6 +311,18 @@ struct GlossaryManagerView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
+                if let inlineErrorMessage {
+                    InlineCallout(color: AppColors.danger) {
+                        HStack(spacing: AppSpacing.sm) {
+                            Image(systemName: "exclamationmark.circle.fill")
+                                .foregroundStyle(AppColors.danger)
+                            Text(inlineErrorMessage)
+                                .font(.caption)
+                            Spacer()
+                        }
+                    }
+                }
+
                 TextEditor(text: $draftTerms)
                     .font(.body)
                     .scrollContentBackground(.hidden)
@@ -372,6 +385,7 @@ struct GlossaryManagerView: View {
     }
 
     private func loadDraft() {
+        inlineErrorMessage = nil
         switch selection {
         case .common:
             draftName = ""
@@ -402,20 +416,28 @@ struct GlossaryManagerView: View {
         let didSave: Bool
         switch selection {
         case .common:
+            inlineErrorMessage = nil
             viewModel.updateCommonTerms(draftTerms)
             loadDraft()
             didSave = true
         case let .glossary(id):
+            if let validationError = viewModel.glossaryNameValidationError(id: id, name: draftName) {
+                inlineErrorMessage = validationError
+                return false
+            }
+            inlineErrorMessage = nil
             let updated = viewModel.updateGlossary(
                 id: id,
                 name: draftName,
-                termsText: draftTerms
+                termsText: draftTerms,
+                suppressAlert: true
             )
             if updated {
                 loadDraft()
             }
             didSave = updated
         case nil:
+            inlineErrorMessage = nil
             didSave = true
         }
 

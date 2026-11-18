@@ -110,6 +110,7 @@ public final class TranscriptionEngine {
     private let runtime: ResolvedRuntime
     private let paths: ApplicationPaths
     private let runner: ProcessRunner
+    private let probeRunner = ProcessRunner()
     private let authRunner = ProcessRunner()
     private let probeService: AudioProbeService
     private let ffmpegService: FFmpegService
@@ -117,6 +118,7 @@ public final class TranscriptionEngine {
     private let openCCService: OpenCCService
     private let backend: HelperASRBackend
     private let googleAIStudioBackend: GoogleAIStudioBackend
+    private let usesCustomGoogleAIStudioBackend: Bool
     private let vertexAIBackend: VertexAIGeminiBackend
     private let usesCustomVertexAIBackend: Bool
     private let cloudSegmentBudgetLimit: Duration?
@@ -254,12 +256,13 @@ public final class TranscriptionEngine {
         self.runtime = runtime
         self.paths = paths
         self.runner = runner
-        self.probeService = AudioProbeService(executableURL: runtime.ffprobe)
+        self.probeService = AudioProbeService(executableURL: runtime.ffprobe, runner: probeRunner)
         self.ffmpegService = FFmpegService(executableURL: runtime.ffmpeg, runner: runner)
         self.silenceDetectionService = silenceDetectionService
             ?? SilenceDetectionService(executableURL: runtime.ffmpeg, runner: runner)
         self.openCCService = OpenCCService(executableURL: runtime.opencc, runner: runner)
         self.backend = HelperASRBackend(runtime: runtime, paths: paths, runner: runner)
+        self.usesCustomGoogleAIStudioBackend = googleAIStudioBackend != nil
         self.googleAIStudioBackend = googleAIStudioBackend ?? GoogleAIStudioBackend()
         self.usesCustomVertexAIBackend = vertexAIBackend != nil
         self.vertexAIBackend = vertexAIBackend ?? VertexAIGeminiBackend(authService: GCloudAuthService(runner: authRunner))
@@ -1266,6 +1269,7 @@ public final class TranscriptionEngine {
         }
         backend.cancelCurrentJob()
         runner.cancelCurrent()
+        probeRunner.cancelCurrent()
         authRunner.cancelCurrent()
     }
 
@@ -1305,12 +1309,20 @@ public final class TranscriptionEngine {
         update: @escaping (PipelineUpdate) -> Void,
         silenceAnalysisCache: JobSilenceAnalysisCache
     ) async throws -> PipelineResult {
+        let currentUseFilesAPI = usesCustomGoogleAIStudioBackend
+            ? googleAIStudioBackend.getConfiguration().useFilesAPI
+            : true
+        let currentUseStreamingSSE = usesCustomGoogleAIStudioBackend
+            ? googleAIStudioBackend.getConfiguration().useStreamingSSE
+            : true
         googleAIStudioBackend.updateConfiguration(
             GoogleAIStudioBackend.Configuration(
                 apiKey: job.snapshot.googleAIStudioAPIKey,
                 modelID: job.snapshot.googleAIStudioModelID,
+                useFilesAPI: currentUseFilesAPI,
                 thinkingLevel: job.snapshot.geminiThinkingLevel,
-                fallbackPolicy: job.snapshot.cloudFallbackPolicy
+                fallbackPolicy: job.snapshot.cloudFallbackPolicy,
+                useStreamingSSE: currentUseStreamingSSE
             )
         )
         let modelDisplay = job.snapshot.googleAIStudioModelID
@@ -1326,9 +1338,9 @@ public final class TranscriptionEngine {
             modelDisplay: modelDisplay,
             update: update,
             silenceAnalysisCache: silenceAnalysisCache
-        ) { audioData, timeOffset, timeEnd, segmentLabel, speakerRoster in
+        ) { audioFileURL, timeOffset, timeEnd, segmentLabel, speakerRoster in
             try await self.transcribeGoogleAIStudioWithStatus(
-                audioData: audioData,
+                audioFileURL: audioFileURL,
                 job: job,
                 modelDisplay: "\(modelDisplay)\(segmentLabel)",
                 timeOffset: timeOffset,
@@ -1341,7 +1353,7 @@ public final class TranscriptionEngine {
     }
 
     private func transcribeGoogleAIStudioWithStatus(
-        audioData: Data,
+        audioFileURL: URL,
         job: TranscriptionJob,
         modelDisplay: String,
         timeOffset: Double,
@@ -1356,7 +1368,7 @@ public final class TranscriptionEngine {
         )
         do {
             let result = try await googleAIStudioBackend.transcribeDetailed(
-                audioData: audioData,
+                audioFileURL: audioFileURL,
                 mimeType: "audio/mp3",
                 terms: job.snapshot.terms,
                 customPrompt:
@@ -1448,9 +1460,9 @@ public final class TranscriptionEngine {
                     update: update
                 )
             },
-            transcribe: { audioData, timeOffset, timeEnd, segmentLabel, speakerRoster in
+            transcribe: { audioFileURL, timeOffset, timeEnd, segmentLabel, speakerRoster in
                 try await self.transcribeVertexWithStatus(
-                    audioData: audioData,
+                    audioFileURL: audioFileURL,
                     job: job,
                     modelDisplay: "\(modelDisplay)\(segmentLabel)",
                     timeOffset: timeOffset,
@@ -1464,7 +1476,7 @@ public final class TranscriptionEngine {
     }
 
     private func transcribeVertexWithStatus(
-        audioData: Data,
+        audioFileURL: URL,
         job: TranscriptionJob,
         modelDisplay: String,
         timeOffset: Double,
@@ -1479,7 +1491,7 @@ public final class TranscriptionEngine {
         )
         do {
             let result = try await vertexAIBackend.transcribeDetailed(
-                audioData: audioData,
+                audioFileURL: audioFileURL,
                 mimeType: "audio/mp3",
                 terms: job.snapshot.terms,
                 customPrompt:
@@ -1722,7 +1734,7 @@ public final class TranscriptionEngine {
         silenceAnalysisCache: JobSilenceAnalysisCache,
         finalizeTranscript: (([String]) async -> String)? = nil,
         transcribe: (
-            _ audioData: Data,
+            _ audioFileURL: URL,
             _ timeOffset: Double,
             _ timeEnd: Double,
             _ segmentLabel: String,
@@ -2076,7 +2088,7 @@ public final class TranscriptionEngine {
                         try await CloudBudgetContext.$current.withValue(budget) {
                             try budget.checkRemaining(stage: "transcribe")
                             return try await transcribe(
-                                try Data(contentsOf: audioURL), absoluteStart, record.endSeconds, segmentLabel, speakerRoster
+                                audioURL, absoluteStart, record.endSeconds, segmentLabel, speakerRoster
                             )
                         }
                         }

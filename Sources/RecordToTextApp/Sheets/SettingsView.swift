@@ -38,6 +38,8 @@ struct SettingsView: View {
     }
 
     @State private var resetChoice: ResetChoice?
+    @State private var isLocalEnvironmentPresented = false
+    @State private var isLocalUnsuccessfulCleanupPresented = false
 
     // Google AI Studio credential & connection test state
     @State private var apiKeyDraft = ""
@@ -149,6 +151,22 @@ struct SettingsView: View {
         } message: {
             Text(resetChoice?.message ?? "")
         }
+        .sheet(isPresented: $isLocalEnvironmentPresented) {
+            EnvironmentCheckView(viewModel: viewModel, showsOpenSettingsButton: false)
+                .tint(AppColors.accent)
+        }
+        .confirmationDialog(
+            "一鍵清除未成功項目與殘留檔？",
+            isPresented: $isLocalUnsuccessfulCleanupPresented,
+            titleVisibility: .visible
+        ) {
+            Button("一鍵清除", role: .destructive) {
+                Task { await viewModel.cleanUpUnsuccessfulJobsAndResidualFiles() }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("將一併清除所有「失敗、已取消、被中斷」工作紀錄，以及系統暫存與 Temp-Recovery 內的全部殘留目錄。所有「完成」與「完成（含缺口）」紀錄、已輸出的 .txt 文字稿，以及原始錄音檔皆會完整保留。")
+        }
     }
 
     // MARK: - Tab 1: 一般 (General)
@@ -226,7 +244,7 @@ struct SettingsView: View {
                         Button("執行環境檢查…") {
                             commitPendingDrafts()
                             viewModel.refreshEnvironment()
-                            viewModel.isEnvironmentPresented = true
+                            isLocalEnvironmentPresented = true
                         }
                         Spacer()
                     }
@@ -788,7 +806,7 @@ struct SettingsView: View {
 
                     if viewModel.hasUnsuccessfulItemsToClean {
                         Button("清除未成功項目與殘留檔…", role: .destructive) {
-                            viewModel.requestUnsuccessfulCleanup()
+                            isLocalUnsuccessfulCleanupPresented = true
                         }
                         .disabled(viewModel.isUnsuccessfulCleanupRunning)
                     }
@@ -973,7 +991,12 @@ struct SettingsView: View {
     }
 
     private func refreshDeveloperRuntimeDiscovery() {
-        developerRuntimeDiscovery = RuntimeEnvironment.discoverDeveloperRuntime()
+        Task { @MainActor in
+            let discovered = await Task.detached(priority: .utility) {
+                RuntimeEnvironment.discoverDeveloperRuntime(fileManager: FileManager())
+            }.value
+            developerRuntimeDiscovery = discovered
+        }
     }
 
     private func useAutoDetectedDeveloperRuntime() {

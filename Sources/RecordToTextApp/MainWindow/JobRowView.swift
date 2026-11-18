@@ -22,6 +22,7 @@ struct JobRowView: View {
     @State private var outputIsAvailable = false
     @State private var cloudResumeIsAvailable = false
     @State private var localQwenResumeIsAvailable = false
+    @State private var diskCheckTask: Task<Void, Never>?
 
     private var isRunningJob: Bool {
         (job.id == viewModel.activeJobID && !job.stage.isTerminal)
@@ -122,6 +123,7 @@ struct JobRowView: View {
             logAndDiagnosticsSection
         }
         .onAppear(perform: refreshCachedState)
+        .onDisappear { diskCheckTask?.cancel() }
         .onChange(of: job.stage) { _, _ in refreshCachedState() }
         .onChange(of: job.outputPath) { _, _ in refreshCachedState() }
         .onChange(of: job.failure) { _, _ in refreshCachedState() }
@@ -792,26 +794,62 @@ struct JobRowView: View {
     // MARK: - Cached State & Status Styling
 
     private func refreshCachedState() {
-        let sourceExists = FileManager.default.fileExists(atPath: job.sourcePath)
-        sourceIsAvailable = sourceExists
-        if job.stage == .completed {
-            let outExists = job.outputPath.map { FileManager.default.fileExists(atPath: $0) } ?? false
-            outputIsAvailable = outExists
-            switch (sourceExists, outExists) {
-            case (false, false):
-                fileStatus = .sourceAndOutputMissing
-            case (false, true):
-                fileStatus = .sourceMissing
-            case (true, false):
-                fileStatus = .outputMissing
-            case (true, true):
-                fileStatus = .available
-            }
-        } else {
-            outputIsAvailable = false
-            fileStatus = .available
+        let sourcePath = job.sourcePath
+        let outputPath = job.outputPath
+        let stage = job.stage
+        let backendType = job.snapshot.backendType
+        let recoveryDirectory = job.failure?.recoveryDirectory
+
+        diskCheckTask?.cancel()
+        diskCheckTask = Task { @MainActor in
+            let computed = await Task.detached(priority: .utility) { () -> (
+                sourceExists: Bool,
+                outExists: Bool,
+                status: RecentJobFileStatus,
+                localResume: Bool
+            ) in
+                let fm = FileManager()
+                let sourceExists = fm.fileExists(atPath: sourcePath)
+                let outExists: Bool
+                let status: RecentJobFileStatus
+                if stage == .completed {
+                    outExists = outputPath.map { fm.fileExists(atPath: $0) } ?? false
+                    switch (sourceExists, outExists) {
+                    case (false, false):
+                        status = .sourceAndOutputMissing
+                    case (false, true):
+                        status = .sourceMissing
+                    case (true, false):
+                        status = .outputMissing
+                    case (true, true):
+                        status = .available
+                    }
+                } else {
+                    outExists = false
+                    status = .available
+                }
+
+                let localResume: Bool
+                if backendType == .localQwen,
+                   stage == .failed || stage == .cancelled || stage == .interrupted,
+                   let recoveryDirectory
+                {
+                    localResume = LocalChunkCheckpoint.containsUsableCheckpoint(
+                        in: URL(fileURLWithPath: recoveryDirectory, isDirectory: true),
+                        fileManager: fm
+                    )
+                } else {
+                    localResume = false
+                }
+                return (sourceExists, outExists, status, localResume)
+            }.value
+
+            guard !Task.isCancelled else { return }
+            sourceIsAvailable = computed.sourceExists
+            outputIsAvailable = computed.outExists
+            fileStatus = computed.status
+            localQwenResumeIsAvailable = computed.localResume
         }
-        localQwenResumeIsAvailable = viewModel.canResumeLocalQwenJob(job)
     }
 
     private var statusSymbol: String {

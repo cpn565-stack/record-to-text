@@ -1273,23 +1273,32 @@ final class AppViewModel: ObservableObject {
     }
 
     @discardableResult
-    func updateGlossary(id: String, name: String, termsText: String) -> Bool {
+    func updateGlossary(
+        id: String,
+        name: String,
+        termsText: String,
+        suppressAlert: Bool = false
+    ) -> Bool {
         guard let index = glossaryCollection.glossaries.firstIndex(where: { $0.id == id }) else {
             return false
         }
 
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else {
-            alert = UserFacingAlert(title: "詞庫名稱不能空白", message: "請輸入一個容易辨識的名稱。")
+            if !suppressAlert {
+                alert = UserFacingAlert(title: "詞庫名稱不能空白", message: "請輸入一個容易辨識的名稱。")
+            }
             return false
         }
         if glossaryCollection.glossaries.contains(where: {
             $0.id != id && $0.name.caseInsensitiveCompare(trimmedName) == .orderedSame
         }) {
-            alert = UserFacingAlert(
-                title: "詞庫名稱重複",
-                message: "已有另一個名為「\(trimmedName)」的專案詞庫，請改用不同名稱。"
-            )
+            if !suppressAlert {
+                alert = UserFacingAlert(
+                    title: "詞庫名稱重複",
+                    message: "已有另一個名為「\(trimmedName)」的專案詞庫，請改用不同名稱。"
+                )
+            }
             return false
         }
 
@@ -1298,6 +1307,19 @@ final class AppViewModel: ObservableObject {
         glossaryCollection.glossaries[index].updatedAt = Date()
         persistGlossaries()
         return true
+    }
+
+    func glossaryNameValidationError(id: String, name: String) -> String? {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedName.isEmpty {
+            return "詞庫名稱不能空白，請輸入一個容易辨識的名稱。"
+        }
+        if glossaryCollection.glossaries.contains(where: {
+            $0.id != id && $0.name.caseInsensitiveCompare(trimmedName) == .orderedSame
+        }) {
+            return "已有另一個名為「\(trimmedName)」的專案詞庫，請改用不同名稱。"
+        }
+        return nil
     }
 
     func chooseAndImportGlossaryTerms() -> [String]? {
@@ -1488,7 +1510,6 @@ final class AppViewModel: ObservableObject {
 
     func chooseAndMergeTranscriptFiles() {
         beginFileImport()
-        defer { endFileImport() }
         let panel = NSOpenPanel()
         panel.title = "選擇要合併的文字稿"
         panel.prompt = "合併文字稿"
@@ -1503,21 +1524,31 @@ final class AppViewModel: ObservableObject {
         }
 
         guard panel.runModal() == .OK else {
+            endFileImport()
             return
         }
 
-        do {
-            let result = try TranscriptMerger.merge(panel.urls)
-            NSWorkspace.shared.activateFileViewerSelecting([result.outputURL])
-            alert = UserFacingAlert(
-                title: "文字稿已合併",
-                message: "已依分段編號排序並產生新檔：\n\(result.outputURL.path)\n\n原始 TXT 未被覆寫。"
-            )
-        } catch {
-            alert = UserFacingAlert(
-                title: "無法合併文字稿",
-                message: error.localizedDescription
-            )
+        let selectedURLs = panel.urls
+        Task { @MainActor [weak self] in
+            defer { self?.endFileImport() }
+            let mergeResult: Result<TranscriptMergeResult, Error> =
+                await Task.detached(priority: .userInitiated) {
+                    Result { try TranscriptMerger.merge(selectedURLs) }
+                }.value
+            guard let self else { return }
+            switch mergeResult {
+            case let .success(result):
+                NSWorkspace.shared.activateFileViewerSelecting([result.outputURL])
+                self.alert = UserFacingAlert(
+                    title: "文字稿已合併",
+                    message: "已依分段編號排序並產生新檔：\n\(result.outputURL.path)\n\n原始 TXT 未被覆寫。"
+                )
+            case let .failure(error):
+                self.alert = UserFacingAlert(
+                    title: "無法合併文字稿",
+                    message: error.localizedDescription
+                )
+            }
         }
     }
 
@@ -3292,6 +3323,23 @@ final class AppViewModel: ObservableObject {
         }
         if settings.openTextWhenCompleted {
             openOutput(for: job)
+        }
+    }
+
+    func handleNotificationActivation(jobIDString: String) {
+        guard let jobID = UUID(uuidString: jobIDString) else { return }
+        if let job = jobs.first(where: { $0.id == jobID }),
+           let outputPath = job.outputPath,
+           fileManager.fileExists(atPath: outputPath)
+        {
+            openOutput(for: job)
+            return
+        }
+        if let summary = recentJobs.first(where: { $0.id == jobID }),
+           let outputPath = summary.outputPath,
+           fileManager.fileExists(atPath: outputPath)
+        {
+            openOutput(for: summary)
         }
     }
 

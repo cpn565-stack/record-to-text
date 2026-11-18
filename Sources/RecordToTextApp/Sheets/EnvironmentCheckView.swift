@@ -4,6 +4,7 @@ import SwiftUI
 
 struct EnvironmentCheckView: View {
     @ObservedObject var viewModel: AppViewModel
+    var showsOpenSettingsButton = true
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openSettings) private var openSettings
     @Environment(\.colorSchemeContrast) private var contrast
@@ -82,12 +83,14 @@ struct EnvironmentCheckView: View {
 
                 Spacer()
 
-                Button("開啟設定…") {
-                    dismiss()
-                    openSettings()
+                if showsOpenSettingsButton {
+                    Button("開啟設定…") {
+                        dismiss()
+                        openSettings()
+                    }
+                    .buttonStyle(.link)
+                    .font(.caption)
                 }
-                .buttonStyle(.link)
-                .font(.caption)
             }
             .padding(.horizontal, AppSpacing.xl)
             .padding(.vertical, AppSpacing.md)
@@ -209,7 +212,7 @@ struct EnvironmentCheckView: View {
                 detail: viewModel.googleAIStudioCredentialStorageDescription,
                 badgeText: hasKey ? "就緒" : "未設定",
                 badgeColor: hasKey ? AppColors.success : AppColors.warning,
-                actionTitle: hasKey ? nil : "前往設定…"
+                actionTitle: (hasKey || !showsOpenSettingsButton) ? nil : "前往設定…"
             ) {
                 dismiss()
                 openSettings()
@@ -226,7 +229,7 @@ struct EnvironmentCheckView: View {
                         : "尚未下載模型；請至「設定 → 轉錄引擎」下載。"),
                 badgeText: ready ? "就緒" : "需準備",
                 badgeColor: ready ? AppColors.success : AppColors.warning,
-                actionTitle: ready ? nil : "前往設定…"
+                actionTitle: (ready || !showsOpenSettingsButton) ? nil : "前往設定…"
             ) {
                 dismiss()
                 openSettings()

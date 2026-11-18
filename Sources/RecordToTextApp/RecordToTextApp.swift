@@ -1,10 +1,38 @@
 import AppKit
 import SwiftUI
+import UserNotifications
 
 @MainActor
-final class RecordToTextAppDelegate: NSObject, NSApplicationDelegate {
+final class RecordToTextAppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     weak var viewModel: AppViewModel?
     private var terminationPending = false
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        if Bundle.main.bundleIdentifier != nil {
+            UNUserNotificationCenter.current().delegate = self
+        }
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound])
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        let identifier = response.notification.request.identifier
+        Task { @MainActor [weak self] in
+            NSApp?.activate(ignoringOtherApps: true)
+            self?.viewModel?.handleNotificationActivation(jobIDString: identifier)
+            completionHandler()
+        }
+    }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if terminationPending { return .terminateLater }
