@@ -182,4 +182,151 @@ final class GeminiHydrogenBackendTests: XCTestCase {
         let data = try JSONSerialization.data(withJSONObject: json)
         return vertex ? Data("data: \(String(decoding: data, as: UTF8.self))\n\n".utf8) : data
     }
+
+    func testAIStudioValidateAPIKeyUsesLightweightModelsEndpointAndModelIDAllowlist() async throws {
+        var lastMethod: String?
+        var lastURL: URL?
+        var lastKeyHeader: String?
+
+        HydrogenURLProtocol.handler = { request in
+            lastMethod = request.httpMethod
+            lastURL = request.url
+            lastKeyHeader = request.value(forHTTPHeaderField: "x-goog-api-key")
+            return (200, Data(#"{"models":[{"name":"models/gemini-4-hydrogen"}]}"#.utf8))
+        }
+
+        let backend = GoogleAIStudioBackend(urlSession: session)
+        let ok = try await backend.validateAPIKey("  AIza-test-key  ")
+        XCTAssertTrue(ok)
+        XCTAssertEqual(lastMethod, "GET")
+        XCTAssertEqual(lastURL?.absoluteString, "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1")
+        XCTAssertEqual(lastKeyHeader, "AIza-test-key")
+
+        HydrogenURLProtocol.handler = { _ in
+            (403, Data(#"{"error":{"code":403,"message":"API key invalid"}}"#.utf8))
+        }
+        do {
+            _ = try await backend.validateAPIKey("bad-key")
+            XCTFail("Expected invalidAPIKey")
+        } catch let error as GoogleAIStudioError {
+            guard case .invalidAPIKey = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+
+        var networkCalls = 0
+        HydrogenURLProtocol.handler = { _ in
+            networkCalls += 1
+            return (200, Data())
+        }
+        for badModel in ["gemini/../evil", "gemini-4?alt=json", "gemini/subpath", ""] {
+            let badBackend = GoogleAIStudioBackend(
+                urlSession: session,
+                configuration: .init(apiKey: "fixture-key", modelID: badModel, useFilesAPI: false)
+            )
+            do {
+                _ = try await badBackend.transcribeDetailed(audioData: Data("audio".utf8))
+                XCTFail("Expected invalidModelID for \(badModel)")
+            } catch let error as GoogleAIStudioError {
+                XCTAssertEqual(error, .invalidModelID(badModel))
+            }
+        }
+        XCTAssertEqual(networkCalls, 0)
+    }
+
+    func testAIStudioStreamingSSEAndZeroCopyAudioFileURL() async throws {
+        let workDir = root.appendingPathComponent("work", isDirectory: true)
+        try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+        let audioFile = root.appendingPathComponent("segment-0001.mp3")
+        try Data("direct-audio-file-bytes".utf8).write(to: audioFile)
+
+        var sawAcceptHeader: String?
+        var sawIncludeThoughts: Bool?
+        HydrogenURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/v1beta/models/gemini-4-hydrogen:streamGenerateContent")
+            XCTAssertEqual(request.url?.query, "alt=sse")
+            sawAcceptHeader = request.value(forHTTPHeaderField: "Accept")
+            let body = try contextRequestBody(request)
+            let gen = try XCTUnwrap(body["generationConfig"] as? [String: Any])
+            let thinking = try XCTUnwrap(gen["thinkingConfig"] as? [String: Any])
+            sawIncludeThoughts = thinking["includeThoughts"] as? Bool
+            let sse =
+                "data: {\"candidates\":[{\"index\":0,\"content\":{\"parts\":[{\"thought\":true,\"text\":\"隱藏思考\"},{\"text\":\"講者 1：AI Studio \"}]}}]}\n\n" +
+                "data: {\"candidates\":[{\"index\":0,\"content\":{\"parts\":[{\"text\":\"SSE 串流完成。\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":50,\"candidatesTokenCount\":12,\"thoughtsTokenCount\":30,\"totalTokenCount\":92}}\n\n"
+            return (200, Data(sse.utf8))
+        }
+
+        let backend = GoogleAIStudioBackend(
+            urlSession: session,
+            configuration: .init(
+                apiKey: "fixture-key",
+                modelID: "gemini-4-hydrogen",
+                useFilesAPI: false,
+                thinkingLevel: .xhigh,
+                useStreamingSSE: true
+            )
+        )
+        let result = try await backend.transcribeDetailed(
+            audioFileURL: audioFile,
+            workingDirectory: workDir
+        )
+        XCTAssertEqual(sawAcceptHeader, "text/event-stream")
+        XCTAssertEqual(sawIncludeThoughts, true)
+        XCTAssertEqual(result.text, "講者 1：AI Studio SSE 串流完成。")
+        XCTAssertEqual(result.metadata.usage?.thoughtsTokenCount, 30)
+    }
+
+    func testEngineCancelCurrentJobImmediatelyTerminatesSlowFFprobe() async throws {
+        let slowProbe = root.appendingPathComponent("slow-ffprobe")
+        let startedFlag = root.appendingPathComponent("probe-started")
+        let script = """
+        #!/bin/sh
+        touch "\(startedFlag.path)"
+        sleep 20
+        """
+        try script.write(to: slowProbe, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: slowProbe.path)
+
+        let dummyAudio = root.appendingPathComponent("sample.m4a")
+        try Data("audio".utf8).write(to: dummyAudio)
+        let outDir = root.appendingPathComponent("out", isDirectory: true)
+        try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+
+        let paths = ApplicationPaths(root: root.appendingPathComponent("Support"))
+        let runtime = ResolvedRuntime(
+            python: URL(fileURLWithPath: "/usr/bin/true"),
+            ffmpeg: URL(fileURLWithPath: "/usr/bin/true"),
+            ffprobe: slowProbe,
+            opencc: URL(fileURLWithPath: "/usr/bin/true"),
+            helper: URL(fileURLWithPath: "/usr/bin/true"),
+            gcloud: nil,
+            isDeveloperRuntime: true
+        )
+        let engine = TranscriptionEngine(runtime: runtime, paths: paths)
+        let snapshot = JobSnapshot(
+            modelID: "gemini-4-hydrogen",
+            glossaryID: nil,
+            glossaryName: nil,
+            terms: [],
+            prompt: "",
+            outputLocationMode: .fixedDirectory,
+            outputDirectory: outDir.path,
+            keepRawTranscript: false,
+            backendType: .googleAIStudio,
+            googleAIStudioAPIKey: "fixture-key",
+            googleAIStudioModelID: "gemini-4-hydrogen"
+        )
+        let job = TranscriptionJob(sourcePath: dummyAudio.path, snapshot: snapshot)
+
+        let start = ContinuousClock.now
+        let runTask = Task {
+            try await engine.run(job: job) { _ in }
+        }
+        try await TestSupport.eventually { FileManager.default.fileExists(atPath: startedFlag.path) }
+        engine.cancelCurrentJob()
+        runTask.cancel()
+        _ = try? await runTask.value
+        let elapsed = start.duration(to: .now).secondsValue
+        XCTAssertLessThan(elapsed, 5.0, "cancelCurrentJob() must terminate ffprobe promptly instead of waiting 20s")
+    }
 }

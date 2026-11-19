@@ -887,9 +887,9 @@ public final class HelperASRBackend {
         }
         do {
             if let checkpoint = request.checkpointV2 {
-                try OutputContractValidator.readLocalTranscript(at: expectedURL, checkpoint: checkpoint, prompt: request.prompt)
+                _ = try OutputContractValidator.readLocalTranscript(at: expectedURL, checkpoint: checkpoint, prompt: request.prompt)
             } else {
-                try TextFileValidator.readNonEmptyUTF8(at: expectedURL)
+                _ = try TextFileValidator.readNonEmptyUTF8(at: expectedURL)
             }
         } catch TextFileValidationError.missing {
             throw ASRBackendError.outputMissing(expectedURL.path)

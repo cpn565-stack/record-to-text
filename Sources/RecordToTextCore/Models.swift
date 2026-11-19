@@ -158,11 +158,6 @@ public struct GeminiModelDescriptor: Identifiable, Hashable, Sendable {
 
     public static let presetModels: [GeminiModelDescriptor] = [
         GeminiModelDescriptor(
-            id: "gemini-3.5-transcribe",
-            displayName: "Gemini 3.5 Transcribe",
-            note: "錄音轉文字專用；不使用自訂提示或背景。有詞庫時使用詞庫，無詞庫時嘗試區分講者。繁體中文及講者辨識請依結果確認。"
-        ),
-        GeminiModelDescriptor(
             id: "gemini-4-hydrogen",
             displayName: "Gemini 4 Hydrogen",
             note: "支援音訊轉錄與低／中／高／極高思考強度，預設極高。較高強度可能增加耗時及 token 用量，不保證逐字稿更準；費用以 Google 帳單為準。"
@@ -367,10 +362,10 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.hasCompletedOnboarding = hasCompletedOnboarding
         self.backendType = backendType
         self.googleAIStudioAPIKey = googleAIStudioAPIKey
-        self.googleAIStudioModelID = googleAIStudioModelID
+        self.googleAIStudioModelID = AppSettings.migratedGeminiModelID(googleAIStudioModelID)
         self.vertexAIProjectID = vertexAIProjectID
         self.vertexAILocation = vertexAILocation
-        self.vertexAIModelID = vertexAIModelID
+        self.vertexAIModelID = AppSettings.migratedGeminiModelID(vertexAIModelID)
         self.vertexAIGCSBucket = vertexAIGCSBucket
         self.vertexAIIncludeSummary = vertexAIIncludeSummary
         self.legacyGeminiThinkingLevel = geminiThinkingLevel ?? .high
@@ -412,10 +407,14 @@ public struct AppSettings: Codable, Equatable, Sendable {
 
         backendType = try container.decodeIfPresent(ASRBackendType.self, forKey: .backendType) ?? .googleAIStudio
         googleAIStudioAPIKey = try container.decodeIfPresent(String.self, forKey: .googleAIStudioAPIKey)
-        googleAIStudioModelID = try container.decodeIfPresent(String.self, forKey: .googleAIStudioModelID) ?? "gemini-3.7-flash"
+        googleAIStudioModelID = AppSettings.migratedGeminiModelID(
+            try container.decodeIfPresent(String.self, forKey: .googleAIStudioModelID) ?? "gemini-3.7-flash"
+        )
         vertexAIProjectID = try container.decodeIfPresent(String.self, forKey: .vertexAIProjectID)
         vertexAILocation = try container.decodeIfPresent(String.self, forKey: .vertexAILocation) ?? "global"
-        vertexAIModelID = try container.decodeIfPresent(String.self, forKey: .vertexAIModelID) ?? "gemini-3.7-flash"
+        vertexAIModelID = AppSettings.migratedGeminiModelID(
+            try container.decodeIfPresent(String.self, forKey: .vertexAIModelID) ?? "gemini-3.7-flash"
+        )
         vertexAIGCSBucket = try container.decodeIfPresent(String.self, forKey: .vertexAIGCSBucket)
         vertexAIIncludeSummary = try container.decodeIfPresent(Bool.self, forKey: .vertexAIIncludeSummary) ?? false
         legacyGeminiThinkingLevel = try container.decodeIfPresent(
@@ -517,6 +516,10 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var selectedModelID: String {
         selectedModels[CPUArchitecture.current.rawValue]
             ?? ASRModelDescriptor.currentDefault.id
+    }
+
+    public static func migratedGeminiModelID(_ raw: String) -> String {
+        raw == "gemini-3.5-transcribe" ? "gemini-4-hydrogen" : raw
     }
 }
 
@@ -728,10 +731,10 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
         )
         self.backendType = backendType
         self.googleAIStudioAPIKey = googleAIStudioAPIKey
-        self.googleAIStudioModelID = googleAIStudioModelID
+        self.googleAIStudioModelID = AppSettings.migratedGeminiModelID(googleAIStudioModelID)
         self.vertexAIProjectID = vertexAIProjectID
         self.vertexAILocation = vertexAILocation
-        self.vertexAIModelID = vertexAIModelID
+        self.vertexAIModelID = AppSettings.migratedGeminiModelID(vertexAIModelID)
         self.vertexAIGCSBucket = vertexAIGCSBucket
         self.vertexAIIncludeSummary = vertexAIIncludeSummary
         self.geminiThinkingLevel = geminiThinkingLevel
@@ -766,10 +769,14 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
         )
         backendType = try container.decodeIfPresent(ASRBackendType.self, forKey: .backendType) ?? .googleAIStudio
         googleAIStudioAPIKey = try container.decodeIfPresent(String.self, forKey: .googleAIStudioAPIKey)
-        googleAIStudioModelID = try container.decodeIfPresent(String.self, forKey: .googleAIStudioModelID) ?? "gemini-3.7-flash"
+        googleAIStudioModelID = AppSettings.migratedGeminiModelID(
+            try container.decodeIfPresent(String.self, forKey: .googleAIStudioModelID) ?? "gemini-3.7-flash"
+        )
         vertexAIProjectID = try container.decodeIfPresent(String.self, forKey: .vertexAIProjectID)
         vertexAILocation = try container.decodeIfPresent(String.self, forKey: .vertexAILocation) ?? "global"
-        vertexAIModelID = try container.decodeIfPresent(String.self, forKey: .vertexAIModelID) ?? "gemini-3.7-flash"
+        vertexAIModelID = AppSettings.migratedGeminiModelID(
+            try container.decodeIfPresent(String.self, forKey: .vertexAIModelID) ?? "gemini-3.7-flash"
+        )
         vertexAIGCSBucket = try container.decodeIfPresent(String.self, forKey: .vertexAIGCSBucket)
         vertexAIIncludeSummary = try container.decodeIfPresent(Bool.self, forKey: .vertexAIIncludeSummary) ?? false
         geminiThinkingLevel = try container.decodeIfPresent(

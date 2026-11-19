@@ -1259,9 +1259,9 @@ tests.check(
         )
         let display = usage.summaryDisplay(modelID: "gemini-3.8-flash")
         let cost = usage.estimatedCostUSD(modelID: "gemini-3.8-flash")
-        return display == "79.2k tokens (思考 1.2k)，預估 $0.07"
+        return display == "79.2k tokens (思考 1.2k)，預估 $0.08"
             && cost != nil
-            && CloudUsageMetadata.formatCostUSD(cost!) == "$0.07"
+            && CloudUsageMetadata.formatCostUSD(cost!) == "$0.08"
     }(),
     "CloudUsageMetadata accurately estimates Gemini 3.8 Flash cost and formats token summary"
 )

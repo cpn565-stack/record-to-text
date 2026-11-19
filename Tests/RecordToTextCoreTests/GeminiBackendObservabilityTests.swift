@@ -3,35 +3,45 @@ import XCTest
 @testable import RecordToTextCore
 
 final class GeminiBackendObservabilityTests: XCTestCase {
-    func testTranscribeQuickSelectionsPersistAndDoNotClaimFlashPricing() throws {
-        let original = AppSettings(defaultOutputDirectory: "/tmp/output")
-        for choice in [QuickTranscriptionChoice.aiStudioGemini35Transcribe, .vertexGemini35Transcribe] {
-            let selected = choice.applying(to: original)
-            let restored = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(selected))
-            XCTAssertTrue(choice.matches(restored))
-            XCTAssertEqual(choice.backendType == .vertexAI ? restored.vertexAIModelID : restored.googleAIStudioModelID,
-                           "gemini-3.5-transcribe")
-        }
-        let usage = CloudUsageMetadata(promptTokenCount: 1_000, candidatesTokenCount: 100,
-                                       thoughtsTokenCount: nil, totalTokenCount: 1_100)
-        XCTAssertNil(usage.estimatedCostUSD(modelID: "gemini-3.5-transcribe"))
+    func testRemovedTranscribeModelMigratesToHydrogenInSettingsAndSnapshots() throws {
+        let legacySettingsJSON = Data(
+            #"{"defaultOutputDirectory":"/tmp/output","googleAIStudioModelID":"gemini-3.5-transcribe","vertexAIModelID":"gemini-3.5-transcribe"}"#.utf8
+        )
+        let restoredSettings = try JSONDecoder().decode(AppSettings.self, from: legacySettingsJSON)
+        XCTAssertEqual(restoredSettings.googleAIStudioModelID, "gemini-4-hydrogen")
+        XCTAssertEqual(restoredSettings.vertexAIModelID, "gemini-4-hydrogen")
+
+        let snapshot = JobSnapshot(
+            modelID: "unused",
+            glossaryID: nil,
+            glossaryName: nil,
+            terms: [],
+            prompt: "",
+            outputLocationMode: .fixedDirectory,
+            outputDirectory: "/tmp",
+            keepRawTranscript: false,
+            backendType: .vertexAI,
+            googleAIStudioModelID: "gemini-3.5-transcribe",
+            vertexAIModelID: "gemini-3.5-transcribe"
+        )
+        XCTAssertEqual(snapshot.googleAIStudioModelID, "gemini-4-hydrogen")
+        XCTAssertEqual(snapshot.vertexAIModelID, "gemini-4-hydrogen")
     }
 
-    func testTranscribeSegmentLimitKeepsHeadroomAndOtherModelsUnchanged() throws {
+    func testCloudSegmentLimitUsesStandardTwentyMinuteWindow() throws {
         let root = try TestSupport.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let paths = ApplicationPaths(root: root)
         let runtime = RuntimeEnvironment.candidate(paths: paths,
             settings: AppSettings.defaultValue(developerMode: true), bundledHelperURL: nil)
         let engine = TranscriptionEngine(runtime: runtime, paths: paths)
-        for (backend, model, expected) in [(ASRBackendType.googleAIStudio, "gemini-3.5-transcribe", 840.0),
-                                           (.vertexAI, "gemini-3.5-transcribe", 840.0),
-                                           (.vertexAI, "gemini-3.8-flash", 1_200.0)] {
+        for (backend, model) in [(ASRBackendType.googleAIStudio, "gemini-4-hydrogen"),
+                                 (.vertexAI, "gemini-3.8-flash")] {
             let snapshot = JobSnapshot(modelID: "unused", glossaryID: nil, glossaryName: nil,
                 terms: [], prompt: "", outputLocationMode: .fixedDirectory, outputDirectory: root.path,
                 keepRawTranscript: false, backendType: backend, googleAIStudioModelID: model, vertexAIModelID: model)
             let job = TranscriptionJob(sourcePath: "/tmp/source.wav", snapshot: snapshot)
-            XCTAssertEqual(engine.cloudSegmentLimit(for: job), expected)
+            XCTAssertEqual(engine.cloudSegmentLimit(for: job), 1_200.0)
         }
     }
 

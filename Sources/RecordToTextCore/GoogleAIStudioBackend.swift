@@ -4,6 +4,7 @@ import CryptoKit
 public enum GoogleAIStudioError: LocalizedError, Equatable {
     case missingAPIKey
     case invalidAPIKey(String)
+    case invalidModelID(String)
     case requestFailed(statusCode: Int, message: String)
     case rateLimited(message: String, retryAfterSeconds: Double?)
     case quotaExceeded(String)
@@ -28,6 +29,8 @@ public enum GoogleAIStudioError: LocalizedError, Equatable {
             return "尚未設定 Google AI Studio API Key。請至設定頁面填入 API Key。"
         case .invalidAPIKey:
             return "Google AI Studio API Key 無效，請檢查設定與使用權限。"
+        case let .invalidModelID(modelID):
+            return "無效的 Google AI Studio 模型 ID：\(modelID)"
         case let .requestFailed(statusCode, _):
             return "Google AI Studio 請求失敗（HTTP \(statusCode)）。"
         case let .rateLimited(_, retryAfterSeconds):
@@ -88,13 +91,15 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         public var useFilesAPI: Bool
         public var thinkingLevel: GeminiThinkingLevel
         public var fallbackPolicy: CloudFallbackPolicy
+        public var useStreamingSSE: Bool
 
         public init(
             apiKey: String? = nil,
             modelID: String = "gemini-3.7-flash",
             useFilesAPI: Bool = true,
             thinkingLevel: GeminiThinkingLevel? = nil,
-            fallbackPolicy: CloudFallbackPolicy = .disabled
+            fallbackPolicy: CloudFallbackPolicy = .disabled,
+            useStreamingSSE: Bool = false
         ) {
             self.apiKey = apiKey
             self.modelID = modelID
@@ -102,6 +107,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             self.thinkingLevel = GeminiGenerationConfig.resolvedThinkingLevel(
                 thinkingLevel ?? GeminiGenerationConfig.defaultThinkingLevel(modelID: modelID), modelID: modelID)
             self.fallbackPolicy = fallbackPolicy
+            self.useStreamingSSE = useStreamingSSE
         }
 
         public static let `default` = Configuration()
@@ -109,6 +115,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
 
     private let urlSession: URLSession
     private let networkEnvironment: CloudNetworkEnvironment
+    private let streamingLimits: GeminiStreamingLimits
     private let lock = NSLock()
     private var config: Configuration
 
@@ -117,11 +124,28 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
     public init(
         networkEnvironment: CloudNetworkEnvironment = .init(),
         urlSession: URLSession = GeminiTransportHelper.makeEphemeralRetrySession(),
-        configuration: Configuration = .default
+        configuration: Configuration = .default,
+        streamingLimits: GeminiStreamingLimits = .default
     ) {
         self.urlSession = urlSession
         self.networkEnvironment = networkEnvironment
         self.config = configuration
+        self.streamingLimits = streamingLimits
+    }
+
+    static func validateModelID(_ modelID: String) throws {
+        let extra = Set("._-".unicodeScalars)
+        let allowed = !modelID.isEmpty
+            && !modelID.contains("..")
+            && modelID.unicodeScalars.allSatisfy { scalar in
+                ("a"..."z").contains(scalar)
+                    || ("A"..."Z").contains(scalar)
+                    || ("0"..."9").contains(scalar)
+                    || extra.contains(scalar)
+            }
+        guard allowed else {
+            throw GoogleAIStudioError.invalidModelID(modelID)
+        }
     }
 
     public func updateConfiguration(_ newConfig: Configuration) {
@@ -134,35 +158,21 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         lock.withLock { config }
     }
 
-    /// 驗證 API Key 是否有效
+    /// 驗證 API Key 是否有效（使用輕量 GET /v1beta/models，不消耗生成 token 且不綁死單一舊模型）
     public func validateAPIKey(_ apiKey: String) async throws -> Bool {
         let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedKey.isEmpty else {
             throw GoogleAIStudioError.missingAPIKey
         }
 
-        let urlString = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+        let urlString = "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1"
         guard let url = URL(string: urlString) else {
             throw GoogleAIStudioError.invalidJSONResponse
         }
 
         var request = URLRequest(url: url)
-        request.httpMethod = "POST"
+        request.httpMethod = "GET"
         request.setValue(trimmedKey, forHTTPHeaderField: "x-goog-api-key")
-        request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
-
-        let body: [String: Any] = [
-            "contents": [
-                [
-                    "role": "user",
-                    "parts": [["text": "Ping"]]
-                ]
-            ],
-            "generationConfig": [
-                "maxOutputTokens": 5
-            ]
-        ]
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
         request.timeoutInterval = 15
 
         let (data, response) = try await urlSession.data(for: request)
@@ -190,7 +200,8 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
 
     /// Executes transcription while preserving model/version/token provenance.
     public func transcribeDetailed(
-        audioData: Data,
+        audioData: Data = Data(),
+        audioFileURL: URL? = nil,
         mimeType: String = "audio/mp3",
         terms: [String] = [],
         customPrompt: String = "",
@@ -207,7 +218,17 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             return try await CloudBudgetContext.$current.withValue(budget) {
                 try await CloudNetworkContext.$current.withValue(context) {
                     try await CloudNetworkContext.$segmentAttempts.withValue(CloudModelAttempts()) {
-                        try await self.transcribeDetailed(audioData: audioData, mimeType: mimeType, terms: terms, customPrompt: customPrompt, recordingContext: recordingContext, timeOffsetSeconds: timeOffsetSeconds, workingDirectory: workingDirectory, logger: logger)
+                        try await self.transcribeDetailed(
+                            audioData: audioData,
+                            audioFileURL: audioFileURL,
+                            mimeType: mimeType,
+                            terms: terms,
+                            customPrompt: customPrompt,
+                            recordingContext: recordingContext,
+                            timeOffsetSeconds: timeOffsetSeconds,
+                            workingDirectory: workingDirectory,
+                            logger: logger
+                        )
                     }
                 }
             }
@@ -220,11 +241,6 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             }
         }
         let currentConfig = getConfiguration()
-        if currentConfig.modelID == "gemini-3.5-transcribe" {
-            logger?("info", "此模型使用專用語音轉錄，無法套用自訂提示與錄音背景；詞庫與講者區分無法同時使用。")
-            let vocabularyCount = terms.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.count
-            guard vocabularyCount <= 1000 else { throw GoogleAIStudioError.tooManyVocabularyTerms(vocabularyCount) }
-        }
 
         guard let apiKey = currentConfig.apiKey?
             .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -232,10 +248,12 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         else {
             throw GoogleAIStudioError.missingAPIKey
         }
+        try Self.validateModelID(currentConfig.modelID)
 
         var preparedAudio = try await prepareAudioPart(
             apiKey: apiKey,
             audioData: audioData,
+            audioFileURL: audioFileURL,
             mimeType: mimeType,
             useFilesAPI: currentConfig.useFilesAPI,
             workingDirectory: workingDirectory,
@@ -250,13 +268,14 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                     preferredModelID: currentConfig.modelID,
                     preparedAudio: preparedAudio.audioPart,
                     apiKey: apiKey,
-                    audioByteCount: audioData.count,
+                    audioByteCount: preparedAudio.byteCount,
                     terms: terms,
                     customPrompt: customPrompt,
                     recordingContext: recordingContext,
                     timeOffsetSeconds: timeOffsetSeconds,
                     thinkingLevel: currentConfig.thinkingLevel,
                     fallbackPolicy: currentConfig.fallbackPolicy,
+                    useStreamingSSE: currentConfig.useStreamingSSE,
                     workingDirectory: workingDirectory,
                     logger: logger
                 )
@@ -269,8 +288,15 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                        (CloudNetworkContext.segmentAttempts?.quota(for: currentConfig.modelID).count ?? 4) < 4,
                        try await remoteFileIsMissing(name: name, apiKey: apiKey, logger: logger) {
                         rebuilt = true
-                        preparedAudio = try await prepareAudioPart(apiKey: apiKey, audioData: audioData,
-                            mimeType: mimeType, useFilesAPI: true, workingDirectory: workingDirectory, logger: logger)
+                        preparedAudio = try await prepareAudioPart(
+                            apiKey: apiKey,
+                            audioData: audioData,
+                            audioFileURL: audioFileURL,
+                            mimeType: mimeType,
+                            useFilesAPI: true,
+                            workingDirectory: workingDirectory,
+                            logger: logger
+                        )
                         continue
                     }
                     if let priorStage { CloudBudgetContext.current?.restoreStage(priorStage) }
@@ -323,6 +349,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         timeOffsetSeconds: Double,
         thinkingLevel: GeminiThinkingLevel,
         fallbackPolicy: CloudFallbackPolicy,
+        useStreamingSSE: Bool,
         workingDirectory: URL?,
         logger: ((_ level: String, _ message: String) -> Void)?
     ) async throws -> CloudTranscriptionResult {
@@ -344,6 +371,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                     recordingContext: recordingContext,
                     timeOffsetSeconds: timeOffsetSeconds,
                     thinkingLevel: thinkingLevel,
+                    useStreamingSSE: useStreamingSSE,
                     workingDirectory: workingDirectory,
                     logger: logger
                 )
@@ -360,12 +388,14 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
     private struct PreparedAudio {
         let audioPart: [String: Any]
         let uploadedFileName: String?
+        let byteCount: Int
     }
 
     /// Generation retries reuse preparation; only a confirmed missing URI is rebuilt.
     private func prepareAudioPart(
         apiKey: String,
         audioData: Data,
+        audioFileURL: URL?,
         mimeType: String,
         useFilesAPI: Bool,
         workingDirectory: URL?,
@@ -376,9 +406,10 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         if useFilesAPI {
             do {
                 logger?("info", "使用 Google AI Studio Files API 串流上傳音訊...")
-                let (fileUri, fileName) = try await uploadToFilesAPI(
+                let (fileUri, fileName, byteCount) = try await uploadToFilesAPI(
                     apiKey: apiKey,
                     audioData: audioData,
+                    audioFileURL: audioFileURL,
                     mimeType: mimeType,
                     workingDirectory: workingDirectory,
                     logger: logger
@@ -391,7 +422,8 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                             "fileUri": fileUri
                         ]
                     ],
-                    uploadedFileName: fileName
+                    uploadedFileName: fileName,
+                    byteCount: byteCount
                 )
             } catch is CancellationError {
                 throw CancellationError()
@@ -406,13 +438,19 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         }
 
         // Inline Base64 透過檔案串流 POST
-        guard audioData.count <= Self.maximumInlineAudioBytes else {
+        let resolvedInlineData: Data
+        if let audioFileURL {
+            resolvedInlineData = try Data(contentsOf: audioFileURL, options: .mappedIfSafe)
+        } else {
+            resolvedInlineData = audioData
+        }
+        guard resolvedInlineData.count <= Self.maximumInlineAudioBytes else {
             throw GoogleAIStudioError.audioPayloadTooLarge(
-                sizeBytes: audioData.count,
+                sizeBytes: resolvedInlineData.count,
                 limitBytes: Self.maximumInlineAudioBytes
             )
         }
-        let base64Audio = audioData.base64EncodedString()
+        let base64Audio = resolvedInlineData.base64EncodedString()
         return PreparedAudio(
             audioPart: [
                 "inlineData": [
@@ -420,7 +458,8 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                     "data": base64Audio
                 ]
             ],
-            uploadedFileName: uploadedFileName
+            uploadedFileName: uploadedFileName,
+            byteCount: resolvedInlineData.count
         )
     }
 
@@ -448,19 +487,15 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         recordingContext: String,
         timeOffsetSeconds: Double,
         thinkingLevel: GeminiThinkingLevel,
+        useStreamingSSE: Bool,
         workingDirectory: URL?,
         logger: ((_ level: String, _ message: String) -> Void)?
     ) async throws -> CloudTranscriptionResult {
-        if effectiveModelID == "gemini-3.5-transcribe" {
-            return try await sendTranscribeInteraction(
-                requestedModelID: requestedModelID, effectiveModelID: effectiveModelID,
-                retryCount: retryCount, fallbackReason: fallbackReason,
-                apiKey: apiKey, audioPart: preparedAudio, terms: terms,
-                timeOffsetSeconds: timeOffsetSeconds, thinkingLevel: thinkingLevel,
-                workingDirectory: workingDirectory, logger: logger
-            )
-        }
-        let endpointString = "https://generativelanguage.googleapis.com/v1beta/models/\(effectiveModelID):generateContent"
+        try Self.validateModelID(effectiveModelID)
+        let responseMode: CloudResponseMode = useStreamingSSE ? .geminiSSE : .unaryJSON
+        let endpointString = useStreamingSSE
+            ? "https://generativelanguage.googleapis.com/v1beta/models/\(effectiveModelID):streamGenerateContent?alt=sse"
+            : "https://generativelanguage.googleapis.com/v1beta/models/\(effectiveModelID):generateContent"
         guard let endpointURL = URL(string: endpointString) else {
             throw GoogleAIStudioError.invalidJSONResponse
         }
@@ -471,6 +506,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             retryCount: retryCount,
             fallbackReason: fallbackReason,
             endpointURL: endpointURL,
+            responseMode: responseMode,
             apiKey: apiKey,
             audioByteCount: audioByteCount,
             audioPart: preparedAudio,
@@ -487,177 +523,13 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         )
     }
 
-    /// The Developer API transcription model uses Interactions, whose request
-    /// and response schemas differ from GenerateContent. It cannot combine
-    /// custom vocabulary with diarization or word timestamps.
-    static func transcribeInteractionBody(audioPart: [String: Any], terms: [String]) throws -> [String: Any] {
-        let input: [String: Any]
-        if let file = audioPart["fileData"] as? [String: Any],
-           let uri = file["fileUri"] as? String, !uri.isEmpty,
-           let mime = file["mimeType"] as? String, !mime.isEmpty {
-            // Interactions uses AudioContent for uploaded audio, not the
-            // GenerateContent fileData wrapper.
-            input = ["type": "audio", "uri": uri, "mime_type": mime]
-        } else if let inline = audioPart["inlineData"] as? [String: Any],
-                  let data = inline["data"] as? String, let mime = inline["mimeType"] as? String {
-            input = ["type": "audio", "data": data, "mime_type": mime]
-        } else {
-            throw GoogleAIStudioError.invalidAudioReference
-        }
-        let vocabulary = terms.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        guard vocabulary.count <= 1000 else { throw GoogleAIStudioError.tooManyVocabularyTerms(vocabulary.count) }
-        let transcription: [String: Any]
-        if vocabulary.isEmpty {
-            transcription = ["mode": ["type": "verbatim", "diarization_mode": "speaker"]]
-        } else {
-            // The Developer API's vocabulary example omits mode; verbatim is
-            // the documented default. A verbatim mode, when explicit, is an
-            // object rather than the string used by the older implementation.
-            transcription = ["custom_vocabulary": vocabulary]
-        }
-        return ["model": "models/gemini-3.5-transcribe", "input": [input],
-                "store": false, "generation_config": ["transcription_config": transcription]]
-    }
-
-    static func transcribeInteractionText(from data: Data, timeOffsetSeconds: Double = 0) throws -> String {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw GoogleAIStudioError.invalidJSONResponse
-        }
-        guard let status = json["status"] as? String else {
-            throw GoogleAIStudioError.incompleteResponse(finishReason: "MISSING_STATUS", message: nil)
-        }
-        guard status == "completed" else {
-            throw GoogleAIStudioError.incompleteResponse(finishReason: status.uppercased(), message: nil)
-        }
-        let steps = json["steps"] as? [[String: Any]] ?? []
-        let pieces = steps.filter { $0["type"] as? String == "model_output" }
-            .flatMap { $0["content"] as? [[String: Any]] ?? [] }
-            .filter { $0["type"] as? String == "text" }
-        let text = pieces.map { part -> String in
-            let original = part["text"] as? String ?? ""
-            return textWithSpeakerLabels(original, annotations: part["annotations"] as? [[String: Any]] ?? [],
-                                         timeOffsetSeconds: timeOffsetSeconds)
-        }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
-        // Interactions `completed` is not GenerateContent `finishReason=STOP`.
-        // Do not invent STOP or trigger the latter's empty-STOP retry policy.
-        guard !text.isEmpty else { throw GoogleAIStudioError.emptyResponse }
-        return text
-    }
-
-    /// Insert labels at validated UTF-8 byte offsets without reconstructing the
-    /// transcript from annotations: punctuation and unannotated text survive.
-    private static func textWithSpeakerLabels(_ text: String, annotations: [[String: Any]], timeOffsetSeconds: Double) -> String {
-        let bytes = Array(text.utf8)
-        var insertions: [(Int, String)] = []
-        var previous: String?
-        var lastPosition = 0
-        var usedTextAlignment = false
-        let separators = CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters).union(.symbols)
-        let words = annotations.filter { $0["type"] as? String == "word_info" }
-        guard !words.isEmpty else { return text }
-        for annotation in words {
-            guard let speaker = annotation["speaker"] as? String,
-                  speaker.range(of: #"^spk_[0-9]+$"#, options: .regularExpression) != nil else { return text }
-            let start: Int
-            let end: Int
-            if let first = annotation["start_index"] as? Int, let last = annotation["end_index"] as? Int {
-                start = first
-                end = last
-            } else {
-                // Google's REST example may omit byte offsets. Align every
-                // annotated word in sequence, accepting only punctuation and
-                // whitespace between words. Otherwise return the unaltered text.
-                guard let word = annotation["text"] as? String, !word.isEmpty,
-                      let suffix = String(bytes: bytes[lastPosition...], encoding: .utf8),
-                      let range = suffix.range(of: word) else { return text }
-                let gap = suffix[..<range.lowerBound]
-                guard gap.unicodeScalars.allSatisfy({ separators.contains($0) }) else { return text }
-                start = lastPosition + gap.utf8.count
-                end = start + word.utf8.count
-                usedTextAlignment = true
-            }
-            guard start >= lastPosition, end > start, end <= bytes.count,
-                  String(bytes: bytes[0..<start], encoding: .utf8) != nil,
-                  String(bytes: bytes[0..<end], encoding: .utf8) != nil else { return text }
-            if speaker != previous {
-                let seconds = timeOffsetSeconds.isFinite ? Int(max(0, timeOffsetSeconds)) : 0
-                let segmentStart = String(format: "%02d:%02d:%02d", seconds / 3600, (seconds / 60) % 60, seconds % 60)
-                insertions.append((start, "\n\n[片段 \(segmentStart)・講者 \(speaker.dropFirst(4))]："))
-                previous = speaker
-            }
-            lastPosition = end
-        }
-        if usedTextAlignment {
-            guard let tail = String(bytes: bytes[lastPosition...], encoding: .utf8),
-                  tail.unicodeScalars.allSatisfy({ separators.contains($0) }) else { return text }
-        }
-        guard !insertions.isEmpty else { return text }
-        var result = ""
-        var cursor = 0
-        for (position, label) in insertions {
-            guard let slice = String(bytes: bytes[cursor..<position], encoding: .utf8) else { return text }
-            result += slice + label
-            cursor = position
-        }
-        guard let tail = String(bytes: bytes[cursor...], encoding: .utf8) else { return text }
-        return result + tail
-    }
-
-    private func sendTranscribeInteraction(
-        requestedModelID: String, effectiveModelID: String, retryCount: Int,
-        fallbackReason: String?, apiKey: String, audioPart: [String: Any], terms: [String],
-        timeOffsetSeconds: Double, thinkingLevel: GeminiThinkingLevel, workingDirectory: URL?,
-        logger: ((_ level: String, _ message: String) -> Void)?
-    ) async throws -> CloudTranscriptionResult {
-        let body = try Self.transcribeInteractionBody(audioPart: audioPart, terms: terms)
-        let requestData = try JSONSerialization.data(withJSONObject: body)
-        let file = try GeminiTransportHelper.writeTemporaryRequestFile(data: requestData,
-            in: workingDirectory, prefix: "aistudio_transcribe")
-        defer { try? FileManager.default.removeItem(at: file) }
-        var request = URLRequest(url: URL(string: "https://generativelanguage.googleapis.com/v1beta/interactions")!)
-        request.httpMethod = "POST"
-        request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
-        request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = GeminiGenerationConfig.requestTimeout(modelID: effectiveModelID)
-        let started = Date()
-        let (data, response) = try await sendWithPOSIXRetry(request: request, fileURL: file,
-            session: urlSession, logger: logger)
-        guard response.statusCode == 200 else {
-            let message = GeminiResponseParser.errorMessage(from: data)
-            if response.statusCode == 429 {
-                if GeminiTransportHelper.isDailyQuotaExceeded(data: data, message: message) {
-                    throw GoogleAIStudioError.quotaExceeded(message)
-                }
-                throw GoogleAIStudioError.rateLimited(message: message,
-                    retryAfterSeconds: GeminiTransportHelper.retryAfterSeconds(response: response, data: data))
-            }
-            throw GoogleAIStudioError.requestFailed(statusCode: response.statusCode, message: message)
-        }
-        let text = try Self.transcribeInteractionText(from: data, timeOffsetSeconds: timeOffsetSeconds)
-        let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        let usage = json?["usage"] as? [String: Any]
-        let usageMetadata = usage.map { CloudUsageMetadata(
-            promptTokenCount: $0["total_input_tokens"] as? Int,
-            cachedContentTokenCount: $0["total_cached_tokens"] as? Int,
-            candidatesTokenCount: $0["total_output_tokens"] as? Int,
-            thoughtsTokenCount: $0["total_thought_tokens"] as? Int,
-            totalTokenCount: $0["total_tokens"] as? Int) }
-        let metadata = CloudTranscriptionMetadata(requestedModelID: requestedModelID,
-            effectiveModelID: effectiveModelID, modelVersion: json?["model"] as? String,
-            responseID: json?["id"] as? String,
-            retryCount: max(retryCount, (CloudNetworkContext.generation?.count ?? 1) - 1),
-            fallbackReason: fallbackReason, thinkingLevel: thinkingLevel,
-            latencySeconds: Date().timeIntervalSince(started), usage: usageMetadata)
-        return CloudTranscriptionResult(text: text, metadata: metadata)
-    }
-
     private func sendGenerateContentRequest(
         requestedModelID: String,
         effectiveModelID: String,
         retryCount: Int,
         fallbackReason: String?,
         endpointURL: URL,
+        responseMode: CloudResponseMode,
         apiKey: String,
         audioByteCount: Int,
         audioPart: [String: Any],
@@ -673,7 +545,8 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         let generationConfig = GeminiGenerationConfig.make(
             maxOutputTokens: GeminiGenerationConfig.transcriptionOutputTokens(modelID: effectiveModelID),
             modelID: effectiveModelID,
-            thinkingLevel: effectiveThinkingLevel
+            thinkingLevel: effectiveThinkingLevel,
+            includeThoughts: responseMode == .geminiSSE
         )
         logger?(
             "info",
@@ -715,12 +588,16 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             "application/json; charset=utf-8",
             forHTTPHeaderField: "Content-Type"
         )
+        if responseMode == .geminiSSE {
+            urlRequest.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        }
         urlRequest.timeoutInterval = GeminiGenerationConfig.requestTimeout(modelID: effectiveModelID)
 
         let startedAt = Date()
         let (data, httpResponse) = try await sendWithPOSIXRetry(
             request: urlRequest,
             fileURL: tempRequestFile,
+            responseMode: responseMode,
             session: urlSession,
             logger: logger
         )
@@ -776,6 +653,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
     private func sendWithPOSIXRetry(
         request: URLRequest,
         fileURL: URL,
+        responseMode: CloudResponseMode,
         session: URLSession,
         logger: ((_ level: String, _ message: String) -> Void)?
     ) async throws -> (Data, HTTPURLResponse) {
@@ -785,46 +663,69 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                 request: request,
                 fileURL: fileURL,
                 stage: .generation,
-                responseMode: .unaryJSON,
+                responseMode: responseMode,
+                streamingLimits: streamingLimits,
                 logger: logger
             )
             guard let http = response as? HTTPURLResponse else { throw GoogleAIStudioError.invalidJSONResponse }
             return (data, http)
         } catch {
             if GeminiTransportHelper.isPOSIXMessageTooLarge(error) { throw GoogleAIStudioError.transportMessageTooLarge }
+            if let sseError = error as? GeminiSSEError {
+                throw GoogleAIStudioError.requestFailed(statusCode: 200, message: sseError.localizedDescription)
+            }
             throw error
         }
     }
 
-    /// 上傳檔案至 Google AI Studio Files API
+    /// 上傳檔案至 Google AI Studio Files API（若提供 audioFileURL 則直接零拷貝串流上傳，免寫第二份暫存檔）
     private func uploadToFilesAPI(
         apiKey: String,
         audioData: Data,
+        audioFileURL: URL?,
         mimeType: String,
         workingDirectory: URL?,
         logger: ((_ level: String, _ message: String) -> Void)?
-    ) async throws -> (fileUri: String, fileName: String) {
-        let tempAudioFile = try GeminiTransportHelper.writeTemporaryRequestFile(
-            data: audioData,
-            in: workingDirectory,
-            prefix: "aistudio_audio"
-        )
+    ) async throws -> (fileUri: String, fileName: String, byteCount: Int) {
+        let uploadSourceURL: URL
+        let temporaryFileToDelete: URL?
+        let byteCount: Int
+        let expectedHash: String
+
+        if let audioFileURL {
+            let mapped = try Data(contentsOf: audioFileURL, options: .mappedIfSafe)
+            uploadSourceURL = audioFileURL
+            temporaryFileToDelete = nil
+            byteCount = mapped.count
+            expectedHash = Data(SHA256.hash(data: mapped)).base64EncodedString()
+        } else {
+            let tempAudioFile = try GeminiTransportHelper.writeTemporaryRequestFile(
+                data: audioData,
+                in: workingDirectory,
+                prefix: "aistudio_audio"
+            )
+            uploadSourceURL = tempAudioFile
+            temporaryFileToDelete = tempAudioFile
+            byteCount = audioData.count
+            expectedHash = Data(SHA256.hash(data: audioData)).base64EncodedString()
+        }
         defer {
-            try? FileManager.default.removeItem(at: tempAudioFile)
+            if let temporaryFileToDelete {
+                try? FileManager.default.removeItem(at: temporaryFileToDelete)
+            }
         }
 
         // A client-assigned name lets files.get confirm a lost final response.
         let requestedName = "files/" + UUID().uuidString.lowercased()
         let makeRequest = {
             try await self.startFilesUpload(apiKey: apiKey, name: requestedName,
-                byteCount: audioData.count, mimeType: mimeType, logger: logger)
+                byteCount: byteCount, mimeType: mimeType, logger: logger)
         }
         let uploadRequest = try await makeRequest()
-        let expectedHash = Data(SHA256.hash(data: audioData)).base64EncodedString()
         let (uploadData, uploadResponse) = try await GeminiTransportHelper.budgetedUpload(
             session: urlSession,
             request: uploadRequest,
-            fileURL: tempAudioFile,
+            fileURL: uploadSourceURL,
             stage: .upload,
             responseMode: .unaryJSON,
             attempts: CloudNetworkContext.segmentAttempts?.quota(for: "preparation:filesUpload", stage: .upload),
@@ -834,13 +735,14 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                 guard response.statusCode == 200,
                       let file = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                       file["name"] as? String == requestedName,
-                      file["sizeBytes"] as? String == String(audioData.count),
+                      file["sizeBytes"] as? String == String(byteCount),
                       file["sha256Hash"] as? String == expectedHash else { return nil }
                 return (try JSONSerialization.data(withJSONObject: ["file": file]), response)
             }, restartUpload: makeRequest)
         guard let uploadHTTP = uploadResponse as? HTTPURLResponse else { throw GoogleAIStudioError.invalidJSONResponse }
 
-        return try await finishFilesUpload(data: uploadData, response: uploadHTTP, apiKey: apiKey, logger: logger)
+        let finished = try await finishFilesUpload(data: uploadData, response: uploadHTTP, apiKey: apiKey, logger: logger)
+        return (finished.fileUri, finished.fileName, byteCount)
     }
 
     private func startFilesUpload(

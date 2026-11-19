@@ -1,10 +1,38 @@
 import AppKit
 import SwiftUI
+import UserNotifications
 
 @MainActor
-final class RecordToTextAppDelegate: NSObject, NSApplicationDelegate {
+final class RecordToTextAppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     weak var viewModel: AppViewModel?
     private var terminationPending = false
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        if Bundle.main.bundleIdentifier != nil {
+            UNUserNotificationCenter.current().delegate = self
+        }
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound])
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        let identifier = response.notification.request.identifier
+        Task { @MainActor [weak self] in
+            NSApp?.activate(ignoringOtherApps: true)
+            self?.viewModel?.handleNotificationActivation(jobIDString: identifier)
+            completionHandler()
+        }
+    }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if terminationPending { return .terminateLater }
@@ -66,6 +94,7 @@ struct RecordToTextApp: App {
     var body: some Scene {
         WindowGroup("record-to-text") {
             MainView(viewModel: viewModel)
+                .tint(AppColors.accent)
                 .frame(minWidth: 760, minHeight: 680)
                 .onAppear {
                     appDelegate.viewModel = viewModel
@@ -85,7 +114,7 @@ struct RecordToTextApp: App {
                     viewModel.startQueuedJobs()
                 }
                 .keyboardShortcut(.return, modifiers: .command)
-                .disabled(!viewModel.hasQueuedJobs)
+                .disabled(!viewModel.hasQueuedJobs || viewModel.isWaitingForStartup)
 
                 Button("取消目前工作") {
                     viewModel.cancelCurrentJob()
@@ -95,15 +124,37 @@ struct RecordToTextApp: App {
 
                 Divider()
 
+                Button("詞庫管理…") {
+                    viewModel.isGlossaryManagerPresented = true
+                }
+                .keyboardShortcut("l", modifiers: [.command, .shift])
+
+                Button("合併文字稿…") {
+                    viewModel.chooseAndMergeTranscriptFiles()
+                }
+                .keyboardShortcut("m", modifiers: [.command, .shift])
+
+                Divider()
+
                 Button("環境檢查…") {
                     viewModel.refreshEnvironment()
                     viewModel.isEnvironmentPresented = true
                 }
+
+                Button("復原掃描…") {
+                    viewModel.refreshRecoveryScan()
+                }
+
+                Button("清除未成功項目與殘留檔…") {
+                    viewModel.requestUnsuccessfulCleanup()
+                }
+                .disabled(!viewModel.hasUnsuccessfulItemsToClean || viewModel.isUnsuccessfulCleanupRunning)
             }
         }
 
         Settings {
             SettingsView(viewModel: viewModel)
+                .tint(AppColors.accent)
         }
     }
 }

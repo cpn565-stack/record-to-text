@@ -66,7 +66,7 @@ final class GeminiThinkingPreferencesTests: XCTestCase {
         let config = GeminiGenerationConfig.make(maxOutputTokens: 32_768,
             modelID: "gemini-4-carbon", thinkingLevel: .xhigh)
         XCTAssertEqual((config["thinkingConfig"] as? [String: String])?["thinkingLevel"], "high")
-        for model in ["gemini-3.5-transcribe", "custom-model"] {
+        for model in ["custom-model"] {
             XCTAssertTrue(GeminiGenerationConfig.supportedThinkingLevels(modelID: model).isEmpty)
             XCTAssertNil(GeminiGenerationConfig.make(maxOutputTokens: 16_384,
                 modelID: model, thinkingLevel: .xhigh)["thinkingConfig"])
@@ -98,7 +98,9 @@ final class GeminiThinkingPreferencesTests: XCTestCase {
     func testHydrogenBudgetsAndUsageDoNotInheritUnknownModelOrFlashDefaults() {
         XCTAssertEqual(GeminiGenerationConfig.transcriptionOutputTokens(modelID: "gemini-4-hydrogen"), 65_536)
         XCTAssertEqual(GeminiGenerationConfig.summaryOutputTokens(modelID: "gemini-4-hydrogen"), 65_536)
-        XCTAssertEqual(GeminiGenerationConfig.summaryOutputTokens(modelID: "gemini-4-carbon"), 2_048)
+        XCTAssertEqual(GeminiGenerationConfig.summaryOutputTokens(modelID: "gemini-4-carbon"), 16_384)
+        XCTAssertEqual(GeminiGenerationConfig.summaryOutputTokens(modelID: "gemini-3.8-flash"), 16_384)
+        XCTAssertEqual(GeminiGenerationConfig.summaryOutputTokens(modelID: "custom-model"), 2_048)
         XCTAssertEqual(GeminiGenerationConfig.requestTimeout(modelID: "gemini-4-hydrogen"), 1_200)
         XCTAssertEqual(GeminiGenerationConfig.segmentBudget(modelID: "gemini-4-hydrogen"), .seconds(1_800))
         let usage = CloudUsageMetadata(promptTokenCount: 1_000, candidatesTokenCount: 100,

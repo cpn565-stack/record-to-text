@@ -110,12 +110,15 @@ public final class TranscriptionEngine {
     private let runtime: ResolvedRuntime
     private let paths: ApplicationPaths
     private let runner: ProcessRunner
+    private let probeRunner = ProcessRunner()
+    private let authRunner = ProcessRunner()
     private let probeService: AudioProbeService
     private let ffmpegService: FFmpegService
     private let silenceDetectionService: any SilenceDetectionServicing
     private let openCCService: OpenCCService
     private let backend: HelperASRBackend
     private let googleAIStudioBackend: GoogleAIStudioBackend
+    private let usesCustomGoogleAIStudioBackend: Bool
     private let vertexAIBackend: VertexAIGeminiBackend
     private let usesCustomVertexAIBackend: Bool
     private let cloudSegmentBudgetLimit: Duration?
@@ -253,15 +256,16 @@ public final class TranscriptionEngine {
         self.runtime = runtime
         self.paths = paths
         self.runner = runner
-        self.probeService = AudioProbeService(executableURL: runtime.ffprobe)
+        self.probeService = AudioProbeService(executableURL: runtime.ffprobe, runner: probeRunner)
         self.ffmpegService = FFmpegService(executableURL: runtime.ffmpeg, runner: runner)
         self.silenceDetectionService = silenceDetectionService
             ?? SilenceDetectionService(executableURL: runtime.ffmpeg, runner: runner)
         self.openCCService = OpenCCService(executableURL: runtime.opencc, runner: runner)
         self.backend = HelperASRBackend(runtime: runtime, paths: paths, runner: runner)
+        self.usesCustomGoogleAIStudioBackend = googleAIStudioBackend != nil
         self.googleAIStudioBackend = googleAIStudioBackend ?? GoogleAIStudioBackend()
         self.usesCustomVertexAIBackend = vertexAIBackend != nil
-        self.vertexAIBackend = vertexAIBackend ?? VertexAIGeminiBackend(authService: GCloudAuthService(runner: runner))
+        self.vertexAIBackend = vertexAIBackend ?? VertexAIGeminiBackend(authService: GCloudAuthService(runner: authRunner))
         self.sleepPrevention = sleepPrevention
         self.maximumASRSegmentDuration = maximumASRSegmentDuration
         self.cloudAdaptiveMinimumChildDuration = cloudAdaptiveMinimumChildDuration
@@ -1265,6 +1269,8 @@ public final class TranscriptionEngine {
         }
         backend.cancelCurrentJob()
         runner.cancelCurrent()
+        probeRunner.cancelCurrent()
+        authRunner.cancelCurrent()
     }
 
     private func resolvedOutputDirectory(
@@ -1303,12 +1309,20 @@ public final class TranscriptionEngine {
         update: @escaping (PipelineUpdate) -> Void,
         silenceAnalysisCache: JobSilenceAnalysisCache
     ) async throws -> PipelineResult {
+        let currentUseFilesAPI = usesCustomGoogleAIStudioBackend
+            ? googleAIStudioBackend.getConfiguration().useFilesAPI
+            : true
+        let currentUseStreamingSSE = usesCustomGoogleAIStudioBackend
+            ? googleAIStudioBackend.getConfiguration().useStreamingSSE
+            : true
         googleAIStudioBackend.updateConfiguration(
             GoogleAIStudioBackend.Configuration(
                 apiKey: job.snapshot.googleAIStudioAPIKey,
                 modelID: job.snapshot.googleAIStudioModelID,
+                useFilesAPI: currentUseFilesAPI,
                 thinkingLevel: job.snapshot.geminiThinkingLevel,
-                fallbackPolicy: job.snapshot.cloudFallbackPolicy
+                fallbackPolicy: job.snapshot.cloudFallbackPolicy,
+                useStreamingSSE: currentUseStreamingSSE
             )
         )
         let modelDisplay = job.snapshot.googleAIStudioModelID
@@ -1324,9 +1338,9 @@ public final class TranscriptionEngine {
             modelDisplay: modelDisplay,
             update: update,
             silenceAnalysisCache: silenceAnalysisCache
-        ) { audioData, timeOffset, timeEnd, segmentLabel, speakerRoster in
+        ) { audioFileURL, timeOffset, timeEnd, segmentLabel, speakerRoster in
             try await self.transcribeGoogleAIStudioWithStatus(
-                audioData: audioData,
+                audioFileURL: audioFileURL,
                 job: job,
                 modelDisplay: "\(modelDisplay)\(segmentLabel)",
                 timeOffset: timeOffset,
@@ -1339,7 +1353,7 @@ public final class TranscriptionEngine {
     }
 
     private func transcribeGoogleAIStudioWithStatus(
-        audioData: Data,
+        audioFileURL: URL,
         job: TranscriptionJob,
         modelDisplay: String,
         timeOffset: Double,
@@ -1354,7 +1368,7 @@ public final class TranscriptionEngine {
         )
         do {
             let result = try await googleAIStudioBackend.transcribeDetailed(
-                audioData: audioData,
+                audioFileURL: audioFileURL,
                 mimeType: "audio/mp3",
                 terms: job.snapshot.terms,
                 customPrompt:
@@ -1397,7 +1411,7 @@ public final class TranscriptionEngine {
         if !usesCustomVertexAIBackend || runtime.gcloud != nil {
             vertexAIBackend.updateAuthentication(
                 customGCloudPath: runtime.gcloud?.path,
-                runner: runner
+                runner: authRunner
             )
         }
         vertexAIBackend.updateConfiguration(
@@ -1412,11 +1426,6 @@ public final class TranscriptionEngine {
             )
         )
         let modelDisplay = job.snapshot.vertexAIModelID
-        let supportsSummary = modelDisplay != "gemini-3.5-transcribe"
-        if !supportsSummary && job.snapshot.vertexAIIncludeSummary {
-            update(.warning(code: "transcribe_summary_unsupported",
-                message: "Gemini 3.5 Transcribe 不支援摘要，本次僅輸出逐字稿。"))
-        }
         return try await runCloudPipeline(
             job: job,
             startedAt: startedAt,
@@ -1432,7 +1441,7 @@ public final class TranscriptionEngine {
             finalizeTranscript: { segmentTexts in
                 await Self.finalizeVertexTranscript(
                     segmentTexts: segmentTexts,
-                    includeSummary: job.snapshot.vertexAIIncludeSummary && supportsSummary,
+                    includeSummary: job.snapshot.vertexAIIncludeSummary,
                     summarize: { completeTranscript in
                         update(
                             .log(
@@ -1451,9 +1460,9 @@ public final class TranscriptionEngine {
                     update: update
                 )
             },
-            transcribe: { audioData, timeOffset, timeEnd, segmentLabel, speakerRoster in
+            transcribe: { audioFileURL, timeOffset, timeEnd, segmentLabel, speakerRoster in
                 try await self.transcribeVertexWithStatus(
-                    audioData: audioData,
+                    audioFileURL: audioFileURL,
                     job: job,
                     modelDisplay: "\(modelDisplay)\(segmentLabel)",
                     timeOffset: timeOffset,
@@ -1467,7 +1476,7 @@ public final class TranscriptionEngine {
     }
 
     private func transcribeVertexWithStatus(
-        audioData: Data,
+        audioFileURL: URL,
         job: TranscriptionJob,
         modelDisplay: String,
         timeOffset: Double,
@@ -1482,7 +1491,7 @@ public final class TranscriptionEngine {
         )
         do {
             let result = try await vertexAIBackend.transcribeDetailed(
-                audioData: audioData,
+                audioFileURL: audioFileURL,
                 mimeType: "audio/mp3",
                 terms: job.snapshot.terms,
                 customPrompt:
@@ -1555,11 +1564,7 @@ public final class TranscriptionEngine {
     }
 
     func cloudSegmentLimit(for job: TranscriptionJob) -> TimeInterval {
-        if job.snapshot.requestedModelID == "gemini-3.5-transcribe" {
-            // Leave headroom for encoded audio duration rounding and provider limits.
-            return min(maximumASRSegmentDuration, 14 * 60)
-        }
-        return maximumASRSegmentDuration
+        maximumASRSegmentDuration
     }
 
     private func makeCloudSegmentPlan(
@@ -1729,7 +1734,7 @@ public final class TranscriptionEngine {
         silenceAnalysisCache: JobSilenceAnalysisCache,
         finalizeTranscript: (([String]) async -> String)? = nil,
         transcribe: (
-            _ audioData: Data,
+            _ audioFileURL: URL,
             _ timeOffset: Double,
             _ timeEnd: Double,
             _ segmentLabel: String,
@@ -1738,13 +1743,9 @@ public final class TranscriptionEngine {
     ) async throws -> PipelineResult {
         let fileManager = FileManager.default
         let segmentLimit = cloudSegmentLimit(for: job)
-        // Transcribe receives vocabulary as structured hints, not the prompt or
-        // background text. Spoken words matching those inputs are not echoes.
-        let usesPrompt = job.snapshot.requestedModelID != "gemini-3.5-transcribe"
-        let validationPrompt = usesPrompt ? job.snapshot.prompt : ""
-        let validationTerms = usesPrompt ? job.snapshot.terms : []
-        let validationContext = usesPrompt
-            ? try CloudRecordingContext.referenceBlock(job.snapshot.cloudRecordingContext) : ""
+        let validationPrompt = job.snapshot.prompt
+        let validationTerms = job.snapshot.terms
+        let validationContext = try CloudRecordingContext.referenceBlock(job.snapshot.cloudRecordingContext)
         let sourceTimeOffset = Self.cloudSegmentStart(
             sourceSlice: job.sourceSlice,
             plannedStart: 0
@@ -2087,7 +2088,7 @@ public final class TranscriptionEngine {
                         try await CloudBudgetContext.$current.withValue(budget) {
                             try budget.checkRemaining(stage: "transcribe")
                             return try await transcribe(
-                                try Data(contentsOf: audioURL), absoluteStart, record.endSeconds, segmentLabel, speakerRoster
+                                audioURL, absoluteStart, record.endSeconds, segmentLabel, speakerRoster
                             )
                         }
                         }

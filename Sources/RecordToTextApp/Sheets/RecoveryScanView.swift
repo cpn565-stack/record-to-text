@@ -4,74 +4,104 @@ import SwiftUI
 
 struct RecoveryScanView: View {
     @ObservedObject var viewModel: AppViewModel
+    @State private var isClearAllUnsuccessfulPresented = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            header
-            summaryRow
-            if viewModel.isRecoveryScanRunning,
-               viewModel.recoveryScanReport == nil
-            {
-                ProgressView("正在掃描 App 管理的復原資料…")
-                    .frame(maxWidth: .infinity, minHeight: 200)
-            } else if let report = viewModel.recoveryScanReport,
-                      !report.items.isEmpty
-            {
-                List {
-                    ForEach(report.items) { item in
-                        RecoveryScanRow(
-                            item: item,
-                            onReveal: { viewModel.revealRecoveryScanItem(item) },
-                            onRequeue: { viewModel.requeueRecoverableSource(item) },
-                            onDelete: { viewModel.requestDeleteRecoveryScanItem(item) }
-                        )
-                    }
+        VStack(alignment: .leading, spacing: 0) {
+            SheetHeader(
+                title: "復原掃描",
+                subtitle: "盤點系統暫存與 Temp-Recovery；可取回部分稿、在 Finder 檢視，或清除孤立殘留。"
+            ) {
+                Button("關閉") {
+                    viewModel.dismissRecoveryScan()
                 }
-                .listStyle(.inset)
-                .frame(minHeight: 280)
-            } else {
-                ContentUnavailableView(
-                    "沒有找到殘留資料",
-                    systemImage: "checkmark.circle",
-                    description: Text("系統暫存與 Temp-Recovery 皆無可顯示的 App 管理目錄。")
-                )
-                .frame(maxWidth: .infinity, minHeight: 200)
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
             }
+            .padding(AppSpacing.xl)
 
-            Text("刪除僅限 App 管理的 UUID 工作目錄，且需確認。不會動到原始錄音或正式輸出的文字檔。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            Divider()
 
-            HStack {
+            VStack(alignment: .leading, spacing: AppSpacing.lg) {
+                summaryRow
+
+                if viewModel.isRecoveryScanRunning,
+                   viewModel.recoveryScanReport == nil
+                {
+                    ProgressView("正在掃描 App 管理的復原資料…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let report = viewModel.recoveryScanReport,
+                          !report.items.isEmpty
+                {
+                    List {
+                        ForEach(report.items) { item in
+                            RecoveryScanRow(
+                                item: item,
+                                onOpenPartial: { viewModel.openRecoveryPartialTranscript(item) },
+                                onReveal: { viewModel.revealRecoveryScanItem(item) },
+                                onRequeue: { viewModel.requeueRecoverableSource(item) },
+                                onDelete: { viewModel.requestDeleteRecoveryScanItem(item) }
+                            )
+                        }
+                    }
+                    .listStyle(.inset)
+                    .clipShape(RoundedRectangle(cornerRadius: AppRadius.row))
+                } else {
+                    ContentUnavailableView(
+                        "沒有找到殘留資料",
+                        systemImage: "checkmark.circle",
+                        description: Text("系統暫存與 Temp-Recovery 皆無可顯示的 App 管理目錄。")
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+
+                Text("刪除僅限 App 管理的 UUID 工作目錄，且需確認。不會動到原始錄音或正式輸出的文字檔。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, AppSpacing.xl)
+            .padding(.vertical, AppSpacing.lg)
+
+            Divider()
+
+            HStack(spacing: AppSpacing.sm) {
                 Button {
                     viewModel.refreshRecoveryScan()
                 } label: {
                     if viewModel.isRecoveryScanRunning {
                         Label("掃描中…", systemImage: "arrow.triangle.2.circlepath")
                     } else {
-                        Text("重新掃描")
+                        Label("重新掃描", systemImage: "arrow.clockwise")
                     }
                 }
                 .disabled(viewModel.isRecoveryScanRunning)
+
                 if hasNonRecoverableItems {
                     Button("清除孤立與損壞…", role: .destructive) {
                         viewModel.requestBulkCleanupNonRecoverable()
                     }
-                    .disabled(viewModel.isRecoveryScanRunning)
+                    .disabled(viewModel.isRecoveryScanRunning || viewModel.isUnsuccessfulCleanupRunning)
                 }
+
+                if viewModel.hasUnsuccessfulItemsToClean {
+                    Button("一鍵清除全部殘留…", role: .destructive) {
+                        isClearAllUnsuccessfulPresented = true
+                    }
+                    .disabled(viewModel.isRecoveryScanRunning || viewModel.isUnsuccessfulCleanupRunning)
+                }
+
                 Spacer()
+
                 if let scannedAt = viewModel.recoveryScanReport?.scannedAt {
-                    Text("上次完成：\(scannedAt.formatted(date: .omitted, time: .standard))")
+                    Text("上次掃描：\(scannedAt.formatted(date: .omitted, time: .standard))")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .monospacedDigit()
                 }
-                Button("關閉") {
-                    viewModel.dismissRecoveryScan()
-                }
-                .keyboardShortcut(.defaultAction)
             }
+            .padding(.horizontal, AppSpacing.xl)
+            .padding(.vertical, AppSpacing.md)
         }
-        .padding(20)
         .frame(width: 680, height: 560)
         .confirmationDialog(
             deleteDialogTitle,
@@ -101,6 +131,18 @@ struct RecoveryScanView: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("只會刪除「孤立暫存」與「損壞／異常」目錄，不會刪除「可取回／可重加」項目。此操作無法復原。")
+        }
+        .confirmationDialog(
+            "一鍵清除所有未成功紀錄與殘留目錄？",
+            isPresented: $isClearAllUnsuccessfulPresented,
+            titleVisibility: .visible
+        ) {
+            Button("一鍵清除", role: .destructive) {
+                Task { await viewModel.cleanUpUnsuccessfulJobsAndResidualFiles() }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("將一併清除所有「失敗、已取消、被中斷」工作紀錄，以及系統暫存與 Temp-Recovery 內的全部殘留目錄（含可取回項目）。所有「完成」與「完成（含缺口）」紀錄、已輸出的 .txt 文字稿，以及原始錄音檔皆會完整保留。")
         }
     }
 
@@ -141,40 +183,29 @@ struct RecoveryScanView: View {
         }
     }
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("復原掃描")
-                .font(.title2.weight(.semibold))
-            Text("盤點系統暫存與 Temp-Recovery；可取回部分稿、顯示復原資料，或重新加入原始錄音。相容的雲端片段與 Qwen chunk 續跑會顯示在原工作卡片上。")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-        }
-    }
-
     private var summaryRow: some View {
         let report = viewModel.recoveryScanReport
-        return HStack(spacing: 16) {
-            if viewModel.isRecoveryScanRunning {
-                ProgressView()
-                    .controlSize(.small)
-                    .help("正在背景掃描")
-            }
+        return HStack(spacing: AppSpacing.md) {
             summaryChip(
                 title: "可取回／可重加",
                 count: report?.recoverableCount ?? 0,
-                color: .orange
+                color: AppColors.warning
             )
             summaryChip(
                 title: "孤立暫存",
                 count: report?.orphanedCount ?? 0,
-                color: .secondary
+                color: AppColors.neutral
             )
             summaryChip(
                 title: "損壞／異常",
                 count: report?.damagedCount ?? 0,
-                color: .red
+                color: AppColors.danger
             )
-            if let ignored = report?.ignoredNonUUIDDirectoryCount, ignored > 0 {
+            if viewModel.isRecoveryScanRunning {
+                ProgressView()
+                    .controlSize(.small)
+                    .help("正在背景掃描")
+            } else if let ignored = report?.ignoredNonUUIDDirectoryCount, ignored > 0 {
                 Text("已忽略非 UUID 目錄 \(ignored) 個")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -192,28 +223,33 @@ struct RecoveryScanView: View {
                 .font(.title3.monospacedDigit().weight(.semibold))
                 .foregroundStyle(color)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, AppSpacing.md)
+        .padding(.vertical, AppSpacing.sm)
+        .background(color.opacity(AppColors.statusTintOpacity), in: RoundedRectangle(cornerRadius: AppRadius.row))
+        .overlay {
+            RoundedRectangle(cornerRadius: AppRadius.row)
+                .stroke(color.opacity(0.22), lineWidth: 1)
+        }
     }
 }
 
 private struct RecoveryScanRow: View {
     let item: RecoveryScanItem
+    let onOpenPartial: () -> Void
     let onReveal: () -> Void
     let onRequeue: () -> Void
     let onDelete: () -> Void
 
+    @State private var canRequeueSource = false
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
             HStack(alignment: .firstTextBaseline) {
                 Label(kindTitle, systemImage: kindSymbol)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(kindColor)
                 Spacer()
-                Text(locationTitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                StatusBadge(text: locationTitle, color: AppColors.neutral)
             }
 
             Text(item.summary)
@@ -227,9 +263,9 @@ private struct RecoveryScanRow: View {
 
             if let source = item.sourcePath {
                 Text("來源：\(source)")
-                    .font(.caption.monospaced())
+                    .font(AppTypography.monoDetail)
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                    .lineLimit(1)
                     .truncationMode(.middle)
             }
 
@@ -240,36 +276,48 @@ private struct RecoveryScanRow: View {
             }
 
             Text(item.directoryPath)
-                .font(.caption2.monospaced())
+                .font(AppTypography.monoDetail)
                 .foregroundStyle(.secondary)
-                .lineLimit(2)
+                .lineLimit(1)
                 .truncationMode(.middle)
 
-            HStack {
+            HStack(spacing: 6) {
+                if item.hasPartialTranscript {
+                    StatusBadge(text: "可取回部分稿", color: AppColors.success)
+                }
                 if item.hasNormalizedWAV {
-                    badge("WAV")
+                    StatusBadge(text: "WAV", color: AppColors.neutral)
                 }
                 if item.hasRecoveryJSON {
-                    badge("recovery.json")
+                    StatusBadge(text: "recovery.json", color: AppColors.neutral)
                 }
                 if item.hasSegmentManifest {
-                    badge("manifest")
+                    StatusBadge(text: "manifest", color: AppColors.neutral)
                 }
+
+                Spacer(minLength: AppSpacing.sm)
+
                 if item.hasPartialTranscript {
-                    badge("可取回部分稿")
+                    Button("打開部分稿", action: onOpenPartial)
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
                 }
-                Spacer()
                 Button("Finder", action: onReveal)
                     .buttonStyle(.bordered)
+                    .controlSize(.small)
                 if canRequeueSource {
-                    Button("從頭重新加入", action: onRequeue)
+                    Button("重新加入", action: onRequeue)
                         .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
                 }
                 Button("刪除…", role: .destructive, action: onDelete)
                     .buttonStyle(.bordered)
+                    .controlSize(.small)
             }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, AppSpacing.xs)
+        .onAppear(perform: refreshSourceAvailability)
+        .onChange(of: item.sourcePath) { _, _ in refreshSourceAvailability() }
         .contextMenu {
             Button("複製復原資訊") {
                 let text = [item.summary, item.detail, item.sourcePath, item.directoryPath]
@@ -280,22 +328,23 @@ private struct RecoveryScanRow: View {
         }
     }
 
+    private func refreshSourceAvailability() {
+        guard item.kind == .recoverable,
+              let sourcePath = item.sourcePath,
+              !sourcePath.isEmpty
+        else {
+            canRequeueSource = false
+            return
+        }
+        canRequeueSource = FileManager.default.fileExists(atPath: sourcePath)
+    }
+
     private var kindTitle: String {
         switch item.kind {
         case .recoverable: return "可取回／可重加"
         case .orphaned: return "孤立暫存"
         case .damaged: return "損壞／異常"
         }
-    }
-
-    private var canRequeueSource: Bool {
-        guard item.kind == .recoverable,
-              let sourcePath = item.sourcePath,
-              !sourcePath.isEmpty
-        else {
-            return false
-        }
-        return FileManager.default.fileExists(atPath: sourcePath)
     }
 
     private var kindSymbol: String {
@@ -308,9 +357,9 @@ private struct RecoveryScanRow: View {
 
     private var kindColor: Color {
         switch item.kind {
-        case .recoverable: return .orange
-        case .orphaned: return .secondary
-        case .damaged: return .red
+        case .recoverable: return AppColors.warning
+        case .orphaned: return AppColors.neutral
+        case .damaged: return AppColors.danger
         }
     }
 
@@ -319,13 +368,5 @@ private struct RecoveryScanRow: View {
         case .systemTemp: return "系統暫存"
         case .tempRecovery: return "Temp-Recovery"
         }
-    }
-
-    private func badge(_ text: String) -> some View {
-        Text(text)
-            .font(.caption2)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(Color.secondary.opacity(0.15), in: Capsule())
     }
 }

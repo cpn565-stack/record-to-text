@@ -139,10 +139,85 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         runner: ProcessRunner
     ) {
         lock.withLock {
+            guard authService.configuredCustomGCloudPath != customGCloudPath else {
+                return
+            }
             authService = GCloudAuthService(
                 customGCloudPath: customGCloudPath,
                 runner: runner
             )
+        }
+    }
+
+    private final class AccessTokenBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var token: String
+
+        init(_ token: String) {
+            self.token = token
+        }
+
+        var value: String {
+            lock.withLock { token }
+        }
+
+        func update(_ newToken: String) {
+            lock.withLock { token = newToken }
+        }
+    }
+
+    static func validateEndpointParameters(
+        projectID: String,
+        location: String,
+        modelID: String
+    ) throws {
+        guard isAllowedASCII(location, extraScalars: "-"),
+              !location.isEmpty
+        else {
+            throw VertexAIError.invalidEndpointURL("無效的 Vertex AI Location：\(location)")
+        }
+        guard isAllowedASCII(projectID, extraScalars: ".:-"),
+              !projectID.isEmpty,
+              !projectID.contains("..")
+        else {
+            throw VertexAIError.invalidEndpointURL("無效的 GCP Project ID：\(projectID)")
+        }
+        guard isAllowedASCII(modelID, extraScalars: "._-"),
+              !modelID.isEmpty,
+              !modelID.contains("..")
+        else {
+            throw VertexAIError.invalidEndpointURL("無效的 Vertex AI Model ID：\(modelID)")
+        }
+    }
+
+    static func normalizedAndValidatedBucket(_ rawBucket: String?) throws -> String? {
+        guard var bucket = rawBucket?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !bucket.isEmpty
+        else {
+            return nil
+        }
+        if bucket.lowercased().hasPrefix("gs://") {
+            bucket.removeFirst(5)
+            if bucket.hasSuffix("/") {
+                bucket.removeLast()
+            }
+        }
+        guard !bucket.isEmpty,
+              !bucket.contains(".."),
+              isAllowedASCII(bucket, extraScalars: "._-")
+        else {
+            throw VertexAIError.invalidEndpointURL("無效的 GCS Bucket 名稱：\(bucket)")
+        }
+        return bucket
+    }
+
+    private static func isAllowedASCII(_ value: String, extraScalars: String) -> Bool {
+        let extra = Set(extraScalars.unicodeScalars)
+        return value.unicodeScalars.allSatisfy { scalar in
+            ("a"..."z").contains(scalar)
+                || ("A"..."Z").contains(scalar)
+                || ("0"..."9").contains(scalar)
+                || extra.contains(scalar)
         }
     }
 
@@ -151,7 +226,8 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
     }
 
     public func transcribeDetailed(
-        audioData: Data,
+        audioData: Data = Data(),
+        audioFileURL: URL? = nil,
         mimeType: String = "audio/mp3",
         terms: [String] = [],
         customPrompt: String = "",
@@ -168,7 +244,17 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             return try await CloudBudgetContext.$current.withValue(budget) {
                 try await CloudNetworkContext.$current.withValue(context) {
                     try await CloudNetworkContext.$segmentAttempts.withValue(CloudModelAttempts()) {
-                        try await self.transcribeDetailed(audioData: audioData, mimeType: mimeType, terms: terms, customPrompt: customPrompt, recordingContext: recordingContext, timeOffsetSeconds: timeOffsetSeconds, workingDirectory: workingDirectory, logger: logger)
+                        try await self.transcribeDetailed(
+                            audioData: audioData,
+                            audioFileURL: audioFileURL,
+                            mimeType: mimeType,
+                            terms: terms,
+                            customPrompt: customPrompt,
+                            recordingContext: recordingContext,
+                            timeOffsetSeconds: timeOffsetSeconds,
+                            workingDirectory: workingDirectory,
+                            logger: logger
+                        )
                     }
                 }
             }
@@ -192,6 +278,10 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         } else {
             do {
                 resolvedProjectID = try await CloudBudgetContext.perform(stage: "auth") { try await authService.getDefaultProjectID() }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let authError as GCloudAuthError where authError == .cancelled {
+                throw CancellationError()
             } catch {
                 try CloudBudgetContext.check("auth")
                 throw VertexAIError.authenticationFailed(
@@ -200,28 +290,39 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             }
         }
 
-        let accessToken: String
+        let initialAccessToken: String
         do {
-            accessToken = try await CloudBudgetContext.perform(stage: "auth") { try await authService.getAccessToken() }
+            initialAccessToken = try await CloudBudgetContext.perform(stage: "auth") { try await authService.getAccessToken() }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let authError as GCloudAuthError where authError == .cancelled {
+            throw CancellationError()
         } catch {
             try CloudBudgetContext.check("auth")
             throw VertexAIError.authenticationFailed(error.localizedDescription)
         }
 
+        let rawLocation = currentConfig.location
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let location = rawLocation.isEmpty ? "global" : rawLocation
+        try Self.validateEndpointParameters(
+            projectID: resolvedProjectID,
+            location: location,
+            modelID: currentConfig.modelID
+        )
+        let validatedBucket = try Self.normalizedAndValidatedBucket(currentConfig.gcsBucket)
+        let tokenBox = AccessTokenBox(initialAccessToken)
+
         var preparedAudio = try await prepareAudioPart(
-            bucket: currentConfig.gcsBucket?
-                .trimmingCharacters(in: .whitespacesAndNewlines),
+            bucket: validatedBucket,
             authService: authService,
-            accessToken: accessToken,
+            accessToken: tokenBox.value,
             audioData: audioData,
+            audioFileURL: audioFileURL,
             mimeType: mimeType,
             workingDirectory: workingDirectory,
             logger: logger
         )
-
-        let rawLocation = currentConfig.location
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let location = rawLocation.isEmpty ? "global" : rawLocation
 
         var rebuilt = false
         while true {
@@ -232,9 +333,9 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                     projectID: resolvedProjectID,
                     location: location,
                     preparedAudio: preparedAudio.audioPart,
-                    accessToken: accessToken,
+                    tokenBox: tokenBox,
                     authService: authService,
-                    audioByteCount: audioData.count,
+                    audioByteCount: preparedAudio.byteCount,
                     terms: terms,
                     customPrompt: customPrompt,
                     recordingContext: recordingContext,
@@ -252,18 +353,25 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                        [400, 403, 404, 410].contains(statusCode), let bucket = preparedAudio.gcsBucket,
                        let name = preparedAudio.gcsObjectName,
                        (CloudNetworkContext.segmentAttempts?.quota(for: currentConfig.modelID).count ?? 4) < 4,
-                       try await gcsObjectIsMissing(bucket: bucket, objectName: name, accessToken: accessToken, logger: logger) {
+                       try await gcsObjectIsMissing(bucket: bucket, objectName: name, accessToken: tokenBox.value, logger: logger) {
                         rebuilt = true
-                        preparedAudio = try await prepareAudioPart(bucket: bucket, authService: authService,
-                            accessToken: accessToken, audioData: audioData, mimeType: mimeType,
-                            workingDirectory: workingDirectory, logger: logger)
+                        preparedAudio = try await prepareAudioPart(
+                            bucket: bucket,
+                            authService: authService,
+                            accessToken: tokenBox.value,
+                            audioData: audioData,
+                            audioFileURL: audioFileURL,
+                            mimeType: mimeType,
+                            workingDirectory: workingDirectory,
+                            logger: logger
+                        )
                         continue
                     }
                     if let priorStage { CloudBudgetContext.current?.restoreStage(priorStage) }
                 } catch { failure = error }
                 await deletePreparedGCSObject(
                     preparedAudio,
-                    accessToken: accessToken,
+                    accessToken: tokenBox.value,
                     authService: authService,
                     logger: logger
                 )
@@ -271,7 +379,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             }
             await deletePreparedGCSObject(
                 preparedAudio,
-                accessToken: accessToken,
+                accessToken: tokenBox.value,
                 authService: authService,
                 logger: logger
             )
@@ -304,7 +412,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         projectID: String,
         location: String,
         preparedAudio: [String: Any],
-        accessToken: String,
+        tokenBox: AccessTokenBox,
         authService: GCloudAuthService,
         audioByteCount: Int,
         terms: [String],
@@ -329,7 +437,10 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                     projectID: projectID,
                     location: location,
                     preparedAudio: preparedAudio,
-                    accessToken: accessToken,
+                    accessToken: tokenBox.value,
+                    onTokenRefreshed: { freshToken in
+                        tokenBox.update(freshToken)
+                    },
                     authService: authService,
                     inputByteCount: audioByteCount,
                     terms: terms,
@@ -340,6 +451,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                     workingDirectory: workingDirectory,
                     logger: logger
                 )
+                tokenBox.update(generated.accessToken)
                 return generated.result
             } catch {
                 throw CloudRecordingContext.redactedError(error, context: recordingContext)
@@ -355,6 +467,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         let audioPart: [String: Any]
         let gcsBucket: String?
         let gcsObjectName: String?
+        let byteCount: Int
     }
 
     /// Generation retries reuse preparation; only a confirmed missing URI is rebuilt.
@@ -363,6 +476,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         authService: GCloudAuthService,
         accessToken: String,
         audioData: Data,
+        audioFileURL: URL?,
         mimeType: String,
         workingDirectory: URL?,
         logger: ((_ level: String, _ message: String) -> Void)?
@@ -372,11 +486,13 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             let objectName = "record_to_text_\(UUID().uuidString).mp3"
             logger?("info", "使用 GCS Bucket (\(bucket)) 串流上傳音訊...")
 
+            let uploadedBytes: Int
             do {
-                try await uploadToGCS(
+                uploadedBytes = try await uploadToGCS(
                     bucket: bucket,
                     objectName: objectName,
                     audioData: audioData,
+                    audioFileURL: audioFileURL,
                     mimeType: mimeType,
                     accessToken: accessToken,
                     workingDirectory: workingDirectory,
@@ -401,19 +517,26 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                     ]
                 ],
                 gcsBucket: bucket,
-                gcsObjectName: objectName
+                gcsObjectName: objectName,
+                byteCount: uploadedBytes
             )
         }
 
         // 第一層路徑：Inline Base64 透過檔案串流 POST
-        guard audioData.count <= Self.maximumInlineAudioBytes else {
+        let resolvedInlineData: Data
+        if let audioFileURL {
+            resolvedInlineData = try Data(contentsOf: audioFileURL, options: .mappedIfSafe)
+        } else {
+            resolvedInlineData = audioData
+        }
+        guard resolvedInlineData.count <= Self.maximumInlineAudioBytes else {
             throw VertexAIError.audioPayloadTooLarge(
-                sizeBytes: audioData.count,
+                sizeBytes: resolvedInlineData.count,
                 limitBytes: Self.maximumInlineAudioBytes
             )
         }
 
-        let base64Audio = audioData.base64EncodedString()
+        let base64Audio = resolvedInlineData.base64EncodedString()
         return PreparedAudio(
             audioPart: [
                 "inlineData": [
@@ -422,7 +545,8 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                 ]
             ],
             gcsBucket: nil,
-            gcsObjectName: nil
+            gcsObjectName: nil,
+            byteCount: resolvedInlineData.count
         )
     }
 
@@ -453,6 +577,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         location: String,
         preparedAudio: [String: Any],
         accessToken: String,
+        onTokenRefreshed: ((String) -> Void)? = nil,
         authService: GCloudAuthService,
         inputByteCount: Int,
         terms: [String],
@@ -463,16 +588,15 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         workingDirectory: URL?,
         logger: ((_ level: String, _ message: String) -> Void)?
     ) async throws -> (result: CloudTranscriptionResult, accessToken: String) {
+        try Self.validateEndpointParameters(
+            projectID: projectID,
+            location: location,
+            modelID: effectiveModelID
+        )
         let host = location == "global"
             ? "aiplatform.googleapis.com"
             : "\(location)-aiplatform.googleapis.com"
-        let isTranscribe = VertexTranscribeRequest.matches(modelID: effectiveModelID)
-        // The transcription configuration and audioTranscription parts are in
-        // Vertex's v1beta1 schema. Use unary generateContent as documented for
-        // pre-recorded audio, rather than the general Gemini SSE path.
-        let apiVersion = isTranscribe ? "v1beta1" : "v1"
-        let method = isTranscribe ? "generateContent" : "streamGenerateContent?alt=sse"
-        let endpointString = "https://\(host)/\(apiVersion)/projects/\(projectID)/locations/\(location)/publishers/google/models/\(effectiveModelID):\(method)"
+        let endpointString = "https://\(host)/v1/projects/\(projectID)/locations/\(location)/publishers/google/models/\(effectiveModelID):streamGenerateContent?alt=sse"
         guard let endpointURL = URL(string: endpointString) else {
             throw VertexAIError.invalidEndpointURL(endpointString)
         }
@@ -484,8 +608,9 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             fallbackReason: fallbackReason,
             resolvedLocation: location,
             endpointURL: endpointURL,
-            responseMode: isTranscribe ? .unaryJSON : .geminiSSE,
+            responseMode: .geminiSSE,
             accessToken: accessToken,
+            onTokenRefreshed: onTokenRefreshed,
             authService: authService,
             inputByteCount: inputByteCount,
             inputPart: preparedAudio,
@@ -499,8 +624,6 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             maximumOutputTokens: GeminiGenerationConfig.transcriptionOutputTokens(modelID: effectiveModelID),
             thinkingLevel: thinkingLevel,
             recordingContext: recordingContext,
-            transcribeTerms: terms,
-            segmentStartSeconds: timeOffsetSeconds,
             workingDirectory: workingDirectory,
             logger: logger
         )
@@ -533,6 +656,10 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         } else {
             do {
                 resolvedProjectID = try await CloudBudgetContext.perform(stage: "auth") { try await authService.getDefaultProjectID() }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let authError as GCloudAuthError where authError == .cancelled {
+                throw CancellationError()
             } catch {
                 try CloudBudgetContext.check("auth")
                 throw VertexAIError.authenticationFailed(
@@ -544,6 +671,10 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         let accessToken: String
         do {
             accessToken = try await CloudBudgetContext.perform(stage: "auth") { try await authService.getAccessToken() }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let authError as GCloudAuthError where authError == .cancelled {
+            throw CancellationError()
         } catch {
             try CloudBudgetContext.check("auth")
             throw VertexAIError.authenticationFailed(error.localizedDescription)
@@ -552,6 +683,11 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         let resolvedLocation = currentConfig.location
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let location = resolvedLocation.isEmpty ? "global" : resolvedLocation
+        try Self.validateEndpointParameters(
+            projectID: resolvedProjectID,
+            location: location,
+            modelID: currentConfig.modelID
+        )
         let host = location == "global"
             ? "aiplatform.googleapis.com"
             : "\(location)-aiplatform.googleapis.com"
@@ -594,6 +730,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         endpointURL: URL,
         responseMode: CloudResponseMode,
         accessToken: String,
+        onTokenRefreshed: ((String) -> Void)? = nil,
         authService: GCloudAuthService,
         inputByteCount: Int,
         inputPart: [String: Any],
@@ -603,8 +740,6 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         maximumOutputTokens: Int,
         thinkingLevel: GeminiThinkingLevel,
         recordingContext: String = "",
-        transcribeTerms: [String] = [],
-        segmentStartSeconds: Double = 0,
         workingDirectory: URL?,
         logger: ((_ level: String, _ message: String) -> Void)?
     ) async throws -> (result: CloudTranscriptionResult, accessToken: String) {
@@ -617,17 +752,11 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             thinkingLevel: effectiveThinkingLevel,
             includeThoughts: responseMode == .geminiSSE
         )
-        let isTranscribe = requestDescription == "轉錄" && VertexTranscribeRequest.matches(modelID: effectiveModelID)
-        let requestBody: [String: Any]
-        if isTranscribe {
-            requestBody = try VertexTranscribeRequest.body(inputPart: inputPart, terms: transcribeTerms)
-            logger?("info", "使用 Gemini 3.5 Transcribe 逐字模式；\(transcribeTerms.isEmpty ? "啟用講者區分" : "啟用詞庫（不使用講者區分）")。")
-        } else {
-            logger?(
-                "info",
-                "轉錄請求送出 maxOutputTokens=\(generationConfig["maxOutputTokens"] as? Int ?? 0)，thinkingConfig=\(effectiveThinkingLevel.rawValue)（模型 \(effectiveModelID)）。"
-            )
-            requestBody = [
+        logger?(
+            "info",
+            "轉錄請求送出 maxOutputTokens=\(generationConfig["maxOutputTokens"] as? Int ?? 0)，thinkingConfig=\(effectiveThinkingLevel.rawValue)（模型 \(effectiveModelID)）。"
+        )
+        let requestBody: [String: Any] = [
             "systemInstruction": [
                 "parts": [
                     ["text": systemInstructionText]
@@ -651,7 +780,6 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             ],
             "generationConfig": generationConfig
         ]
-        }
 
         let requestData = try JSONSerialization.data(withJSONObject: requestBody)
 
@@ -690,7 +818,10 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             do {
                 let freshToken = try await CloudBudgetContext.perform(stage: "auth") { try await authService.getAccessToken(forceRefresh: true) }
                 resolvedAccessToken = freshToken
+                onTokenRefreshed?(freshToken)
             } catch is CancellationError {
+                throw CancellationError()
+            } catch let authError as GCloudAuthError where authError == .cancelled {
                 throw CancellationError()
             } catch {
                 try CloudBudgetContext.check("auth")
@@ -740,18 +871,12 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             )
         }
 
-        let text: String
-        if isTranscribe {
-            text = try VertexTranscribeRequest.transcript(
-                from: data, segmentStartSeconds: segmentStartSeconds, logger: logger)
-        } else {
-            text = try parseCandidateText(
-                from: data,
-                httpStatusCode: httpResponse.statusCode,
-                recordingContextBlock: try CloudRecordingContext.referenceBlock(recordingContext),
-                logger: logger
-            )
-        }
+        let text = try parseCandidateText(
+            from: data,
+            httpStatusCode: httpResponse.statusCode,
+            recordingContextBlock: try CloudRecordingContext.referenceBlock(recordingContext),
+            logger: logger
+        )
         let metadata = GeminiResponseMetadataParser.makeMetadata(
             from: data,
             requestedModelID: requestedModelID,
@@ -796,23 +921,44 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         }
     }
 
-    /// 上傳音檔至 Google Cloud Storage
+    /// 上傳音檔至 Google Cloud Storage（若提供 audioFileURL 則直接零拷貝串流上傳）
+    @discardableResult
     private func uploadToGCS(
         bucket: String,
         objectName: String,
         audioData: Data,
+        audioFileURL: URL?,
         mimeType: String,
         accessToken: String,
         workingDirectory: URL?,
         logger: ((_ level: String, _ message: String) -> Void)?
-    ) async throws {
-        let tempAudioFile = try GeminiTransportHelper.writeTemporaryRequestFile(
-            data: audioData,
-            in: workingDirectory,
-            prefix: "gcs_audio"
-        )
+    ) async throws -> Int {
+        let uploadSourceURL: URL
+        let temporaryFileToDelete: URL?
+        let byteCount: Int
+        let expectedHash: String
+
+        if let audioFileURL {
+            let mapped = try Data(contentsOf: audioFileURL, options: .mappedIfSafe)
+            uploadSourceURL = audioFileURL
+            temporaryFileToDelete = nil
+            byteCount = mapped.count
+            expectedHash = Data(Insecure.MD5.hash(data: mapped)).base64EncodedString()
+        } else {
+            let tempAudioFile = try GeminiTransportHelper.writeTemporaryRequestFile(
+                data: audioData,
+                in: workingDirectory,
+                prefix: "gcs_audio"
+            )
+            uploadSourceURL = tempAudioFile
+            temporaryFileToDelete = tempAudioFile
+            byteCount = audioData.count
+            expectedHash = Data(Insecure.MD5.hash(data: audioData)).base64EncodedString()
+        }
         defer {
-            try? FileManager.default.removeItem(at: tempAudioFile)
+            if let temporaryFileToDelete {
+                try? FileManager.default.removeItem(at: temporaryFileToDelete)
+            }
         }
 
         guard let encodedName = objectName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
@@ -824,14 +970,13 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         request.httpMethod = "POST"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue(mimeType, forHTTPHeaderField: "Content-Type")
-        request.setValue("\(audioData.count)", forHTTPHeaderField: "Content-Length")
+        request.setValue("\(byteCount)", forHTTPHeaderField: "Content-Length")
         request.timeoutInterval = 300
 
-        let expectedHash = Data(Insecure.MD5.hash(data: audioData)).base64EncodedString()
         let (_, response) = try await GeminiTransportHelper.budgetedUpload(
             session: urlSession,
             request: request,
-            fileURL: tempAudioFile,
+            fileURL: uploadSourceURL,
             stage: .upload,
             responseMode: .rawData,
             attempts: CloudNetworkContext.segmentAttempts?.quota(for: "preparation:gcsUpload", stage: .upload),
@@ -841,7 +986,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                 guard response.statusCode == 200,
                       let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                       object["name"] as? String == objectName,
-                      object["size"] as? String == String(audioData.count),
+                      object["size"] as? String == String(byteCount),
                       object["md5Hash"] as? String == expectedHash else { return nil }
                 return (data, response)
             })
@@ -850,6 +995,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         if httpResponse.statusCode < 200 || httpResponse.statusCode >= 300 {
             throw CloudHTTPFailure(status: httpResponse.statusCode, stage: .upload)
         }
+        return byteCount
     }
 
     /// 刪除 GCS 遠端暫存物件
@@ -896,10 +1042,19 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
     ) async {
         if CloudNetworkContext.current?.waitForCleanup == false {
             // Cleanup has its own bounded allowance and cannot delay failure UI.
-            Task.detached(priority: .utility) {
+            Task.detached(priority: .utility) { [self] in
                 let cleanupBudget = CloudSegmentBudget(limit: .seconds(5))
-                _ = try? await cleanupBudget.withDeadline(stage: "cleanup") {
-                    await self.deleteGCSObject(bucket: bucket, objectName: objectName, accessToken: accessToken)
+                let cleanupFailure = try? await cleanupBudget.withDeadline(stage: "cleanup") {
+                    let cleanupToken = (try? await authService.getAccessToken())
+                        ?? accessToken
+                    return await self.deleteGCSObject(
+                        bucket: bucket,
+                        objectName: objectName,
+                        accessToken: cleanupToken
+                    )
+                }
+                if let cleanupFailure {
+                    logger?("warning", "背景清理 GCS 暫存檔 (\(objectName)) 失敗：\(cleanupFailure)")
                 }
             }
             return

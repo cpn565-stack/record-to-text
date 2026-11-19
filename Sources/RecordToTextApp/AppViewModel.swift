@@ -43,6 +43,7 @@ final class AppViewModel: ObservableObject {
         didSet {
             jobsMutationRevision &+= 1
             refreshQueueSleep()
+            refreshDockBadge()
         }
     }
     @Published private(set) var recentJobs: [RecentJobSummary] {
@@ -92,6 +93,9 @@ final class AppViewModel: ObservableObject {
     /// Pending delete confirmation for recovery scan UI.
     @Published var recoveryItemPendingDeletion: RecoveryScanItem?
     @Published var isBulkCleanupConfirmationPresented = false
+    @Published var isUnsuccessfulCleanupConfirmationPresented = false
+    @Published private(set) var isUnsuccessfulCleanupRunning = false { didSet { refreshQueueSleep() } }
+    @Published private(set) var splittingJobIDs: Set<UUID> = [] { didSet { refreshQueueSleep() } }
 
     @Published private(set) var jobPersistenceError: String? { didSet { refreshQueueSleep() } }
     private var persistenceRevision: UInt64 = 0
@@ -115,6 +119,7 @@ final class AppViewModel: ObservableObject {
     let queueSleep: QueueCompletionSleepCoordinator
     private var fileOperations = 0 { didSet { refreshQueueSleep() } }
     private let paths: ApplicationPaths
+    private let systemTempRoot: URL?
     private let engineFactory: ((ResolvedRuntime) -> TranscriptionEngine)?
     private let settingsRepository: JSONRepository<AppSettings>
     private let glossaryRepository: JSONRepository<GlossaryCollection>
@@ -162,6 +167,7 @@ final class AppViewModel: ObservableObject {
 
     init(
         paths: ApplicationPaths = .live(),
+        systemTempRoot: URL? = nil,
         fileManager: FileManager = .default,
         credentialStore: any GoogleAIStudioCredentialStoring = KeychainGoogleAIStudioCredentialStore(),
         settingsSaveOverride: ((AppSettings) throws -> Void)? = nil,
@@ -171,6 +177,7 @@ final class AppViewModel: ObservableObject {
         outputDirectoryChooser: (() -> URL?)? = nil
     ) {
         self.paths = paths
+        self.systemTempRoot = systemTempRoot
         self.outputDirectoryChooser = outputDirectoryChooser
         self.queueSleep = queueSleep ?? QueueCompletionSleepCoordinator()
         self.engineFactory = engineFactory
@@ -344,6 +351,7 @@ final class AppViewModel: ObservableObject {
         self.legacyLedgerCredentialMigrationPending = hasLegacyLedgerCredential
         self.googleAIStudioCredentialStorageState =
             loadedSettings.googleAIStudioAPIKey == nil ? .absent : .memoryOnly
+        refreshDockBadge()
 
         if !startupMessages.isEmpty {
             self.alert = UserFacingAlert(
@@ -522,10 +530,6 @@ final class AppViewModel: ObservableObject {
         do {
             let result = try buildPrompt()
             guard settings.backendType != .localQwen else { return result.prompt }
-            let model = settings.backendType == .vertexAI ? settings.vertexAIModelID : settings.googleAIStudioModelID
-            if model == "gemini-3.5-transcribe" {
-                return Self.transcribeModelPreview(terms: result.terms)
-            }
             return try GeminiTranscriptPrompt.preview(terms: result.terms,
                 canonicalPrompt: result.prompt, context: cloudRecordingContextDraft)
         } catch { return error.localizedDescription }
@@ -536,18 +540,10 @@ final class AppViewModel: ObservableObject {
             let context = snapshot.cloudRecordingContext.isEmpty ? "未填寫" : "本機不套用\n\(snapshot.cloudRecordingContext)"
             return "\(snapshot.prompt)\n\n錄音背景：\(context)"
         }
-        if snapshot.requestedModelID == "gemini-3.5-transcribe" {
-            return Self.transcribeModelPreview(terms: snapshot.terms)
-        }
         do {
             return try GeminiTranscriptPrompt.preview(terms: snapshot.terms,
                 canonicalPrompt: snapshot.prompt, context: snapshot.cloudRecordingContext)
         } catch { return error.localizedDescription }
-    }
-
-    private static func transcribeModelPreview(terms: [String]) -> String {
-        let vocabulary = terms.isEmpty ? "（未設定，將嘗試辨識講者）" : terms.joined(separator: "、")
-        return "Gemini 3.5 Transcribe 使用錄音及詞庫，不使用自訂提示、錄音背景或思考強度。\n\n詞庫：\(vocabulary)\n\n有詞庫時不區分講者；跨片段講者可能不一致。"
     }
 
     var promptTermCount: Int {
@@ -565,6 +561,14 @@ final class AppViewModel: ObservableObject {
 
     var hasQueuedJobs: Bool {
         jobs.contains(where: { $0.stage == .queued })
+    }
+
+    var queuedJobCount: Int {
+        jobs.reduce(0) { $0 + ($1.stage == .queued ? 1 : 0) }
+    }
+
+    var pendingWorkCount: Int {
+        jobs.reduce(0) { $0 + ($1.stage.isTerminal ? 0 : 1) }
     }
 
     var splittableQueuedJobs: [TranscriptionJob] {
@@ -633,6 +637,13 @@ final class AppViewModel: ObservableObject {
             \AppSettings.silenceAwareCloudSegmentation,
             \AppSettings.localSilenceAwareSegmentation]
         if engineKeys.contains(keyPath) { synchronizeQueuedEngineSettings() }
+        if (keyPath as AnyKeyPath) == (\AppSettings.recentJobLimit as AnyKeyPath) {
+            let cap = max(0, settings.recentJobLimit)
+            if recentJobs.count > cap {
+                recentJobs = Array(recentJobs.prefix(cap))
+            }
+            persistJobs()
+        }
         scheduleSettingsPersist()
     }
 
@@ -1007,12 +1018,247 @@ final class AppViewModel: ObservableObject {
         jobs.contains(where: { $0.stage.isTerminal }) || !recentJobs.isEmpty
     }
 
+    /// Stages counted as unsuccessful (excludes `.completed`, including `.hasGaps`).
+    static func isUnsuccessfulStage(_ stage: TranscriptionStage) -> Bool {
+        stage == .failed || stage == .cancelled || stage == .interrupted
+    }
+
+    var unsuccessfulJobCount: Int {
+        let protected = protectedJobIDsForUnsuccessfulCleanup()
+        let liveUnsuccessfulIDs = Set(
+            jobs.lazy
+                .filter { !protected.contains($0.id) && Self.isUnsuccessfulStage($0.stage) }
+                .map(\.id)
+        )
+        let archivedUnsuccessfulIDs = Set(
+            recentJobs.lazy
+                .filter { !protected.contains($0.id) && Self.isUnsuccessfulStage($0.stage) }
+                .map(\.id)
+        )
+        return liveUnsuccessfulIDs.union(archivedUnsuccessfulIDs).count
+    }
+
+    var cleanableRecoveryItemCount: Int {
+        guard let report = recoveryScanReport else { return 0 }
+        let protected = protectedRecoveryScope(for: jobs.filter {
+            protectedJobIDsForUnsuccessfulCleanup().contains($0.id)
+        })
+        return report.items.filter { !Self.isRecoveryItemProtected($0, scope: protected) }.count
+    }
+
+    var hasUnsuccessfulItemsToClean: Bool {
+        unsuccessfulJobCount > 0 || cleanableRecoveryItemCount > 0
+    }
+
+    func requestUnsuccessfulCleanup() {
+        guard hasUnsuccessfulItemsToClean, !isUnsuccessfulCleanupRunning else { return }
+        isUnsuccessfulCleanupConfirmationPresented = true
+    }
+
+    /// One-click cleanup: removes failed / cancelled / interrupted / paused job records
+    /// and deletes all unprotected App-managed temp / Temp-Recovery directories.
+    /// Keeps completed jobs (including `.hasGaps`), output `.txt` files, and source audio untouched.
+    @discardableResult
+    func cleanUpUnsuccessfulJobsAndResidualFiles() async -> (removedRecords: Int, deletedDirectories: Int) {
+        isUnsuccessfulCleanupConfirmationPresented = false
+        guard !isUnsuccessfulCleanupRunning else { return (0, 0) }
+        isUnsuccessfulCleanupRunning = true
+        defer { isUnsuccessfulCleanupRunning = false }
+
+        let protectedIDs = protectedJobIDsForUnsuccessfulCleanup()
+        let removedLiveIDs = Set(
+            jobs.lazy
+                .filter { !protectedIDs.contains($0.id) }
+                .map(\.id)
+        )
+        let removedRecentIDs = Set(
+            recentJobs.lazy
+                .filter { !protectedIDs.contains($0.id) && Self.isUnsuccessfulStage($0.stage) }
+                .map(\.id)
+        )
+        let allRemovedRecordIDs = removedLiveIDs.union(removedRecentIDs)
+
+        for job in jobs where removedLiveIDs.contains(job.id) {
+            queueSleep.cancelWork(job.id)
+            authorizedContinuations.remove(job.id)
+        }
+        jobs.removeAll(where: { removedLiveIDs.contains($0.id) })
+        recentJobs.removeAll(where: { removedRecentIDs.contains($0.id) })
+
+        if !jobs.contains(where: \.isCloudRecoveryPaused),
+           continuationInFlight.isEmpty,
+           !hasQueuedJobs,
+           activeJobID == nil
+        {
+            manualDrainRequested = false
+        }
+
+        if !allRemovedRecordIDs.isEmpty {
+            persistJobs()
+        }
+
+        let protectedScope = protectedRecoveryScope(for: jobs)
+        let scanPaths = paths
+        let scanSystemTemp = systemTempRoot
+
+        let deletionOutcome = await Task.detached(priority: .utility) { () -> Result<(deleted: Int, failedCount: Int), Error> in
+            let fm = FileManager()
+            let report = RecoveryScanner.scan(
+                paths: scanPaths,
+                fileManager: fm,
+                systemTempRoot: scanSystemTemp
+            )
+            let targets = report.items.filter {
+                !Self.isRecoveryItemProtected($0, scope: protectedScope)
+            }
+            guard !targets.isEmpty else {
+                return .success((0, 0))
+            }
+            do {
+                let result = try RecoveryScanner.deleteItems(
+                    targets,
+                    paths: scanPaths,
+                    fileManager: fm,
+                    systemTempRoot: scanSystemTemp
+                )
+                return .success((result.deleted, result.failures.count))
+            } catch {
+                return .failure(error)
+            }
+        }.value
+
+        runRecoveryScan(presentIfNonEmpty: false)
+
+        switch deletionOutcome {
+        case let .success(stats):
+            if stats.failedCount > 0 {
+                alert = UserFacingAlert(
+                    title: "部分暫存目錄未能刪除",
+                    message: "已清除 \(allRemovedRecordIDs.count) 筆未成功紀錄、刪除 \(stats.deleted) 個暫存目錄；另有 \(stats.failedCount) 個目錄無法刪除，請稍後再試。"
+                )
+            }
+            return (allRemovedRecordIDs.count, stats.deleted)
+        case let .failure(error):
+            alert = UserFacingAlert(
+                title: "無法完整清除暫存資料",
+                message: error.localizedDescription
+            )
+            return (allRemovedRecordIDs.count, 0)
+        }
+    }
+
+    private struct ProtectedRecoveryScope: Sendable {
+        let jobIDs: Set<UUID>
+        let standardizedPaths: Set<String>
+    }
+
+    /// Protects all active/queued jobs, all `.completed` jobs (including `.hasGaps`),
+    /// and any ancestor in a live continuation chain. Unstarted placeholder continuations
+    /// belonging to a paused job are excluded so the paused job cleans up cleanly.
+    private func protectedJobIDsForUnsuccessfulCleanup() -> Set<UUID> {
+        let pendingPlaceholderChildIDs: Set<UUID> = Set(
+            jobs.compactMap { parent -> UUID? in
+                guard parent.isCloudRecoveryPaused,
+                      parent.continuationPending == true,
+                      !continuationInFlight.contains(parent.id),
+                      let childID = parent.cloudContinuationID,
+                      !authorizedContinuations.contains(childID),
+                      let child = jobs.first(where: { $0.id == childID }),
+                      child.stage == .queued
+                else {
+                    return nil
+                }
+                return childID
+            }
+        )
+
+        var protected = continuationInFlight
+        for job in jobs {
+            if job.stage == .completed {
+                protected.insert(job.id)
+            } else if !job.stage.isTerminal && !pendingPlaceholderChildIDs.contains(job.id) {
+                protected.insert(job.id)
+            }
+        }
+
+        var changed = true
+        while changed {
+            changed = false
+            for job in jobs {
+                if let child = job.cloudContinuationID,
+                   protected.contains(child),
+                   !pendingPlaceholderChildIDs.contains(child)
+                {
+                    if protected.insert(job.id).inserted { changed = true }
+                }
+                if let parent = job.continuationParentJobID,
+                   protected.contains(job.id)
+                {
+                    if protected.insert(parent).inserted { changed = true }
+                }
+            }
+        }
+        return protected
+    }
+
+    private func protectedRecoveryScope(for retainedJobs: [TranscriptionJob]) -> ProtectedRecoveryScope {
+        let tempBase = systemTempRoot ?? RecoveryScanner.systemTempJobsRoot(fileManager: fileManager)
+        var ids = Set<UUID>()
+        var pathsSet = Set<String>()
+
+        func insertPath(_ rawPath: String) {
+            let url = URL(fileURLWithPath: rawPath, isDirectory: true)
+            pathsSet.insert(url.standardizedFileURL.path)
+            pathsSet.insert(url.standardizedFileURL.resolvingSymlinksInPath().path)
+        }
+
+        for job in retainedJobs {
+            ids.insert(job.id)
+            insertPath(paths.tempRecovery.appendingPathComponent(job.id.uuidString, isDirectory: true).path)
+            insertPath(tempBase.appendingPathComponent(job.id.uuidString, isDirectory: true).path)
+            if let resumeDir = job.resumeFromRecoveryDirectory, !resumeDir.isEmpty {
+                insertPath(resumeDir)
+            }
+            if let recoveryDir = job.failure?.recoveryDirectory, !recoveryDir.isEmpty {
+                insertPath(recoveryDir)
+            }
+        }
+
+        return ProtectedRecoveryScope(jobIDs: ids, standardizedPaths: pathsSet)
+    }
+
+    private nonisolated static func isRecoveryItemProtected(
+        _ item: RecoveryScanItem,
+        scope: ProtectedRecoveryScope
+    ) -> Bool {
+        if let jobID = item.jobID, scope.jobIDs.contains(jobID) {
+            return true
+        }
+        let itemURL = URL(fileURLWithPath: item.directoryPath, isDirectory: true)
+        if scope.standardizedPaths.contains(itemURL.standardizedFileURL.path) {
+            return true
+        }
+        if scope.standardizedPaths.contains(itemURL.standardizedFileURL.resolvingSymlinksInPath().path) {
+            return true
+        }
+        return false
+    }
+
     func revealApplicationSupport() {
         try? fileManager.createDirectory(
             at: paths.root,
             withIntermediateDirectories: true
         )
         NSWorkspace.shared.activateFileViewerSelecting([paths.root])
+    }
+
+    func revealDefaultOutputDirectory() {
+        let outputURL = URL(fileURLWithPath: settings.defaultOutputDirectory, isDirectory: true)
+        try? fileManager.createDirectory(
+            at: outputURL,
+            withIntermediateDirectories: true
+        )
+        NSWorkspace.shared.activateFileViewerSelecting([outputURL])
     }
 
     // MARK: - Glossaries
@@ -1027,14 +1273,32 @@ final class AppViewModel: ObservableObject {
     }
 
     @discardableResult
-    func updateGlossary(id: String, name: String, termsText: String) -> Bool {
+    func updateGlossary(
+        id: String,
+        name: String,
+        termsText: String,
+        suppressAlert: Bool = false
+    ) -> Bool {
         guard let index = glossaryCollection.glossaries.firstIndex(where: { $0.id == id }) else {
             return false
         }
 
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else {
-            alert = UserFacingAlert(title: "詞庫名稱不能空白", message: "請輸入一個容易辨識的名稱。")
+            if !suppressAlert {
+                alert = UserFacingAlert(title: "詞庫名稱不能空白", message: "請輸入一個容易辨識的名稱。")
+            }
+            return false
+        }
+        if glossaryCollection.glossaries.contains(where: {
+            $0.id != id && $0.name.caseInsensitiveCompare(trimmedName) == .orderedSame
+        }) {
+            if !suppressAlert {
+                alert = UserFacingAlert(
+                    title: "詞庫名稱重複",
+                    message: "已有另一個名為「\(trimmedName)」的專案詞庫，請改用不同名稱。"
+                )
+            }
             return false
         }
 
@@ -1043,6 +1307,84 @@ final class AppViewModel: ObservableObject {
         glossaryCollection.glossaries[index].updatedAt = Date()
         persistGlossaries()
         return true
+    }
+
+    func glossaryNameValidationError(id: String, name: String) -> String? {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedName.isEmpty {
+            return "詞庫名稱不能空白，請輸入一個容易辨識的名稱。"
+        }
+        if glossaryCollection.glossaries.contains(where: {
+            $0.id != id && $0.name.caseInsensitiveCompare(trimmedName) == .orderedSame
+        }) {
+            return "已有另一個名為「\(trimmedName)」的專案詞庫，請改用不同名稱。"
+        }
+        return nil
+    }
+
+    func chooseAndImportGlossaryTerms() -> [String]? {
+        beginFileImport()
+        defer { endFileImport() }
+        let panel = NSOpenPanel()
+        panel.title = "匯入詞彙檔案（TXT 或 JSON）"
+        panel.prompt = "匯入詞彙"
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.plainText, .json]
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return nil
+        }
+
+        do {
+            let data = try Data(contentsOf: url)
+            if url.pathExtension.lowercased() == "json" {
+                if let decodedCollection = try? JSONDecoder().decode(GlossaryCollection.self, from: data) {
+                    let allTerms = decodedCollection.commonTerms
+                        + decodedCollection.glossaries.flatMap(\.terms)
+                    return TermParser.parse(allTerms.joined(separator: "\n"))
+                }
+                if let decodedPreset = try? JSONDecoder().decode(GlossaryPreset.self, from: data) {
+                    return TermParser.parse(decodedPreset.terms.joined(separator: "\n"))
+                }
+                if let stringArray = try? JSONDecoder().decode([String].self, from: data) {
+                    return TermParser.parse(stringArray.joined(separator: "\n"))
+                }
+            }
+            let rawText = String(decoding: data, as: UTF8.self)
+            return TermParser.parse(rawText)
+        } catch {
+            alert = UserFacingAlert(
+                title: "無法匯入詞彙",
+                message: error.localizedDescription
+            )
+            return nil
+        }
+    }
+
+    func exportGlossaryTerms(defaultFileName: String, terms: [String]) {
+        beginFileImport()
+        defer { endFileImport() }
+        let panel = NSSavePanel()
+        panel.title = "匯出詞彙清單"
+        panel.prompt = "匯出"
+        panel.nameFieldStringValue = "\(defaultFileName).txt"
+        panel.allowedContentTypes = [.plainText]
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return
+        }
+
+        do {
+            let content = terms.joined(separator: "\n") + (terms.isEmpty ? "" : "\n")
+            try AtomicFileWriter.writeText(content, to: url)
+        } catch {
+            alert = UserFacingAlert(
+                title: "無法匯出詞彙",
+                message: error.localizedDescription
+            )
+        }
     }
 
     func updateCommonTerms(_ termsText: String) {
@@ -1090,8 +1432,9 @@ final class AppViewModel: ObservableObject {
         addFiles(panel.urls)
     }
 
-    func splitQueuedAudioFileInHalf(_ id: UUID) {
-        guard let job = jobs.first(where: { $0.id == id }),
+    func splitQueuedAudioFileInHalf(_ id: UUID, autoStart: Bool = true) {
+        guard !splittingJobIDs.contains(id),
+              let job = jobs.first(where: { $0.id == id }),
               job.stage == .queued,
               job.sourceSlice == nil
         else {
@@ -1099,11 +1442,15 @@ final class AppViewModel: ObservableObject {
         }
 
         Task { @MainActor [weak self] in
-            await self?.prepareAndSplitQueuedJob(id)
+            await self?.prepareAndSplitQueuedJob(id, autoStart: autoStart)
         }
     }
 
-    private func prepareAndSplitQueuedJob(_ id: UUID) async {
+    private func prepareAndSplitQueuedJob(_ id: UUID, autoStart: Bool) async {
+        guard !splittingJobIDs.contains(id) else { return }
+        splittingJobIDs.insert(id)
+        defer { splittingJobIDs.remove(id) }
+
         do {
             guard let job = jobs.first(where: { $0.id == id }),
                   job.stage == .queued,
@@ -1146,10 +1493,13 @@ final class AppViewModel: ObservableObject {
             }
             jobs.replaceSubrange(index...index, with: splitJobs)
             persistJobs()
-            // This action is intentionally the one-click variant of the
-            // manual start button: the first slice begins immediately and
-            // the second remains ordered behind it in the queue.
-            startQueuedJobs()
+            if autoStart {
+                // Toolbar/action-bar variant starts the first slice immediately
+                // and keeps the second ordered behind it in the queue.
+                startQueuedJobs()
+            } else {
+                scheduleQueueIfNeeded()
+            }
         } catch {
             alert = UserFacingAlert(
                 title: "無法切分音檔",
@@ -1160,7 +1510,6 @@ final class AppViewModel: ObservableObject {
 
     func chooseAndMergeTranscriptFiles() {
         beginFileImport()
-        defer { endFileImport() }
         let panel = NSOpenPanel()
         panel.title = "選擇要合併的文字稿"
         panel.prompt = "合併文字稿"
@@ -1175,21 +1524,31 @@ final class AppViewModel: ObservableObject {
         }
 
         guard panel.runModal() == .OK else {
+            endFileImport()
             return
         }
 
-        do {
-            let result = try TranscriptMerger.merge(panel.urls)
-            NSWorkspace.shared.activateFileViewerSelecting([result.outputURL])
-            alert = UserFacingAlert(
-                title: "文字稿已合併",
-                message: "已依分段編號排序並產生新檔：\n\(result.outputURL.path)\n\n原始 TXT 未被覆寫。"
-            )
-        } catch {
-            alert = UserFacingAlert(
-                title: "無法合併文字稿",
-                message: error.localizedDescription
-            )
+        let selectedURLs = panel.urls
+        Task { @MainActor [weak self] in
+            defer { self?.endFileImport() }
+            let mergeResult: Result<TranscriptMergeResult, Error> =
+                await Task.detached(priority: .userInitiated) {
+                    Result { try TranscriptMerger.merge(selectedURLs) }
+                }.value
+            guard let self else { return }
+            switch mergeResult {
+            case let .success(result):
+                NSWorkspace.shared.activateFileViewerSelecting([result.outputURL])
+                self.alert = UserFacingAlert(
+                    title: "文字稿已合併",
+                    message: "已依分段編號排序並產生新檔：\n\(result.outputURL.path)\n\n原始 TXT 未被覆寫。"
+                )
+            case let .failure(error):
+                self.alert = UserFacingAlert(
+                    title: "無法合併文字稿",
+                    message: error.localizedDescription
+                )
+            }
         }
     }
 
@@ -1287,11 +1646,21 @@ final class AppViewModel: ObservableObject {
         durablePersistenceRevision < persistenceRevision ||
         queuePausedForRecovery || queuePausedForEnvironment || queuePausedForPromptConsent ||
         isGoogleAIStudioCredentialLoading || isGoogleAIStudioCredentialSaving || modelDownloadPhase.isBusy ||
+        isUnsuccessfulCleanupRunning || !splittingJobIDs.isEmpty ||
         fileOperations > 0 || isDuplicateConfirmationPresented || isPromptConsentPresented ||
         jobPersistenceError != nil || jobPersistenceLoadBlocked || jobPersistenceDeferred ||
         hasQueuedJobs
     }
     private func refreshQueueSleep() { queueSleep.refresh(jobs: jobs, blocked: sleepIsBlocked) }
+
+    private func refreshDockBadge() {
+        let count = isTerminating ? 0 : pendingWorkCount
+        let label = count > 0 ? "\(count)" : nil
+        guard let app = NSApp else { return }
+        if app.dockTile.badgeLabel != label {
+            app.dockTile.badgeLabel = label
+        }
+    }
 
     func startQueuedJobs() {
         queuePausedForEnvironment = false
@@ -1680,6 +2049,7 @@ final class AppViewModel: ObservableObject {
     func stopAllForTermination() async {
         setSleepAfterCompletion(false)
         isTerminating = true
+        refreshDockBadge()
         terminationGeneration += 1
         manualDrainRequested = false
         let preserveNetworkQueue = queuePausedForRecovery || jobs.contains { $0.networkRecovery?.state == .waiting || $0.networkRecovery?.state == .retrying || $0.serviceRecovery != nil }
@@ -1707,6 +2077,7 @@ final class AppViewModel: ObservableObject {
         isTerminating = false
         manualDrainRequested = false
         refreshQueueSleep()
+        refreshDockBadge()
     }
 
     // MARK: - Environment and onboarding
@@ -1739,12 +2110,38 @@ final class AppViewModel: ObservableObject {
             let target = try RecoveryScanner.validatedManagedJobDirectory(
                 for: item,
                 paths: paths,
-                fileManager: fileManager
+                fileManager: fileManager,
+                systemTempRoot: systemTempRoot
             )
             NSWorkspace.shared.activateFileViewerSelecting([target])
         } catch {
             alert = UserFacingAlert(
                 title: "拒絕開啟",
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    func openRecoveryPartialTranscript(_ item: RecoveryScanItem) {
+        do {
+            let targetDir = try RecoveryScanner.validatedManagedJobDirectory(
+                for: item,
+                paths: paths,
+                fileManager: fileManager,
+                systemTempRoot: systemTempRoot
+            )
+            let partialURL = targetDir.appendingPathComponent(RecoveryScanner.partialTranscriptFileName)
+            guard fileManager.fileExists(atPath: partialURL.path) else {
+                alert = UserFacingAlert(
+                    title: "找不到部分稿",
+                    message: "此復原目錄內未找到 \(RecoveryScanner.partialTranscriptFileName)。"
+                )
+                return
+            }
+            NSWorkspace.shared.open(partialURL)
+        } catch {
+            alert = UserFacingAlert(
+                title: "拒絕開啟部分稿",
                 message: error.localizedDescription
             )
         }
@@ -1767,7 +2164,8 @@ final class AppViewModel: ObservableObject {
             try RecoveryScanner.deleteItem(
                 item,
                 paths: paths,
-                fileManager: fileManager
+                fileManager: fileManager,
+                systemTempRoot: systemTempRoot
             )
             // Clear matching job failure recovery pointer if present.
             if let jobID = item.jobID,
@@ -1816,7 +2214,8 @@ final class AppViewModel: ObservableObject {
             let result = try RecoveryScanner.deleteItems(
                 targets,
                 paths: paths,
-                fileManager: fileManager
+                fileManager: fileManager,
+                systemTempRoot: systemTempRoot
             )
             runRecoveryScan(presentIfNonEmpty: false)
             if !result.failures.isEmpty {
@@ -1873,6 +2272,7 @@ final class AppViewModel: ObservableObject {
             }
         )
         let scanPaths = paths
+        let scanSystemTemp = systemTempRoot
         recoveryScanTask?.cancel()
         recoveryScanGeneration += 1
         let generation = recoveryScanGeneration
@@ -1883,7 +2283,8 @@ final class AppViewModel: ObservableObject {
                     paths: scanPaths,
                     activeRecoveryDirectoryPaths:
                         activeRecoveryDirectoryPaths,
-                    fileManager: FileManager()
+                    fileManager: FileManager(),
+                    systemTempRoot: scanSystemTemp
                 )
             }.value
             guard let self,
@@ -2528,41 +2929,100 @@ final class AppViewModel: ObservableObject {
 
     private func performModelDownload(modelID: String, revision: String?) async {
         modelDownloadProgressLine = ""
-        do {
-            try paths.createDirectories(fileManager: fileManager)
-        } catch {
+        let appPaths = paths
+        let modelsDirectory = paths.models
+
+        let precheckResult: Result<(alreadyCached: Bool, inDefaultCache: Bool), Error> =
+            await Task.detached(priority: .utility) {
+                let fm = FileManager()
+                do {
+                    try appPaths.createDirectories(fileManager: fm)
+                    let alreadyCached = ModelCache.isDownloaded(
+                        modelID: modelID,
+                        revision: revision,
+                        modelsDirectory: modelsDirectory,
+                        fileManager: fm
+                    )
+                    if alreadyCached {
+                        return .success((true, false))
+                    }
+                    let inDefaultCache = ModelCache.isDownloadedInDefaultCache(
+                        modelID: modelID,
+                        revision: revision,
+                        fileManager: fm
+                    )
+                    return .success((false, inDefaultCache))
+                } catch {
+                    return .failure(error)
+                }
+            }.value
+
+        guard !Task.isCancelled else {
+            modelDownloadPhase = .idle
+            modelDownloadProgressLine = "已取消下載。"
+            return
+        }
+
+        let inDefaultCache: Bool
+        switch precheckResult {
+        case let .failure(error):
             modelDownloadPhase = .failed("無法建立模型資料夾：\(error.localizedDescription)")
             return
+        case let .success(status):
+            if status.alreadyCached {
+                if settings.selectedModelID == modelID {
+                    isSelectedModelCached = true
+                }
+                modelDownloadPhase = .succeeded("App 模型目錄已有此模型。")
+                modelDownloadProgressLine = ""
+                refreshSelectedModelCacheStatus()
+                return
+            }
+            inDefaultCache = status.inDefaultCache
         }
 
-        if ModelCache.isDownloaded(
-            modelID: modelID,
-            revision: revision,
-            modelsDirectory: paths.models,
-            fileManager: fileManager
-        ) {
-            isSelectedModelCached = true
-            modelDownloadPhase = .succeeded("App 模型目錄已有此模型。")
-            modelDownloadProgressLine = ""
-            return
-        }
-
-        if ModelCache.isDownloadedInDefaultCache(
-            modelID: modelID,
-            revision: revision,
-            fileManager: fileManager
-        ) {
+        if inDefaultCache {
             modelDownloadPhase = .importingLocal
             modelDownloadProgressLine = "正在從 ~/.cache/huggingface 匯入…"
-            do {
-                try importModelFromDefaultHFCache(modelID: modelID)
-                refreshSelectedModelCacheStatus()
-                if isSelectedModelCached {
-                    modelDownloadPhase = .succeeded("已從本機 Hugging Face cache 匯入。")
-                    modelDownloadProgressLine = ""
-                    return
+            let importOutcome: Result<Bool, Error> = await Task.detached(priority: .utility) {
+                let fm = FileManager()
+                do {
+                    try Self.copyModelFromDefaultHFCache(
+                        modelID: modelID,
+                        modelsDirectory: modelsDirectory,
+                        fileManager: fm
+                    )
+                    let imported = ModelCache.isDownloaded(
+                        modelID: modelID,
+                        revision: revision,
+                        modelsDirectory: modelsDirectory,
+                        fileManager: fm
+                    )
+                    return .success(imported)
+                } catch {
+                    return .failure(error)
                 }
-            } catch {
+            }.value
+
+            guard !Task.isCancelled else {
+                modelDownloadPhase = .idle
+                modelDownloadProgressLine = "已取消下載。"
+                refreshSelectedModelCacheStatus()
+                return
+            }
+
+            switch importOutcome {
+            case let .success(imported) where imported:
+                if settings.selectedModelID == modelID {
+                    isSelectedModelCached = true
+                }
+                modelDownloadPhase = .succeeded("已從本機 Hugging Face cache 匯入。")
+                modelDownloadProgressLine = ""
+                refreshSelectedModelCacheStatus()
+                return
+            case .success:
+                modelDownloadProgressLine = "本機快取未含完整模型 snapshot，改從網路下載…"
+            case let .failure(error):
                 modelDownloadProgressLine =
                     "本機匯入失敗，改從網路下載：\(error.localizedDescription)"
             }
@@ -2594,7 +3054,7 @@ final class AppViewModel: ObservableObject {
         print(path)
         """
 
-        let environment = modelDownloadEnvironment(modelsDirectory: paths.models)
+        let environment = modelDownloadEnvironment(modelsDirectory: modelsDirectory)
         var arguments = ["-u", "-c", script, modelID]
         if let revision, !revision.isEmpty {
             arguments.append(revision)
@@ -2623,8 +3083,18 @@ final class AppViewModel: ObservableObject {
                     }
                 }
             )
-            refreshSelectedModelCacheStatus()
-            if isSelectedModelCached {
+            let isDownloadedNow = await Task.detached(priority: .utility) {
+                ModelCache.isDownloaded(
+                    modelID: modelID,
+                    revision: revision,
+                    modelsDirectory: modelsDirectory,
+                    fileManager: FileManager()
+                )
+            }.value
+            if isDownloadedNow {
+                if settings.selectedModelID == modelID {
+                    isSelectedModelCached = true
+                }
                 modelDownloadPhase = .succeeded("模型已下載到 App 模型目錄。")
             } else {
                 modelDownloadPhase = .failed(
@@ -2645,12 +3115,16 @@ final class AppViewModel: ObservableObject {
         refreshSelectedModelCacheStatus()
     }
 
-    private func importModelFromDefaultHFCache(modelID: String) throws {
+    private nonisolated static func copyModelFromDefaultHFCache(
+        modelID: String,
+        modelsDirectory: URL,
+        fileManager: FileManager
+    ) throws {
         let source = ModelCache.repositoryDirectory(
             modelID: modelID,
             hubRoot: ModelCache.defaultHuggingFaceHub(fileManager: fileManager)
         )
-        let destinationRoot = ModelCache.hubRoot(modelsDirectory: paths.models)
+        let destinationRoot = ModelCache.hubRoot(modelsDirectory: modelsDirectory)
         let destination = ModelCache.repositoryDirectory(
             modelID: modelID,
             hubRoot: destinationRoot
@@ -2849,6 +3323,23 @@ final class AppViewModel: ObservableObject {
         }
         if settings.openTextWhenCompleted {
             openOutput(for: job)
+        }
+    }
+
+    func handleNotificationActivation(jobIDString: String) {
+        guard let jobID = UUID(uuidString: jobIDString) else { return }
+        if let job = jobs.first(where: { $0.id == jobID }),
+           let outputPath = job.outputPath,
+           fileManager.fileExists(atPath: outputPath)
+        {
+            openOutput(for: job)
+            return
+        }
+        if let summary = recentJobs.first(where: { $0.id == jobID }),
+           let outputPath = summary.outputPath,
+           fileManager.fileExists(atPath: outputPath)
+        {
+            openOutput(for: summary)
         }
     }
 
