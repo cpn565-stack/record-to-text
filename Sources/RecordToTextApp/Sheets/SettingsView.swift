@@ -403,7 +403,11 @@ struct SettingsView: View {
         Section("模型與思考強度") {
             GeminiModelPicker(modelID: modelBinding)
 
-            if isVertex, viewModel.settings.vertexAIModelID == "gemini-4-hydrogen" {
+            if isVertex, viewModel.settings.vertexAIModelID == "gemini-4-neon" {
+                Text("Neon 支援 global、us、eu 區域；請確認上方 Location 與專案權限。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if isVertex, viewModel.settings.vertexAIModelID == "gemini-4-hydrogen" {
                 Text("Hydrogen 支援 global、us、eu 區域；請確認上方 Location 與專案權限。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -425,19 +429,10 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Picker(
-                "模型忙碌時",
-                selection: setting(\.cloudFallbackPolicy)
-            ) {
-                ForEach(CloudFallbackPolicy.allCases, id: \.self) { policy in
-                    Text(policy.displayName).tag(policy)
-                }
-            }
-
-            DisclosureGroup("思考強度與自動切換說明") {
+            DisclosureGroup("思考強度說明") {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("• 各模型分別記住思考強度（Hydrogen 預設極高）；較高強度通常更耗時並消耗更多輸出 token。")
-                    Text("• 預設不自動切換模型，避免同一份長錄音混用不同模型；允許時僅從 3.8／3.7 退回 3.6 Flash。")
+                    Text("• 各模型分別記住思考強度（Neon 預設高、Hydrogen 預設極高）；較高強度通常更耗時並消耗更多輸出 token。")
+                    Text("• 不自動切換至其他模型，避免同一份長錄音混用不同模型。")
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)

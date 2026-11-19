@@ -95,7 +95,7 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
 
         public init(
             apiKey: String? = nil,
-            modelID: String = "gemini-3.7-flash",
+            modelID: String = GeminiModelDescriptor.defaultCloudModelID,
             useFilesAPI: Bool = true,
             thinkingLevel: GeminiThinkingLevel? = nil,
             fallbackPolicy: CloudFallbackPolicy = .disabled,

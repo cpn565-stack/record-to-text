@@ -24,15 +24,23 @@ enum JobModelDisplayHelper {
         }
     }
 
+    private static let legacyCloudDisplayNames: [String: String] = [
+        "gemini-3.8-flash": "Gemini 3.8 Flash",
+        "gemini-3.7-flash": "Gemini 3.7 Flash",
+        "gemini-3.6-flash": "Gemini 3.6 Flash",
+        "gemini-3.1-pro-preview": "Gemini 3.1 Pro",
+        "gemini-3.5-transcribe": "Gemini 3.5 Transcribe"
+    ]
+
     static func shortModelName(modelID: String, backend: ASRBackendType?) -> String {
         if backend == .localQwen {
             return ASRModelDescriptor.descriptor(id: modelID)?.displayName ?? modelID
         }
-        if modelID == "gemini-3.5-transcribe" {
-            return "Gemini 3.5 Transcribe"
-        }
         if let preset = GeminiModelDescriptor.presetModels.first(where: { $0.id == modelID }) {
             return preset.displayName
+        }
+        if let legacy = legacyCloudDisplayNames[modelID] {
+            return legacy
         }
         if let local = ASRModelDescriptor.descriptor(id: modelID) {
             return local.displayName
@@ -59,16 +67,14 @@ enum JobModelDisplayHelper {
         switch choice {
         case .qwen3ASR1_7BBF16:
             return "Qwen3-ASR 1.7B BF16"
+        case .aiStudioGemini4Neon, .vertexGemini4Neon:
+            return "Gemini 4 Neon"
         case .aiStudioGemini4Hydrogen, .vertexGemini4Hydrogen:
             return "Gemini 4 Hydrogen"
         case .aiStudioGemini4Carbon, .vertexGemini4Carbon:
             return "Gemini 4 Carbon"
         case .aiStudioGemini4Argon, .vertexGemini4Argon:
             return "Gemini 4 Argon"
-        case .aiStudioGemini38Flash, .vertexGemini38Flash:
-            return "Gemini 3.8 Flash"
-        case .aiStudioGemini37Flash, .vertexGemini37Flash:
-            return "Gemini 3.7 Flash"
         }
     }
 

@@ -4,16 +4,14 @@ import Foundation
 /// quick selector. Advanced model choices remain available in Settings.
 public enum QuickTranscriptionChoice: String, CaseIterable, Identifiable, Sendable {
     case qwen3ASR1_7BBF16
+    case aiStudioGemini4Neon
+    case vertexGemini4Neon
     case aiStudioGemini4Hydrogen
     case vertexGemini4Hydrogen
     case aiStudioGemini4Carbon
     case vertexGemini4Carbon
     case aiStudioGemini4Argon
     case vertexGemini4Argon
-    case vertexGemini38Flash
-    case aiStudioGemini38Flash
-    case vertexGemini37Flash
-    case aiStudioGemini37Flash
 
     public var id: String { rawValue }
 
@@ -21,6 +19,10 @@ public enum QuickTranscriptionChoice: String, CaseIterable, Identifiable, Sendab
         switch self {
         case .qwen3ASR1_7BBF16:
             return "Qwen3-ASR 1.7B BF16"
+        case .aiStudioGemini4Neon:
+            return "AI Studio (Gemini 4 Neon)"
+        case .vertexGemini4Neon:
+            return "Vertex AI (Gemini 4 Neon)"
         case .aiStudioGemini4Hydrogen:
             return "AI Studio (Gemini 4 Hydrogen)"
         case .vertexGemini4Hydrogen:
@@ -33,14 +35,6 @@ public enum QuickTranscriptionChoice: String, CaseIterable, Identifiable, Sendab
             return "AI Studio (Gemini 4 Argon)"
         case .vertexGemini4Argon:
             return "Vertex AI (Gemini 4 Argon)"
-        case .vertexGemini38Flash:
-            return "Vertex AI (Gemini 3.8 Flash)"
-        case .aiStudioGemini38Flash:
-            return "AI Studio (Gemini 3.8 Flash)"
-        case .vertexGemini37Flash:
-            return "Vertex AI (Gemini 3.7 Flash)"
-        case .aiStudioGemini37Flash:
-            return "AI Studio (Gemini 3.7 Flash)"
         }
     }
 
@@ -48,9 +42,9 @@ public enum QuickTranscriptionChoice: String, CaseIterable, Identifiable, Sendab
         switch self {
         case .qwen3ASR1_7BBF16:
             return .localQwen
-        case .vertexGemini4Hydrogen, .vertexGemini4Carbon, .vertexGemini4Argon, .vertexGemini38Flash, .vertexGemini37Flash:
+        case .vertexGemini4Neon, .vertexGemini4Hydrogen, .vertexGemini4Carbon, .vertexGemini4Argon:
             return .vertexAI
-        case .aiStudioGemini4Hydrogen, .aiStudioGemini4Carbon, .aiStudioGemini4Argon, .aiStudioGemini38Flash, .aiStudioGemini37Flash:
+        case .aiStudioGemini4Neon, .aiStudioGemini4Hydrogen, .aiStudioGemini4Carbon, .aiStudioGemini4Argon:
             return .googleAIStudio
         }
     }
@@ -62,6 +56,10 @@ public enum QuickTranscriptionChoice: String, CaseIterable, Identifiable, Sendab
         case .qwen3ASR1_7BBF16:
             updated.selectedModels[CPUArchitecture.current.rawValue] =
                 ASRModelDescriptor.appleSiliconBF16.id
+        case .aiStudioGemini4Neon:
+            updated.googleAIStudioModelID = "gemini-4-neon"
+        case .vertexGemini4Neon:
+            updated.vertexAIModelID = "gemini-4-neon"
         case .aiStudioGemini4Hydrogen:
             updated.googleAIStudioModelID = "gemini-4-hydrogen"
         case .vertexGemini4Hydrogen:
@@ -74,14 +72,6 @@ public enum QuickTranscriptionChoice: String, CaseIterable, Identifiable, Sendab
             updated.googleAIStudioModelID = "gemini-4-argon"
         case .vertexGemini4Argon:
             updated.vertexAIModelID = "gemini-4-argon"
-        case .vertexGemini38Flash:
-            updated.vertexAIModelID = "gemini-3.8-flash"
-        case .aiStudioGemini38Flash:
-            updated.googleAIStudioModelID = "gemini-3.8-flash"
-        case .vertexGemini37Flash:
-            updated.vertexAIModelID = "gemini-3.7-flash"
-        case .aiStudioGemini37Flash:
-            updated.googleAIStudioModelID = "gemini-3.7-flash"
         }
         return updated
     }
@@ -93,6 +83,10 @@ public enum QuickTranscriptionChoice: String, CaseIterable, Identifiable, Sendab
         switch self {
         case .qwen3ASR1_7BBF16:
             return settings.selectedModelID == ASRModelDescriptor.appleSiliconBF16.id
+        case .aiStudioGemini4Neon:
+            return settings.googleAIStudioModelID == "gemini-4-neon"
+        case .vertexGemini4Neon:
+            return settings.vertexAIModelID == "gemini-4-neon"
         case .aiStudioGemini4Hydrogen:
             return settings.googleAIStudioModelID == "gemini-4-hydrogen"
         case .vertexGemini4Hydrogen:
@@ -105,14 +99,6 @@ public enum QuickTranscriptionChoice: String, CaseIterable, Identifiable, Sendab
             return settings.googleAIStudioModelID == "gemini-4-argon"
         case .vertexGemini4Argon:
             return settings.vertexAIModelID == "gemini-4-argon"
-        case .vertexGemini38Flash:
-            return settings.vertexAIModelID == "gemini-3.8-flash"
-        case .aiStudioGemini38Flash:
-            return settings.googleAIStudioModelID == "gemini-3.8-flash"
-        case .vertexGemini37Flash:
-            return settings.vertexAIModelID == "gemini-3.7-flash"
-        case .aiStudioGemini37Flash:
-            return settings.googleAIStudioModelID == "gemini-3.7-flash"
         }
     }
 }

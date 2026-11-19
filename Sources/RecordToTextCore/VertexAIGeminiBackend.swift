@@ -85,7 +85,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         public init(
             projectID: String? = nil,
             location: String = "global",
-            modelID: String = "gemini-3.7-flash",
+            modelID: String = GeminiModelDescriptor.defaultCloudModelID,
             gcsBucket: String? = nil,
             includeSummary: Bool = false,
             thinkingLevel: GeminiThinkingLevel? = nil,

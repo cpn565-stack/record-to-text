@@ -6,19 +6,17 @@ struct ToolbarModelMenu: View {
     @ObservedObject var viewModel: AppViewModel
 
     private static let aiStudioChoices: [QuickTranscriptionChoice] = [
+        .aiStudioGemini4Neon,
         .aiStudioGemini4Hydrogen,
         .aiStudioGemini4Carbon,
-        .aiStudioGemini4Argon,
-        .aiStudioGemini38Flash,
-        .aiStudioGemini37Flash
+        .aiStudioGemini4Argon
     ]
 
     private static let vertexChoices: [QuickTranscriptionChoice] = [
+        .vertexGemini4Neon,
         .vertexGemini4Hydrogen,
         .vertexGemini4Carbon,
-        .vertexGemini4Argon,
-        .vertexGemini38Flash,
-        .vertexGemini37Flash
+        .vertexGemini4Argon
     ]
 
     var body: some View {

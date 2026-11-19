@@ -29,6 +29,23 @@ final class MainWindowRedesignTests: XCTestCase {
         XCTAssertEqual(JobModelDisplayHelper.displayBackendAndModel(for: vertexJob), "Vertex AI · Gemini 4 Hydrogen")
         XCTAssertNil(JobModelDisplayHelper.fallbackTooltip(for: vertexJob))
 
+        XCTAssertEqual(
+            JobModelDisplayHelper.shortModelName(modelID: "gemini-4-neon", backend: .googleAIStudio),
+            "Gemini 4 Neon"
+        )
+        XCTAssertEqual(
+            JobModelDisplayHelper.choiceMenuTitle(.aiStudioGemini4Neon),
+            "Gemini 4 Neon"
+        )
+        XCTAssertEqual(
+            JobModelDisplayHelper.shortModelName(modelID: "gemini-3.7-flash", backend: .googleAIStudio),
+            "Gemini 3.7 Flash"
+        )
+        XCTAssertEqual(
+            JobModelDisplayHelper.shortModelName(modelID: "gemini-3.1-pro-preview", backend: .vertexAI),
+            "Gemini 3.1 Pro"
+        )
+
         let fallbackSnapshot = JobSnapshot(
             modelID: "unused",
             glossaryID: nil,

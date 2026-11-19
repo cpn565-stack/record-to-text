@@ -1099,14 +1099,14 @@ tests.check(
             defaultOutputDirectory: "/tmp/output",
             backendType: .googleAIStudio,
             googleAIStudioAPIKey: "AIzaSyTestKey123",
-            googleAIStudioModelID: "gemini-3.7-flash"
+            googleAIStudioModelID: "gemini-4-neon"
         )
         guard let data = try? JSONEncoder().encode(settings),
               let decoded = try? JSONDecoder().decode(AppSettings.self, from: data),
               let legacyDecoded = try? JSONDecoder().decode(
                 AppSettings.self,
                 from: Data(
-                    #"{"defaultOutputDirectory":"/tmp/output","googleAIStudioAPIKey":"legacy-key"}"#.utf8
+                    #"{"defaultOutputDirectory":"/tmp/output","googleAIStudioAPIKey":"legacy-key","googleAIStudioModelID":"gemini-3.7-flash","vertexAIModelID":"gemini-3.8-flash"}"#.utf8
                 )
               ) else {
             return false
@@ -1114,19 +1114,21 @@ tests.check(
         let json = String(decoding: data, as: UTF8.self)
         return decoded.backendType == .googleAIStudio
             && decoded.googleAIStudioAPIKey == nil
-            && decoded.googleAIStudioModelID == "gemini-3.7-flash"
+            && decoded.googleAIStudioModelID == "gemini-4-neon"
             && legacyDecoded.googleAIStudioAPIKey == "legacy-key"
+            && legacyDecoded.googleAIStudioModelID == "gemini-4-neon"
+            && legacyDecoded.vertexAIModelID == "gemini-4-neon"
             && !json.contains("AIzaSyTestKey123")
             && !json.contains("googleAIStudioAPIKey")
     }(),
-    "AppSettings persists Google AI Studio configuration without API key"
+    "AppSettings persists Google AI Studio configuration without API key and migrates retired 3.x defaults to Neon"
 )
 
 tests.check(
     {
         let config = GoogleAIStudioBackend.Configuration(
             apiKey: "AIzaTestKey",
-            modelID: "gemini-3.7-flash",
+            modelID: "gemini-4-neon",
             useFilesAPI: false
         )
         let backend = GoogleAIStudioBackend(configuration: config)
@@ -1150,38 +1152,44 @@ tests.check(
 
 tests.check(
     {
-        let presets = GeminiModelDescriptor.presetModels
-        return presets.contains(where: { $0.id == "gemini-3.8-flash" })
-            && presets.contains(where: { $0.id == "gemini-3.7-flash" })
-            && presets.contains(where: { $0.id == "gemini-3.6-flash" })
-            && presets.contains(where: { $0.id == "gemini-3.1-pro-preview" })
+        let ids = GeminiModelDescriptor.presetModels.map(\.id)
+        return ids == [
+            "gemini-4-neon",
+            "gemini-4-hydrogen",
+            "gemini-4-carbon",
+            "gemini-4-argon"
+        ]
     }(),
-    "GeminiModelDescriptor contains 3.8 Flash, 3.7 Flash, 3.6 Flash and 3.1 Pro presets"
+    "GeminiModelDescriptor exposes only Gemini 4 presets starting with Neon"
 )
 
 tests.check(
     {
         let base = AppSettings(defaultOutputDirectory: "/tmp/output")
         let qwen = QuickTranscriptionChoice.qwen3ASR1_7BBF16.applying(to: base)
-        let vertex37 = QuickTranscriptionChoice.vertexGemini37Flash.applying(to: qwen)
-        let aiStudio37 = QuickTranscriptionChoice.aiStudioGemini37Flash.applying(
-            to: vertex37
+        let vertexNeon = QuickTranscriptionChoice.vertexGemini4Neon.applying(to: qwen)
+        let aiStudioNeon = QuickTranscriptionChoice.aiStudioGemini4Neon.applying(
+            to: vertexNeon
         )
-        let vertex38 = QuickTranscriptionChoice.vertexGemini38Flash.applying(to: aiStudio37)
-        let aiStudio38 = QuickTranscriptionChoice.aiStudioGemini38Flash.applying(to: vertex38)
+        let vertexHydrogen = QuickTranscriptionChoice.vertexGemini4Hydrogen.applying(to: aiStudioNeon)
+        let aiStudioHydrogen = QuickTranscriptionChoice.aiStudioGemini4Hydrogen.applying(to: vertexHydrogen)
         return QuickTranscriptionChoice.qwen3ASR1_7BBF16.matches(qwen)
             && qwen.backendType == .localQwen
             && qwen.selectedModelID == ASRModelDescriptor.appleSiliconBF16.id
-            && QuickTranscriptionChoice.vertexGemini37Flash.matches(vertex37)
-            && vertex37.vertexAIModelID == "gemini-3.7-flash"
-            && QuickTranscriptionChoice.aiStudioGemini37Flash.matches(aiStudio37)
-            && aiStudio37.googleAIStudioModelID == "gemini-3.7-flash"
-            && QuickTranscriptionChoice.vertexGemini38Flash.matches(vertex38)
-            && vertex38.vertexAIModelID == "gemini-3.8-flash"
-            && QuickTranscriptionChoice.aiStudioGemini38Flash.matches(aiStudio38)
-            && aiStudio38.googleAIStudioModelID == "gemini-3.8-flash"
+            && QuickTranscriptionChoice.vertexGemini4Neon.matches(vertexNeon)
+            && vertexNeon.vertexAIModelID == "gemini-4-neon"
+            && vertexNeon.geminiThinkingLevel == .high
+            && QuickTranscriptionChoice.aiStudioGemini4Neon.matches(aiStudioNeon)
+            && aiStudioNeon.googleAIStudioModelID == "gemini-4-neon"
+            && aiStudioNeon.geminiThinkingLevel == .high
+            && QuickTranscriptionChoice.vertexGemini4Hydrogen.matches(vertexHydrogen)
+            && vertexHydrogen.vertexAIModelID == "gemini-4-hydrogen"
+            && vertexHydrogen.geminiThinkingLevel == .xhigh
+            && QuickTranscriptionChoice.aiStudioGemini4Hydrogen.matches(aiStudioHydrogen)
+            && aiStudioHydrogen.googleAIStudioModelID == "gemini-4-hydrogen"
+            && aiStudioHydrogen.geminiThinkingLevel == .xhigh
     }(),
-    "Main-window quick model choices switch backend and matching model together"
+    "Main-window quick model choices switch backend, matching Gemini 4 model, and default thinking levels"
 )
 
 tests.check(

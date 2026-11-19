@@ -3,6 +3,48 @@ import XCTest
 @testable import RecordToTextCore
 
 final class GeminiThinkingPreferencesTests: XCTestCase {
+    func testNeonQuickChoicesDefaultToHighAndSupportAllFourLevelsOnBothBackends() throws {
+        let initial = AppSettings(defaultOutputDirectory: "/tmp/output")
+        XCTAssertEqual(initial.googleAIStudioModelID, "gemini-4-neon")
+        XCTAssertEqual(initial.vertexAIModelID, "gemini-4-neon")
+        XCTAssertEqual(initial.geminiThinkingLevel, .high)
+        XCTAssertEqual(
+            GeminiModelDescriptor.presetModels.map(\.id),
+            ["gemini-4-neon", "gemini-4-hydrogen", "gemini-4-carbon", "gemini-4-argon"]
+        )
+        for choice in [QuickTranscriptionChoice.aiStudioGemini4Neon, .vertexGemini4Neon] {
+            let settings = choice.applying(to: initial)
+            let restored = try roundTrip(settings)
+            XCTAssertTrue(choice.matches(restored))
+            XCTAssertEqual(restored.selectedGeminiModelID, "gemini-4-neon")
+            XCTAssertEqual(restored.geminiThinkingLevel, .high)
+            XCTAssertEqual(restored.defaultOutputDirectory, initial.defaultOutputDirectory)
+            XCTAssertEqual(restored.vertexAIIncludeSummary, initial.vertexAIIncludeSummary)
+        }
+        XCTAssertEqual(GoogleAIStudioBackend.Configuration(modelID: "gemini-4-neon").thinkingLevel, .high)
+        XCTAssertEqual(VertexAIGeminiBackend.Configuration(modelID: "gemini-4-neon").thinkingLevel, .high)
+        XCTAssertEqual(GoogleAIStudioBackend.Configuration().modelID, "gemini-4-neon")
+        XCTAssertEqual(VertexAIGeminiBackend.Configuration().modelID, "gemini-4-neon")
+        XCTAssertEqual(
+            GeminiGenerationConfig.supportedThinkingLevels(modelID: "gemini-4-neon"),
+            [.low, .medium, .high, .xhigh]
+        )
+
+        // Legacy global preference (e.g. medium) must not override Neon's default high.
+        let legacyJSON = Data(#"{"defaultOutputDirectory":"/tmp/output","googleAIStudioModelID":"gemini-4-carbon","geminiThinkingLevel":"medium"}"#.utf8)
+        var migrated = try JSONDecoder().decode(AppSettings.self, from: legacyJSON)
+        XCTAssertEqual(migrated.geminiThinkingLevel, .medium)
+        migrated = QuickTranscriptionChoice.aiStudioGemini4Neon.applying(to: migrated)
+        XCTAssertEqual(migrated.geminiThinkingLevel, .high)
+
+        for level in [GeminiThinkingLevel.low, .medium, .high, .xhigh] {
+            migrated.geminiThinkingLevel = level
+            let restored = try roundTrip(migrated)
+            let switched = QuickTranscriptionChoice.vertexGemini4Neon.applying(to: restored)
+            XCTAssertEqual(switched.geminiThinkingLevel, level)
+        }
+    }
+
     func testHydrogenQuickChoicesDefaultToXHighOnBothBackends() throws {
         let initial = AppSettings(defaultOutputDirectory: "/tmp/output")
         for choice in [QuickTranscriptionChoice.aiStudioGemini4Hydrogen, .vertexGemini4Hydrogen] {
@@ -95,18 +137,20 @@ final class GeminiThinkingPreferencesTests: XCTestCase {
         XCTAssertEqual(settings.applyingRuntimeConfiguration(from: oldSnapshot).geminiThinkingLevel, .high)
     }
 
-    func testHydrogenBudgetsAndUsageDoNotInheritUnknownModelOrFlashDefaults() {
-        XCTAssertEqual(GeminiGenerationConfig.transcriptionOutputTokens(modelID: "gemini-4-hydrogen"), 65_536)
-        XCTAssertEqual(GeminiGenerationConfig.summaryOutputTokens(modelID: "gemini-4-hydrogen"), 65_536)
+    func testHydrogenAndNeonBudgetsAndUsageDoNotInheritUnknownModelOrFlashDefaults() {
+        for model in ["gemini-4-neon", "gemini-4-hydrogen"] {
+            XCTAssertEqual(GeminiGenerationConfig.transcriptionOutputTokens(modelID: model), 65_536)
+            XCTAssertEqual(GeminiGenerationConfig.summaryOutputTokens(modelID: model), 65_536)
+            XCTAssertEqual(GeminiGenerationConfig.requestTimeout(modelID: model), 1_200)
+            XCTAssertEqual(GeminiGenerationConfig.segmentBudget(modelID: model), .seconds(1_800))
+            let usage = CloudUsageMetadata(promptTokenCount: 1_000, candidatesTokenCount: 100,
+                thoughtsTokenCount: 200, totalTokenCount: 1_300)
+            XCTAssertNil(usage.estimatedCostUSD(modelID: model))
+            XCTAssertEqual(usage.summaryDisplay(modelID: model), "1.3k tokens (思考 200)")
+        }
         XCTAssertEqual(GeminiGenerationConfig.summaryOutputTokens(modelID: "gemini-4-carbon"), 16_384)
         XCTAssertEqual(GeminiGenerationConfig.summaryOutputTokens(modelID: "gemini-3.8-flash"), 16_384)
         XCTAssertEqual(GeminiGenerationConfig.summaryOutputTokens(modelID: "custom-model"), 2_048)
-        XCTAssertEqual(GeminiGenerationConfig.requestTimeout(modelID: "gemini-4-hydrogen"), 1_200)
-        XCTAssertEqual(GeminiGenerationConfig.segmentBudget(modelID: "gemini-4-hydrogen"), .seconds(1_800))
-        let usage = CloudUsageMetadata(promptTokenCount: 1_000, candidatesTokenCount: 100,
-            thoughtsTokenCount: 200, totalTokenCount: 1_300)
-        XCTAssertNil(usage.estimatedCostUSD(modelID: "gemini-4-hydrogen"))
-        XCTAssertEqual(usage.summaryDisplay(modelID: "gemini-4-hydrogen"), "1.3k tokens (思考 200)")
     }
 
     private func roundTrip(_ settings: AppSettings) throws -> AppSettings {

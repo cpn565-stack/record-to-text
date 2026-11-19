@@ -81,8 +81,11 @@ final class ModelsDefaultsTests: XCTestCase {
     func testAppSettingsInitializerUsesProductDefaults() {
         let settings = AppSettings(defaultOutputDirectory: "/tmp/output")
 
-        XCTAssertEqual(settings.schemaVersion, 1)
+        XCTAssertEqual(settings.schemaVersion, AppSettings.currentSchemaVersion)
         XCTAssertEqual(settings.defaultOutputDirectory, "/tmp/output")
+        XCTAssertEqual(settings.googleAIStudioModelID, "gemini-4-neon")
+        XCTAssertEqual(settings.vertexAIModelID, "gemini-4-neon")
+        XCTAssertEqual(settings.geminiThinkingLevel, .high)
         XCTAssertEqual(settings.outputLocationMode, .fixedDirectory)
         XCTAssertNil(settings.lastInputDirectory)
         XCTAssertNil(settings.lastOutputDirectory)

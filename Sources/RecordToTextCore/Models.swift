@@ -156,7 +156,14 @@ public struct GeminiModelDescriptor: Identifiable, Hashable, Sendable {
         self.note = note
     }
 
+    public static let defaultCloudModelID = "gemini-4-neon"
+
     public static let presetModels: [GeminiModelDescriptor] = [
+        GeminiModelDescriptor(
+            id: "gemini-4-neon",
+            displayName: "Gemini 4 Neon",
+            note: "最新主力推論模型（預設），支援音訊轉錄與低／中／高／極高思考強度，預設高。兼顧轉錄品質與速度；費用以 Google 帳單為準。"
+        ),
         GeminiModelDescriptor(
             id: "gemini-4-hydrogen",
             displayName: "Gemini 4 Hydrogen",
@@ -165,32 +172,12 @@ public struct GeminiModelDescriptor: Identifiable, Hashable, Sendable {
         GeminiModelDescriptor(
             id: "gemini-4-carbon",
             displayName: "Gemini 4 Carbon",
-            note: "最新旗艦深度推論模型，支援音訊轉錄與低／中／高思考強度，適合複雜專有名詞與多講者分辨。費用請以 Google 帳單為準。"
+            note: "旗艦深度推論模型，支援音訊轉錄與低／中／高思考強度，適合複雜專有名詞與多講者分辨。費用請以 Google 帳單為準。"
         ),
         GeminiModelDescriptor(
             id: "gemini-4-argon",
             displayName: "Gemini 4 Argon",
             note: "支援音訊轉錄與低／中／高思考強度，需要付費 API 使用權限；建議先用中等強度。費用請以 Google 帳單為準。"
-        ),
-        GeminiModelDescriptor(
-            id: "gemini-3.8-flash",
-            displayName: "Gemini 3.8 Flash",
-            note: "最新 Flash 模型，極速轉錄、中文語音理解力頂級（推薦）"
-        ),
-        GeminiModelDescriptor(
-            id: "gemini-3.7-flash",
-            displayName: "Gemini 3.7 Flash",
-            note: "極速轉錄、中文語音理解力頂級，適合日常會議與課程"
-        ),
-        GeminiModelDescriptor(
-            id: "gemini-3.6-flash",
-            displayName: "Gemini 3.6 Flash",
-            note: "速度極快且高可用，當 3.8/3.7 遇到尖峰負載 (503) 時的絕佳替代選擇"
-        ),
-        GeminiModelDescriptor(
-            id: "gemini-3.1-pro-preview",
-            displayName: "Gemini 3.1 Pro",
-            note: "高智能推論能力，適合深度專業術語與複雜中英文混講"
         )
     ]
 }
@@ -283,7 +270,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var geminiThinkingLevel: GeminiThinkingLevel {
         get {
             let model = selectedGeminiModelID
-            let fallback = model == "gemini-4-hydrogen"
+            let fallback = GeminiGenerationConfig.usesModelDefaultThinkingLevel(modelID: model)
                 ? GeminiGenerationConfig.defaultThinkingLevel(modelID: model)
                 : legacyGeminiThinkingLevel
             return GeminiGenerationConfig.resolvedThinkingLevel(
@@ -301,8 +288,10 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var localSilenceAwareSegmentation: Bool
     public var customGCloudPath: String?
 
+    public static let currentSchemaVersion = 2
+
     public init(
-        schemaVersion: Int = 1,
+        schemaVersion: Int = AppSettings.currentSchemaVersion,
         defaultOutputDirectory: String,
         outputLocationMode: OutputLocationMode = .fixedDirectory,
         lastInputDirectory: String? = nil,
@@ -327,10 +316,10 @@ public struct AppSettings: Codable, Equatable, Sendable {
         hasCompletedOnboarding: Bool = false,
         backendType: ASRBackendType = .googleAIStudio,
         googleAIStudioAPIKey: String? = nil,
-        googleAIStudioModelID: String = "gemini-3.7-flash",
+        googleAIStudioModelID: String = GeminiModelDescriptor.defaultCloudModelID,
         vertexAIProjectID: String? = nil,
         vertexAILocation: String = "global",
-        vertexAIModelID: String = "gemini-3.7-flash",
+        vertexAIModelID: String = GeminiModelDescriptor.defaultCloudModelID,
         vertexAIGCSBucket: String? = nil,
         vertexAIIncludeSummary: Bool = false,
         geminiThinkingLevel: GeminiThinkingLevel? = nil,
@@ -381,7 +370,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        let decodedSchemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        schemaVersion = max(decodedSchemaVersion, Self.currentSchemaVersion)
         defaultOutputDirectory = try container.decode(String.self, forKey: .defaultOutputDirectory)
         outputLocationMode = try container.decodeIfPresent(OutputLocationMode.self, forKey: .outputLocationMode) ?? .fixedDirectory
         lastInputDirectory = try container.decodeIfPresent(String.self, forKey: .lastInputDirectory)
@@ -407,14 +397,19 @@ public struct AppSettings: Codable, Equatable, Sendable {
 
         backendType = try container.decodeIfPresent(ASRBackendType.self, forKey: .backendType) ?? .googleAIStudio
         googleAIStudioAPIKey = try container.decodeIfPresent(String.self, forKey: .googleAIStudioAPIKey)
-        googleAIStudioModelID = AppSettings.migratedGeminiModelID(
-            try container.decodeIfPresent(String.self, forKey: .googleAIStudioModelID) ?? "gemini-3.7-flash"
-        )
+        let rawGoogleModelID = try container.decodeIfPresent(String.self, forKey: .googleAIStudioModelID)
+            ?? GeminiModelDescriptor.defaultCloudModelID
         vertexAIProjectID = try container.decodeIfPresent(String.self, forKey: .vertexAIProjectID)
         vertexAILocation = try container.decodeIfPresent(String.self, forKey: .vertexAILocation) ?? "global"
-        vertexAIModelID = AppSettings.migratedGeminiModelID(
-            try container.decodeIfPresent(String.self, forKey: .vertexAIModelID) ?? "gemini-3.7-flash"
-        )
+        let rawVertexModelID = try container.decodeIfPresent(String.self, forKey: .vertexAIModelID)
+            ?? GeminiModelDescriptor.defaultCloudModelID
+        if decodedSchemaVersion < Self.currentSchemaVersion {
+            googleAIStudioModelID = Self.migratedLegacySettingsGeminiModelID(rawGoogleModelID)
+            vertexAIModelID = Self.migratedLegacySettingsGeminiModelID(rawVertexModelID)
+        } else {
+            googleAIStudioModelID = Self.migratedGeminiModelID(rawGoogleModelID)
+            vertexAIModelID = Self.migratedGeminiModelID(rawVertexModelID)
+        }
         vertexAIGCSBucket = try container.decodeIfPresent(String.self, forKey: .vertexAIGCSBucket)
         vertexAIIncludeSummary = try container.decodeIfPresent(Bool.self, forKey: .vertexAIIncludeSummary) ?? false
         legacyGeminiThinkingLevel = try container.decodeIfPresent(
@@ -424,10 +419,14 @@ public struct AppSettings: Codable, Equatable, Sendable {
         geminiThinkingLevelsByModel = try container.decodeIfPresent(
             [String: GeminiThinkingLevel].self, forKey: .geminiThinkingLevelsByModel
         ) ?? [:]
-        cloudFallbackPolicy = try container.decodeIfPresent(
-            CloudFallbackPolicy.self,
-            forKey: .cloudFallbackPolicy
-        ) ?? .disabled
+        if decodedSchemaVersion < Self.currentSchemaVersion {
+            cloudFallbackPolicy = .disabled
+        } else {
+            cloudFallbackPolicy = try container.decodeIfPresent(
+                CloudFallbackPolicy.self,
+                forKey: .cloudFallbackPolicy
+            ) ?? .disabled
+        }
         silenceAwareCloudSegmentation = try container.decodeIfPresent(
             Bool.self,
             forKey: .silenceAwareCloudSegmentation
@@ -518,8 +517,23 @@ public struct AppSettings: Codable, Equatable, Sendable {
             ?? ASRModelDescriptor.currentDefault.id
     }
 
+    private static let retiredLegacyPresetModelIDs: Set<String> = [
+        "gemini-3.8-flash",
+        "gemini-3.7-flash",
+        "gemini-3.6-flash",
+        "gemini-3.1-pro-preview",
+        "gemini-3.5-transcribe"
+    ]
+
+    /// Always migrates models whose dedicated transport has been removed.
     public static func migratedGeminiModelID(_ raw: String) -> String {
-        raw == "gemini-3.5-transcribe" ? "gemini-4-hydrogen" : raw
+        raw == "gemini-3.5-transcribe" ? GeminiModelDescriptor.defaultCloudModelID : raw
+    }
+
+    /// One-time migration for schema v1 settings whose selected model was a
+    /// retired Gemini 3.x preset. Schema v2+ preserves explicit custom IDs.
+    public static func migratedLegacySettingsGeminiModelID(_ raw: String) -> String {
+        retiredLegacyPresetModelIDs.contains(raw) ? GeminiModelDescriptor.defaultCloudModelID : raw
     }
 }
 
@@ -699,10 +713,10 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
         rawFilenameSuffix: String = OutputNameBuilder.defaultRawSuffix,
         backendType: ASRBackendType = .googleAIStudio,
         googleAIStudioAPIKey: String? = nil,
-        googleAIStudioModelID: String = "gemini-3.7-flash",
+        googleAIStudioModelID: String = GeminiModelDescriptor.defaultCloudModelID,
         vertexAIProjectID: String? = nil,
         vertexAILocation: String = "global",
-        vertexAIModelID: String = "gemini-3.7-flash",
+        vertexAIModelID: String = GeminiModelDescriptor.defaultCloudModelID,
         vertexAIGCSBucket: String? = nil,
         vertexAIIncludeSummary: Bool = false,
         geminiThinkingLevel: GeminiThinkingLevel = .high,
@@ -770,12 +784,14 @@ public struct JobSnapshot: Codable, Equatable, Sendable {
         backendType = try container.decodeIfPresent(ASRBackendType.self, forKey: .backendType) ?? .googleAIStudio
         googleAIStudioAPIKey = try container.decodeIfPresent(String.self, forKey: .googleAIStudioAPIKey)
         googleAIStudioModelID = AppSettings.migratedGeminiModelID(
-            try container.decodeIfPresent(String.self, forKey: .googleAIStudioModelID) ?? "gemini-3.7-flash"
+            try container.decodeIfPresent(String.self, forKey: .googleAIStudioModelID)
+                ?? GeminiModelDescriptor.defaultCloudModelID
         )
         vertexAIProjectID = try container.decodeIfPresent(String.self, forKey: .vertexAIProjectID)
         vertexAILocation = try container.decodeIfPresent(String.self, forKey: .vertexAILocation) ?? "global"
         vertexAIModelID = AppSettings.migratedGeminiModelID(
-            try container.decodeIfPresent(String.self, forKey: .vertexAIModelID) ?? "gemini-3.7-flash"
+            try container.decodeIfPresent(String.self, forKey: .vertexAIModelID)
+                ?? GeminiModelDescriptor.defaultCloudModelID
         )
         vertexAIGCSBucket = try container.decodeIfPresent(String.self, forKey: .vertexAIGCSBucket)
         vertexAIIncludeSummary = try container.decodeIfPresent(Bool.self, forKey: .vertexAIIncludeSummary) ?? false

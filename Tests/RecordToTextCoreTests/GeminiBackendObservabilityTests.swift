@@ -3,15 +3,29 @@ import XCTest
 @testable import RecordToTextCore
 
 final class GeminiBackendObservabilityTests: XCTestCase {
-    func testRemovedTranscribeModelMigratesToHydrogenInSettingsAndSnapshots() throws {
-        let legacySettingsJSON = Data(
-            #"{"defaultOutputDirectory":"/tmp/output","googleAIStudioModelID":"gemini-3.5-transcribe","vertexAIModelID":"gemini-3.5-transcribe"}"#.utf8
-        )
-        let restoredSettings = try JSONDecoder().decode(AppSettings.self, from: legacySettingsJSON)
-        XCTAssertEqual(restoredSettings.googleAIStudioModelID, "gemini-4-hydrogen")
-        XCTAssertEqual(restoredSettings.vertexAIModelID, "gemini-4-hydrogen")
+    func testRemovedLegacyModelsMigrateToNeonWhilePreservingV2CustomIDsAndHistoricalSnapshots() throws {
+        for retired in ["gemini-3.5-transcribe", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.1-pro-preview"] {
+            let legacySettingsJSON = Data(
+                #"{"schemaVersion":1,"defaultOutputDirectory":"/tmp/output","googleAIStudioModelID":"\#(retired)","vertexAIModelID":"\#(retired)","cloudFallbackPolicy":"flashOnly"}"#.utf8
+            )
+            let restoredSettings = try JSONDecoder().decode(AppSettings.self, from: legacySettingsJSON)
+            XCTAssertEqual(restoredSettings.schemaVersion, AppSettings.currentSchemaVersion)
+            XCTAssertEqual(restoredSettings.googleAIStudioModelID, "gemini-4-neon")
+            XCTAssertEqual(restoredSettings.vertexAIModelID, "gemini-4-neon")
+            XCTAssertEqual(restoredSettings.cloudFallbackPolicy, .disabled)
+        }
 
-        let snapshot = JobSnapshot(
+        // Schema v2 preserves explicit custom model IDs entered after migration.
+        let v2CustomJSON = Data(
+            #"{"schemaVersion":2,"defaultOutputDirectory":"/tmp/output","googleAIStudioModelID":"gemini-3.8-flash","vertexAIModelID":"gemini-4-hydrogen"}"#.utf8
+        )
+        let restoredV2 = try JSONDecoder().decode(AppSettings.self, from: v2CustomJSON)
+        XCTAssertEqual(restoredV2.googleAIStudioModelID, "gemini-3.8-flash")
+        XCTAssertEqual(restoredV2.vertexAIModelID, "gemini-4-hydrogen")
+
+        // Transcribe has no backend transport anymore so it always migrates,
+        // whereas historical 3.x snapshots keep their original provenance.
+        let transcribeSnapshot = JobSnapshot(
             modelID: "unused",
             glossaryID: nil,
             glossaryName: nil,
@@ -24,8 +38,24 @@ final class GeminiBackendObservabilityTests: XCTestCase {
             googleAIStudioModelID: "gemini-3.5-transcribe",
             vertexAIModelID: "gemini-3.5-transcribe"
         )
-        XCTAssertEqual(snapshot.googleAIStudioModelID, "gemini-4-hydrogen")
-        XCTAssertEqual(snapshot.vertexAIModelID, "gemini-4-hydrogen")
+        XCTAssertEqual(transcribeSnapshot.googleAIStudioModelID, "gemini-4-neon")
+        XCTAssertEqual(transcribeSnapshot.vertexAIModelID, "gemini-4-neon")
+
+        let historicalSnapshot = JobSnapshot(
+            modelID: "unused",
+            glossaryID: nil,
+            glossaryName: nil,
+            terms: [],
+            prompt: "",
+            outputLocationMode: .fixedDirectory,
+            outputDirectory: "/tmp",
+            keepRawTranscript: false,
+            backendType: .googleAIStudio,
+            googleAIStudioModelID: "gemini-3.8-flash",
+            vertexAIModelID: "gemini-3.7-flash"
+        )
+        XCTAssertEqual(historicalSnapshot.googleAIStudioModelID, "gemini-3.8-flash")
+        XCTAssertEqual(historicalSnapshot.vertexAIModelID, "gemini-3.7-flash")
     }
 
     func testCloudSegmentLimitUsesStandardTwentyMinuteWindow() throws {

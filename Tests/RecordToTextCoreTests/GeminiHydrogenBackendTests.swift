@@ -45,6 +45,7 @@ final class GeminiHydrogenBackendTests: XCTestCase {
     func testBothBackendsSendEverySupportedLevelAndExcludeThoughtsFromTranscript() async throws {
         for vertex in [false, true] {
             for (model, levels, outputLimit) in [
+                ("gemini-4-neon", [GeminiThinkingLevel.low, .medium, .high, .xhigh], 65_536),
                 ("gemini-4-hydrogen", [GeminiThinkingLevel.low, .medium, .high, .xhigh], 65_536),
                 ("gemini-4-carbon", [.low, .medium, .high], 32_768)
             ] {
@@ -83,6 +84,7 @@ final class GeminiHydrogenBackendTests: XCTestCase {
     func testHydrogenDefaultIsActuallySentAndCarbonRejectsInheritedXHigh() async throws {
         for vertex in [false, true] {
             for (model, supplied, expected) in [
+                ("gemini-4-neon", Optional<GeminiThinkingLevel>.none, "high"),
                 ("gemini-4-hydrogen", Optional<GeminiThinkingLevel>.none, "xhigh"),
                 ("gemini-4-carbon", .some(.xhigh), "high")
             ] {
@@ -144,18 +146,20 @@ final class GeminiHydrogenBackendTests: XCTestCase {
     }
 
     func testOptionalVertexSummaryHasThinkingHeadroomAndFiltersThoughts() async throws {
-        HydrogenURLProtocol.handler = { request in
-            XCTAssertTrue(request.url!.path.hasSuffix("gemini-4-hydrogen:generateContent"))
-            let body = try contextRequestBody(request)
-            let generation = try XCTUnwrap(body["generationConfig"] as? [String: Any])
-            XCTAssertEqual(generation["maxOutputTokens"] as? Int, 65_536)
-            XCTAssertEqual((generation["thinkingConfig"] as? [String: Any])?["thinkingLevel"] as? String, "xhigh")
-            return (200, try self.response(vertex: false))
+        for (model, expectedThinking) in [("gemini-4-neon", "high"), ("gemini-4-hydrogen", "xhigh")] {
+            HydrogenURLProtocol.handler = { request in
+                XCTAssertTrue(request.url!.path.hasSuffix("\(model):generateContent"))
+                let body = try contextRequestBody(request)
+                let generation = try XCTUnwrap(body["generationConfig"] as? [String: Any])
+                XCTAssertEqual(generation["maxOutputTokens"] as? Int, 65_536)
+                XCTAssertEqual((generation["thinkingConfig"] as? [String: Any])?["thinkingLevel"] as? String, expectedThinking)
+                return (200, try self.response(vertex: false))
+            }
+            let backend = VertexAIGeminiBackend(authService: auth, urlSession: session,
+                configuration: .init(projectID: "fixture-project", modelID: model))
+            let text = try await backend.summarizeTranscript("完整逐字稿")
+            XCTAssertEqual(text, "講者 1：測試逐字稿。")
         }
-        let backend = VertexAIGeminiBackend(authService: auth, urlSession: session,
-            configuration: .init(projectID: "fixture-project", modelID: "gemini-4-hydrogen"))
-        let text = try await backend.summarizeTranscript("完整逐字稿")
-        XCTAssertEqual(text, "講者 1：測試逐字稿。")
     }
 
     private func transcribe(vertex: Bool, model: String = "gemini-4-hydrogen",
