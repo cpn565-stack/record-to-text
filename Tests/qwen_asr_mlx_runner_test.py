@@ -316,6 +316,77 @@ class MLXRunnerTests(unittest.TestCase):
                 "這是 mock 逐字稿。", Path(request["outputPath"]).read_text()
             )
 
+    def test_configure_environment_clears_offline_flags_when_switching_online(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=False):
+            offline_req = self.make_request(directory)
+            offline_req["offline"] = True
+            mlx_runner.configure_environment(offline_req)
+            self.assertEqual(os.environ.get("HF_HUB_OFFLINE"), "1")
+            self.assertEqual(os.environ.get("TRANSFORMERS_OFFLINE"), "1")
+
+            online_req = dict(offline_req)
+            online_req["offline"] = False
+            mlx_runner.configure_environment(online_req)
+            self.assertNotIn("HF_HUB_OFFLINE", os.environ)
+            self.assertNotIn("TRANSFORMERS_OFFLINE", os.environ)
+
+    def test_load_model_once_releases_previous_cached_model_before_loading_next(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            model_dir_a = Path(directory) / "model-a"
+            model_dir_b = Path(directory) / "model-b"
+            model_dir_a.mkdir()
+            model_dir_b.mkdir()
+
+            observed_cache_during_second_load: list[object] = []
+            clear_cache_calls: list[str] = []
+
+            def fake_load_model(reference: str):
+                if reference == str(model_dir_b):
+                    observed_cache_during_second_load.append(mlx_runner._MODEL_CACHE)
+                return FakeModel([FakeResult("ok")])
+
+            utils = types.ModuleType("mlx_audio.stt.utils")
+            utils.load_model = fake_load_model
+            mlx_audio = types.ModuleType("mlx_audio")
+            mlx_audio_stt = types.ModuleType("mlx_audio.stt")
+            mlx_mod = types.ModuleType("mlx")
+            mlx_core = types.ModuleType("mlx.core")
+            mlx_core.clear_cache = lambda: clear_cache_calls.append("cleared")
+            mlx_mod.core = mlx_core
+
+            old_cache = mlx_runner._MODEL_CACHE
+            try:
+                mlx_runner._MODEL_CACHE = None
+                with patch.dict(
+                    sys.modules,
+                    {
+                        "mlx_audio": mlx_audio,
+                        "mlx_audio.stt": mlx_audio_stt,
+                        "mlx_audio.stt.utils": utils,
+                        "mlx": mlx_mod,
+                        "mlx.core": mlx_core,
+                    },
+                ), patch.object(mlx_runner, "emit"), patch.object(
+                    mlx_runner, "heartbeat", side_effect=lambda _msg: nullcontext()
+                ), patch.object(mlx_runner.gc, "collect", wraps=mlx_runner.gc.collect) as gc_spy:
+                    req_a = self.make_request(directory)
+                    req_a["modelID"] = str(model_dir_a)
+                    req_a["modelRevision"] = "rev-a"
+                    mlx_runner.load_model_once(req_a)
+                    self.assertIsNotNone(mlx_runner._MODEL_CACHE)
+
+                    req_b = dict(req_a)
+                    req_b["modelID"] = str(model_dir_b)
+                    req_b["modelRevision"] = "rev-b"
+                    mlx_runner.load_model_once(req_b)
+
+                    self.assertEqual(observed_cache_during_second_load, [None])
+                    self.assertGreaterEqual(gc_spy.call_count, 1)
+                    self.assertEqual(clear_cache_calls, ["cleared"])
+                    self.assertEqual(mlx_runner._MODEL_CACHE[0], str(model_dir_b))
+            finally:
+                mlx_runner._MODEL_CACHE = old_cache
+
 
 if __name__ == "__main__":
     unittest.main()

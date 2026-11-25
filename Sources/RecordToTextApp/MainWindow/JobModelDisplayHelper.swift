@@ -65,8 +65,12 @@ enum JobModelDisplayHelper {
 
     static func choiceMenuTitle(_ choice: QuickTranscriptionChoice) -> String {
         switch choice {
+        case .qwen3ASR1_7B8bit:
+            return "Qwen3-ASR 1.7B 8-bit"
         case .qwen3ASR1_7BBF16:
             return "Qwen3-ASR 1.7B BF16"
+        case .qwen3ASR0_6B8bit:
+            return "Qwen3-ASR 0.6B 8-bit"
         case .aiStudioGemini4Neon, .vertexGemini4Neon:
             return "Gemini 4 Neon"
         case .aiStudioGemini4Hydrogen, .vertexGemini4Hydrogen:

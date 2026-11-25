@@ -83,6 +83,21 @@ public struct CloudFailureDiagnostic: Codable, Equatable, Sendable {
         }
     }
 
+    public var logCodeSummary: String {
+        let baseMessage = userMessage.hasSuffix("。")
+            ? String(userMessage.dropLast())
+            : userMessage
+        let code: String
+        if let first = errorChain.first {
+            code = "\(first.domain):\(first.code)"
+        } else if let status = httpStatus {
+            code = "HTTP \(status)"
+        } else {
+            code = category.rawValue
+        }
+        return "\(baseMessage)，\(code)"
+    }
+
     public var debugSummary: String {
         var parts = ["stage=\(stage.rawValue)", "category=\(category.rawValue)"]
         if let httpStatus { parts.append("HTTP=\(httpStatus)") }
@@ -159,6 +174,8 @@ public struct CloudFailureDiagnostic: Codable, Equatable, Sendable {
             case let .requestFailed(status, _): return http(status, stage: stage)
             case .rateLimited, .quotaExceeded: return http(429, stage: stage)
             case .authenticationFailed: return .init(category: .authUnavailable, stage: .auth)
+            case .permissionDenied: return .init(category: .authentication, stage: stage, httpStatus: 403)
+            case .modelOrLocationNotFound: return .init(category: .invalidResponse, stage: stage, httpStatus: 404)
             case .emptyCompletedResponse: return .init(category: .emptyResponse, stage: stage, finishReason: "STOP")
             case let .promptBlocked(block): return .init(category: .contentBlocked, stage: stage,
                 httpStatus: block.httpStatusCode, promptBlockReason: block.blockReason)
@@ -178,6 +195,8 @@ public struct CloudFailureDiagnostic: Codable, Equatable, Sendable {
             case .emptyResponse: return .init(category: .emptyResponse, stage: stage)
             case .emptyCompletedResponse: return .init(category: .emptyResponse, stage: stage, finishReason: "STOP")
             case .missingAPIKey, .invalidAPIKey: return .init(category: .authentication, stage: .auth)
+            case .permissionDenied: return .init(category: .authentication, stage: stage, httpStatus: 403)
+            case .modelNotFound: return .init(category: .invalidResponse, stage: stage, httpStatus: 404)
             case let .promptBlocked(block): return .init(category: .contentBlocked, stage: stage,
                 httpStatus: block.httpStatusCode, promptBlockReason: block.blockReason)
             case .prohibitedContent: return .init(category: .contentBlocked, stage: stage)

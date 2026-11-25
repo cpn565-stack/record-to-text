@@ -268,18 +268,22 @@ public extension RecentJobSummary {
             return nil
         }
         let model = effectiveModelIDs?.first ?? modelID
-        return cloudUsage?.summaryDisplay(modelID: model)
+        return cloudUsage?.summaryDisplay(
+            modelID: model,
+            estimatedCostOverride: cloudEstimatedCostUSD
+        )
     }
 }
 
 public extension CloudUsageMetadata {
     /// 依據 Google 官方定價（美元 / 1M Tokens）估算任務成本
     func estimatedCostUSD(modelID: String) -> Double? {
-        // Gemini 4 models have provider/region/cache-dependent tariffs. Keep
-        // actual token usage, but never apply the Flash fallback rate to them.
-        // Accurate billing needs provider/region/date-aware per-request data.
-        guard modelID != "gemini-4-argon", modelID != "gemini-4-carbon",
-              modelID != "gemini-4-hydrogen", modelID != "gemini-4-neon" else { return nil }
+        // Gemini 4 models and unknown custom models do not have fixed universal
+        // tariffs here. Keep actual token usage, and never fabricate a dollar cost.
+        let lowered = modelID.lowercased()
+        if lowered.hasPrefix("gemini-4") || lowered.contains("/gemini-4") {
+            return nil
+        }
         guard let total = totalTokenCount, total > 0 else {
             return nil
         }
@@ -287,22 +291,20 @@ public extension CloudUsageMetadata {
         let inputRatePer1M: Double
         let outputRatePer1M: Double
 
-        if modelID.contains("3.8") || modelID.contains("3.7") {
+        if lowered.contains("3.8") || lowered.contains("3.7") {
             // Gemini 3.8 Flash & 3.7 Flash: Input $0.75/1M, Output $3.75/1M
             inputRatePer1M = 0.75
             outputRatePer1M = 3.75
-        } else if modelID.contains("3.6") {
+        } else if lowered.contains("3.6") {
             // Gemini 3.6 Flash: Audio input $0.70/1M, Output $0.40/1M
             inputRatePer1M = 0.70
             outputRatePer1M = 0.40
-        } else if modelID.contains("pro") {
+        } else if lowered.contains("3.1-pro") || (lowered.contains("3.1") && lowered.contains("pro")) {
             // Gemini 3.1 Pro: Input $1.25/1M, Output $5.00/1M
             inputRatePer1M = 1.25
             outputRatePer1M = 5.00
         } else {
-            // 預設以最新 Flash 費率標準計算
-            inputRatePer1M = 0.75
-            outputRatePer1M = 3.75
+            return nil
         }
 
         if let prompt = promptTokenCount, candidatesTokenCount != nil || thoughtsTokenCount != nil {

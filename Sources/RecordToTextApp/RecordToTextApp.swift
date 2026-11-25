@@ -92,7 +92,7 @@ struct RecordToTextApp: App {
     @StateObject private var viewModel = AppViewModel()
 
     var body: some Scene {
-        WindowGroup("record-to-text") {
+        Window("record-to-text", id: "main") {
             MainView(viewModel: viewModel)
                 .tint(AppColors.accent)
                 .frame(minWidth: 760, minHeight: 680)

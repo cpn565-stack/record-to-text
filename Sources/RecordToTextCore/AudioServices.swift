@@ -54,10 +54,22 @@ public final class AudioProbeService {
 
     private let executableURL: URL
     private let runner: ProcessRunner
+    private let capacityProvider: ((URL) throws -> Int64?)?
 
     public init(executableURL: URL, runner: ProcessRunner = ProcessRunner()) {
         self.executableURL = executableURL
         self.runner = runner
+        self.capacityProvider = nil
+    }
+
+    internal init(
+        executableURL: URL,
+        runner: ProcessRunner = ProcessRunner(),
+        capacityProvider: ((URL) throws -> Int64?)?
+    ) {
+        self.executableURL = executableURL
+        self.runner = runner
+        self.capacityProvider = capacityProvider
     }
 
     public func probe(_ sourceURL: URL) async throws -> AudioMetadata {
@@ -167,7 +179,58 @@ public final class AudioProbeService {
         }
     }
 
+    public func validateCloudDiskSpace(
+        for metadata: AudioMetadata,
+        temporaryDirectory: URL,
+        outputDirectory: URL
+    ) throws {
+        let roundedSeconds: Int64
+        if !metadata.duration.isFinite || metadata.duration <= 0 {
+            roundedSeconds = 0
+        } else {
+            let ceiled = ceil(metadata.duration)
+            roundedSeconds = ceiled >= Double(Int64.max) ? Int64.max : Int64(ceiled)
+        }
+        // Cloud compressed audio is 16kHz mono 24kbps MP3 (~3,000 bytes/sec).
+        // Peak working estimate = ceil(duration) * 6,000 (segment MP3 + slice buffer)
+        // + 32 MiB (inline base64 JSON request file + merged transcript buffer) + minimumTemporaryReserve.
+        let mp3Working = roundedSeconds.multipliedReportingOverflow(by: 6_000)
+        let mp3Bytes = mp3Working.overflow ? Int64.max : mp3Working.partialValue
+        let jsonAndMergeBuffer: Int64 = 33_554_432
+        let withBuffer = mp3Bytes.addingReportingOverflow(jsonAndMergeBuffer)
+        let subtotal = withBuffer.overflow ? Int64.max : withBuffer.partialValue
+        let temporaryRequired = subtotal.addingReportingOverflow(
+            AudioProcessTimeouts.minimumTemporaryReserve
+        )
+        let requiredTemporary = temporaryRequired.overflow
+            ? Int64.max
+            : temporaryRequired.partialValue
+
+        if let available = try availableCapacity(at: temporaryDirectory),
+           available < requiredTemporary
+        {
+            throw AudioServiceError.insufficientDiskSpace(
+                required: requiredTemporary,
+                available: available
+            )
+        }
+
+        guard let outputAvailable = try availableCapacity(at: outputDirectory) else {
+            return
+        }
+        guard outputAvailable >= AudioProcessTimeouts.minimumOutputReserve else {
+            throw AudioServiceError.insufficientDiskSpaceAt(
+                path: outputDirectory.path,
+                required: AudioProcessTimeouts.minimumOutputReserve,
+                available: outputAvailable
+            )
+        }
+    }
+
     private func availableCapacity(at directory: URL) throws -> Int64? {
+        if let capacityProvider {
+            return try capacityProvider(directory)
+        }
         let values = try directory.resourceValues(
             forKeys: [
                 .volumeAvailableCapacityForImportantUsageKey,

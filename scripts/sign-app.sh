@@ -20,6 +20,19 @@ if [[ -z "${IDENTITY}" ]]; then
   exit 1
 fi
 
+if [[ -d "${APP_PATH}/Contents/Helpers" ]]; then
+  for helper_bin in "${APP_PATH}/Contents/Helpers"/*(N); do
+    if [[ -f "${helper_bin}" && ! -L "${helper_bin}" && -x "${helper_bin}" ]]; then
+      codesign \
+        --force \
+        --timestamp \
+        --options runtime \
+        --sign "${IDENTITY}" \
+        "${helper_bin}"
+    fi
+  done
+fi
+
 codesign \
   --force \
   --timestamp \
@@ -27,5 +40,9 @@ codesign \
   --entitlements "${PROJECT_DIR}/Config/record-to-text.entitlements" \
   --sign "${IDENTITY}" \
   "${APP_PATH}"
+
+if [[ "${COMPACT_APP:-0}" == "1" ]]; then
+  "${SCRIPT_DIR}/compact-app.sh" "${APP_PATH}"
+fi
 
 codesign --verify --deep --strict --verbose=2 "${APP_PATH}"

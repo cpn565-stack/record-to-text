@@ -1129,6 +1129,7 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
     public let backendType: ASRBackendType?
     public let effectiveModelIDs: [String]?
     public let cloudUsage: CloudUsageMetadata?
+    public let cloudEstimatedCostUSD: Double?
     public let cloudRetryCount: Int?
     public let cloudFallbackUsed: Bool?
     public let outputCompleteness: OutputCompleteness?
@@ -1152,6 +1153,7 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
         backendType: ASRBackendType? = nil,
         effectiveModelIDs: [String]? = nil,
         cloudUsage: CloudUsageMetadata? = nil,
+        cloudEstimatedCostUSD: Double? = nil,
         cloudRetryCount: Int? = nil,
         cloudFallbackUsed: Bool? = nil,
         outputCompleteness: OutputCompleteness? = nil,
@@ -1170,6 +1172,7 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
         self.backendType = backendType
         self.effectiveModelIDs = effectiveModelIDs
         self.cloudUsage = cloudUsage
+        self.cloudEstimatedCostUSD = cloudEstimatedCostUSD
         self.cloudRetryCount = cloudRetryCount
         self.cloudFallbackUsed = cloudFallbackUsed
         self.outputCompleteness = outputCompleteness
@@ -1199,6 +1202,10 @@ public struct RecentJobSummary: Codable, Equatable, Identifiable, Sendable {
                 ? nil
                 : CloudTranscriptionMetadataAggregator
                     .totalUsage(cloudMetadata),
+            cloudEstimatedCostUSD: cloudMetadata.isEmpty
+                ? nil
+                : CloudTranscriptionMetadataAggregator
+                    .totalEstimatedCostUSD(cloudMetadata),
             cloudRetryCount: cloudMetadata.isEmpty
                 ? nil
                 : CloudTranscriptionMetadataAggregator

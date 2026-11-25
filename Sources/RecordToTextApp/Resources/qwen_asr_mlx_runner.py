@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import gc
 import hashlib
 import importlib.metadata
 import inspect
@@ -479,6 +480,9 @@ def configure_environment(request: dict[str, Any]) -> None:
     if request.get("offline", False):
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    else:
+        os.environ.pop("HF_HUB_OFFLINE", None)
+        os.environ.pop("TRANSFORMERS_OFFLINE", None)
 
 
 def resolve_model_reference(request: dict[str, Any]) -> str:
@@ -530,6 +534,18 @@ def load_model_once(request: dict[str, Any]) -> tuple[Any, bool, bool]:
                 message="模型快取命中：略過模型重新下載與載入。",
             )
             return model, supports_system_prompt, supports_context
+        del model
+        _MODEL_CACHE = None
+        gc.collect()
+        try:
+            import mlx.core as mx
+
+            if hasattr(mx, "clear_cache"):
+                mx.clear_cache()
+            elif hasattr(mx, "metal") and hasattr(mx.metal, "clear_cache"):
+                mx.metal.clear_cache()
+        except Exception:
+            pass
 
     emit("stage", value="loading_model")
     emit(

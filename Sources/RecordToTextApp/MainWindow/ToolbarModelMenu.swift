@@ -21,7 +21,7 @@ struct ToolbarModelMenu: View {
 
     var body: some View {
         Menu {
-            if viewModel.selectedQuickTranscriptionChoice == nil {
+            if Self.showsCustomSelectionHeader(for: viewModel) {
                 Section("目前自訂／進階選擇") {
                     Button {} label: {
                         Label(
@@ -103,10 +103,27 @@ struct ToolbarModelMenu: View {
         viewModel.settings.backendType == .localQwen && viewModel.settings.selectedModelID == modelID
     }
 
+    static func showsCustomSelectionHeader(for viewModel: AppViewModel) -> Bool {
+        if viewModel.selectedQuickTranscriptionChoice != nil {
+            return false
+        }
+        if viewModel.settings.backendType == .localQwen,
+           viewModel.availableModels.contains(where: { $0.id == viewModel.settings.selectedModelID })
+        {
+            return false
+        }
+        return true
+    }
+
     private func selectLocalModel(_ modelID: String) {
-        if modelID == ASRModelDescriptor.appleSiliconBF16.id {
+        switch modelID {
+        case ASRModelDescriptor.appleSiliconDefault.id:
+            viewModel.selectQuickTranscriptionChoice(.qwen3ASR1_7B8bit)
+        case ASRModelDescriptor.appleSiliconBF16.id:
             viewModel.selectQuickTranscriptionChoice(.qwen3ASR1_7BBF16)
-        } else {
+        case ASRModelDescriptor.appleSilicon0_6B8bit.id:
+            viewModel.selectQuickTranscriptionChoice(.qwen3ASR0_6B8bit)
+        default:
             viewModel.setSetting(\.backendType, to: .localQwen)
             viewModel.setSelectedModelID(modelID)
             viewModel.refreshEnvironment()

@@ -15,6 +15,39 @@ public enum ModelCache {
             .appendingPathComponent("hub", isDirectory: true)
     }
 
+    public static func applyHuggingFaceTokenEnvironment(
+        _ environment: inout [String: String],
+        inherited: [String: String],
+        fileManager: FileManager = .default
+    ) {
+        for key in ["HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HF_TOKEN_PATH"] {
+            if let value = inherited[key], !value.isEmpty {
+                environment[key] = value
+            }
+        }
+        if environment["HF_TOKEN"] == nil,
+           environment["HUGGING_FACE_HUB_TOKEN"] == nil,
+           environment["HF_TOKEN_PATH"] == nil
+        {
+            let homeURL: URL
+            if let inheritedHome = inherited["HOME"], !inheritedHome.isEmpty {
+                homeURL = URL(fileURLWithPath: inheritedHome, isDirectory: true)
+            } else {
+                homeURL = fileManager.homeDirectoryForCurrentUser
+            }
+            let defaultTokenURL = homeURL
+                .appendingPathComponent(".cache", isDirectory: true)
+                .appendingPathComponent("huggingface", isDirectory: true)
+                .appendingPathComponent("token", isDirectory: false)
+            var isDirectory: ObjCBool = false
+            if fileManager.fileExists(atPath: defaultTokenURL.path, isDirectory: &isDirectory),
+               !isDirectory.boolValue
+            {
+                environment["HF_TOKEN_PATH"] = defaultTokenURL.path
+            }
+        }
+    }
+
     public static func repositoryFolderName(modelID: String) -> String {
         "models--" + modelID.replacingOccurrences(of: "/", with: "--")
     }

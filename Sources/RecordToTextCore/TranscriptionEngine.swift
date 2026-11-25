@@ -129,6 +129,7 @@ public final class TranscriptionEngine {
     private let cancellationLock = NSLock()
     private var cancellationRequested = false
     private var activeCloudNetwork: (jobID: UUID, context: CloudNetworkRecoveryContext)?
+    private let onReleaseIdleResources: (() -> Void)?
 
     static func resolvedVertexLocation(_ rawValue: String) -> String {
         let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -241,6 +242,7 @@ public final class TranscriptionEngine {
         runtime: ResolvedRuntime,
         paths: ApplicationPaths,
         runner: ProcessRunner = ProcessRunner(),
+        probeService: AudioProbeService? = nil,
         googleAIStudioBackend: GoogleAIStudioBackend? = nil,
         vertexAIBackend: VertexAIGeminiBackend? = nil,
         sleepPrevention: SleepPreventionService = SleepPreventionService(),
@@ -249,14 +251,15 @@ public final class TranscriptionEngine {
         cloudAdaptiveMinimumChildDuration: TimeInterval =
             CloudAdaptiveSegmentPlanner.productionMinimumChildDuration,
         silenceDetectionService: (any SilenceDetectionServicing)? = nil,
-        cloudSegmentBudgetLimit: Duration? = nil
+        cloudSegmentBudgetLimit: Duration? = nil,
+        onReleaseIdleResources: (() -> Void)? = nil
     ) {
         self.cloudSegmentBudgetLimit = cloudSegmentBudgetLimit
         self.cloudNetworkEnvironment = cloudNetworkEnvironment
         self.runtime = runtime
         self.paths = paths
         self.runner = runner
-        self.probeService = AudioProbeService(executableURL: runtime.ffprobe, runner: probeRunner)
+        self.probeService = probeService ?? AudioProbeService(executableURL: runtime.ffprobe, runner: probeRunner)
         self.ffmpegService = FFmpegService(executableURL: runtime.ffmpeg, runner: runner)
         self.silenceDetectionService = silenceDetectionService
             ?? SilenceDetectionService(executableURL: runtime.ffmpeg, runner: runner)
@@ -269,6 +272,16 @@ public final class TranscriptionEngine {
         self.sleepPrevention = sleepPrevention
         self.maximumASRSegmentDuration = maximumASRSegmentDuration
         self.cloudAdaptiveMinimumChildDuration = cloudAdaptiveMinimumChildDuration
+        self.onReleaseIdleResources = onReleaseIdleResources
+    }
+
+    public func releaseIdleResources() {
+        backend.stopPersistentSession()
+        onReleaseIdleResources?()
+    }
+
+    internal var hasPersistentLocalSession: Bool {
+        backend.hasPersistentSession
     }
 
     public func run(
@@ -442,6 +455,14 @@ public final class TranscriptionEngine {
                 at: outputDirectory,
                 withIntermediateDirectories: true
             )
+
+            if job.snapshot.backendType != .localQwen {
+                try probeService.validateCloudDiskSpace(
+                    for: metadata,
+                    temporaryDirectory: workingDirectory,
+                    outputDirectory: outputDirectory
+                )
+            }
 
             let silenceAnalysisCache = JobSilenceAnalysisCache(
                 sourceURL: sourceURL,

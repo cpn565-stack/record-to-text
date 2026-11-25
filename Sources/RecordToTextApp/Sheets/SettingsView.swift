@@ -1020,6 +1020,8 @@ struct SettingsView: View {
             return
         }
 
+        let selectedModelID = viewModel.settings.googleAIStudioModelID
+
         apiKeyTestTask?.cancel()
         isTestingAPIKey = true
         apiKeyTestResult = nil
@@ -1033,16 +1035,22 @@ struct SettingsView: View {
         ) == false
 
         apiKeyTestTask = Task {
-            let backend = GoogleAIStudioBackend()
+            let probeSession = GeminiTransportHelper.makeInteractiveProbeSession()
+            defer { probeSession.finishTasksAndInvalidate() }
+            let backend = GoogleAIStudioBackend(urlSession: probeSession)
             do {
-                _ = try await backend.validateAPIKey(key)
+                let probe = try await backend.validateConnectionAndModel(
+                    apiKey: key,
+                    modelID: selectedModelID
+                )
                 guard !Task.isCancelled else { return }
+                let modelSummary = probe.displayName.map { "\($0)（\(probe.modelID)）" } ?? probe.modelID
                 await MainActor.run {
                     isTestingAPIKey = false
                     apiKeyTestSucceeded = true
                     apiKeyTestResult = needsSaveWarning
-                        ? "連線成功，API Key 有效（請記得按「儲存到 Keychain」以套用至工作）。"
-                        : "連線成功，API Key 有效。"
+                        ? "連線成功：API Key 與模型 \(modelSummary) 可用（請記得按「儲存到 Keychain」以套用至工作）。"
+                        : "連線成功：API Key 與模型 \(modelSummary) 可用。"
                 }
             } catch is CancellationError {
                 return
@@ -1063,6 +1071,8 @@ struct SettingsView: View {
 
         let explicitProject = vertexProjectDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         let customGCloud = customGCloudPathDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let selectedLocation = viewModel.settings.vertexAILocation
+        let selectedModelID = viewModel.settings.vertexAIModelID
 
         vertexAuthTestTask?.cancel()
         isTestingVertexAuth = true
@@ -1070,22 +1080,28 @@ struct SettingsView: View {
         vertexAuthTestSucceeded = nil
 
         vertexAuthTestTask = Task {
+            let probeSession = GeminiTransportHelper.makeInteractiveProbeSession()
+            defer { probeSession.finishTasksAndInvalidate() }
             let auth = GCloudAuthService(
                 customGCloudPath: customGCloud.isEmpty ? nil : customGCloud
             )
+            let backend = VertexAIGeminiBackend(
+                authService: auth,
+                urlSession: probeSession
+            )
             do {
-                let resolvedProject: String
-                if !explicitProject.isEmpty {
-                    resolvedProject = explicitProject
-                } else {
-                    resolvedProject = try await auth.getDefaultProjectID(forceRefresh: true)
-                }
-                _ = try await auth.getAccessToken(forceRefresh: true)
+                let resolvedProject = try await backend.validateConnectionAndModel(
+                    projectID: explicitProject.isEmpty ? nil : explicitProject,
+                    location: selectedLocation,
+                    modelID: selectedModelID
+                )
                 guard !Task.isCancelled else { return }
+                let trimmedLocation = selectedLocation.trimmingCharacters(in: .whitespacesAndNewlines)
+                let resolvedLocation = trimmedLocation.isEmpty ? "global" : trimmedLocation
                 await MainActor.run {
                     isTestingVertexAuth = false
                     vertexAuthTestSucceeded = true
-                    vertexAuthTestResult = "驗證成功：已取得 gcloud OAuth 憑證（專案：\(resolvedProject)）。"
+                    vertexAuthTestResult = "驗證成功：專案 \(resolvedProject)（\(resolvedLocation)）與模型 \(selectedModelID) 連線可用。"
                 }
             } catch is CancellationError {
                 return

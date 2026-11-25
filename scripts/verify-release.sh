@@ -100,6 +100,18 @@ for tool in ffmpeg ffprobe; do
     print -u2 "Missing executable bundled audio tool: ${bundled_tool}"
     exit 1
   fi
+  HELPER_ARCHS="$(lipo -archs "${bundled_tool}")"
+  print "Helper architectures (${tool}): ${HELPER_ARCHS}"
+  if [[ "${HELPER_ARCHS}" != *arm64* && "${HELPER_ARCHS}" != *x86_64* ]]; then
+    print -u2 "Bundled audio tool has no supported macOS architecture (${tool}): ${HELPER_ARCHS}"
+    exit 1
+  fi
+  if [[ "${REQUIRE_UNIVERSAL}" == "1" ]]; then
+    if [[ "${HELPER_ARCHS}" != *arm64* || "${HELPER_ARCHS}" != *x86_64* ]]; then
+      print -u2 "Universal build requires both arm64 and x86_64 for bundled helper ${tool} (found: ${HELPER_ARCHS})."
+      exit 1
+    fi
+  fi
 done
 
 APP_BYTES="$(du -sk "${APP_PATH}" | awk '{ print $1 * 1024 }')"
@@ -113,7 +125,12 @@ fi
 du -sh "${APP_PATH}"
 
 if [[ "${ALLOW_UNSIGNED}" == "1" ]]; then
-  print "Unsigned verification mode: signature, Gatekeeper and stapler checks skipped."
+  if [[ -d "${APP_PATH}/Contents/_CodeSignature" ]]; then
+    codesign --verify --deep --strict --verbose=2 "${APP_PATH}"
+    print "Unsigned/ad-hoc verification mode: structural bundle signature verified; Gatekeeper and stapler checks skipped."
+  else
+    print "Unsigned verification mode: signature, Gatekeeper and stapler checks skipped."
+  fi
 else
   codesign --verify --deep --strict --verbose=2 "${APP_PATH}"
   spctl --assess --type execute --verbose=4 "${APP_PATH}"

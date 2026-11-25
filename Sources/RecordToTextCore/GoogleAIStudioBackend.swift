@@ -4,6 +4,8 @@ import CryptoKit
 public enum GoogleAIStudioError: LocalizedError, Equatable {
     case missingAPIKey
     case invalidAPIKey(String)
+    case permissionDenied(modelID: String, message: String)
+    case modelNotFound(String)
     case invalidModelID(String)
     case requestFailed(statusCode: Int, message: String)
     case rateLimited(message: String, retryAfterSeconds: Double?)
@@ -29,6 +31,10 @@ public enum GoogleAIStudioError: LocalizedError, Equatable {
             return "尚未設定 Google AI Studio API Key。請至設定頁面填入 API Key。"
         case .invalidAPIKey:
             return "Google AI Studio API Key 無效，請檢查設定與使用權限。"
+        case let .permissionDenied(modelID, _):
+            return "Google AI Studio 權限不足（HTTP 403）：無法使用模型 \(modelID)，請確認帳號權限或計費設定。"
+        case let .modelNotFound(modelID):
+            return "API Key 有效，但找不到模型 \(modelID) 或此帳號無權限使用。"
         case let .invalidModelID(modelID):
             return "無效的 Google AI Studio 模型 ID：\(modelID)"
         case let .requestFailed(statusCode, _):
@@ -133,6 +139,23 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         self.streamingLimits = streamingLimits
     }
 
+    public struct CloudModelProbeResult: Equatable, Sendable {
+        public let modelID: String
+        public let displayName: String?
+
+        public init(modelID: String, displayName: String? = nil) {
+            self.modelID = modelID
+            self.displayName = displayName
+        }
+    }
+
+    public static func validateRemoteFileName(_ name: String) throws -> String {
+        guard name.range(of: #"^files/[a-z0-9-]{1,40}$"#, options: .regularExpression) != nil else {
+            throw GoogleAIStudioError.fileUploadFailed("Files API 回傳無效的檔案識別碼")
+        }
+        return name
+    }
+
     static func validateModelID(_ modelID: String) throws {
         let extra = Set("._-".unicodeScalars)
         let allowed = !modelID.isEmpty
@@ -191,6 +214,79 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         default:
             // Outages and quota errors are not key problems; reporting them
             // as invalidAPIKey misleads the user into regenerating a good key.
+            throw GoogleAIStudioError.requestFailed(
+                statusCode: httpResponse.statusCode,
+                message: errorMsg
+            )
+        }
+    }
+
+    /// 驗證 API Key 並檢查目前所選模型是否存在且有權限使用
+    public func validateConnectionAndModel(
+        apiKey: String,
+        modelID: String
+    ) async throws -> CloudModelProbeResult {
+        let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedKey.isEmpty else {
+            throw GoogleAIStudioError.missingAPIKey
+        }
+        let trimmedModelID = modelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        try Self.validateModelID(trimmedModelID)
+
+        guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(trimmedModelID)") else {
+            throw GoogleAIStudioError.invalidModelID(trimmedModelID)
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue(trimmedKey, forHTTPHeaderField: "x-goog-api-key")
+        request.timeoutInterval = 15
+
+        let (data, response) = try await urlSession.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw GoogleAIStudioError.invalidJSONResponse
+        }
+
+        if httpResponse.statusCode == 200 {
+            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            let displayName = (json?["displayName"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return CloudModelProbeResult(
+                modelID: trimmedModelID,
+                displayName: (displayName?.isEmpty == false) ? displayName : nil
+            )
+        }
+
+        let errorMsg = GeminiResponseParser.errorMessage(from: data)
+        let lowerMsg = errorMsg.lowercased()
+        let looksLikeKeyRejection = lowerMsg.contains("api key")
+            || lowerMsg.contains("api_key")
+            || lowerMsg.contains("unregistered")
+
+        switch httpResponse.statusCode {
+        case 401:
+            throw GoogleAIStudioError.invalidAPIKey(errorMsg)
+        case 400:
+            if looksLikeKeyRejection || errorMsg.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw GoogleAIStudioError.invalidAPIKey(errorMsg)
+            }
+            throw GoogleAIStudioError.requestFailed(statusCode: 400, message: errorMsg)
+        case 403:
+            if looksLikeKeyRejection {
+                throw GoogleAIStudioError.invalidAPIKey(errorMsg)
+            }
+            throw GoogleAIStudioError.permissionDenied(modelID: trimmedModelID, message: errorMsg)
+        case 404:
+            throw GoogleAIStudioError.modelNotFound(trimmedModelID)
+        case 429:
+            if GeminiTransportHelper.isDailyQuotaExceeded(data: data, message: errorMsg) {
+                throw GoogleAIStudioError.quotaExceeded(errorMsg)
+            }
+            throw GoogleAIStudioError.rateLimited(
+                message: errorMsg,
+                retryAfterSeconds: GeminiTransportHelper.retryAfterSeconds(response: httpResponse, data: data)
+            )
+        default:
             throw GoogleAIStudioError.requestFailed(
                 statusCode: httpResponse.statusCode,
                 message: errorMsg
@@ -814,9 +910,9 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
         apiKey: String,
         logger: ((_ level: String, _ message: String) -> Void)? = nil
     ) async throws -> (Data, HTTPURLResponse) {
-        guard name.range(of: #"^files/[a-z0-9-]{1,40}$"#, options: .regularExpression) != nil,
-              let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/\(name)") else {
-            throw GoogleAIStudioError.invalidJSONResponse
+        let validatedName = try Self.validateRemoteFileName(name)
+        guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/\(validatedName)") else {
+            throw GoogleAIStudioError.fileUploadFailed("Files API 回傳無效的檔案識別碼")
         }
         var request = URLRequest(url: url)
         request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
@@ -849,9 +945,10 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
 
         guard let json = try? JSONSerialization.jsonObject(with: uploadData) as? [String: Any],
               let fileObj = json["file"] as? [String: Any],
-              let fileName = fileObj["name"] as? String else {
+              let rawFileName = fileObj["name"] as? String else {
             throw GoogleAIStudioError.fileUploadFailed("無法解析 Files API 回傳結構")
         }
+        let fileName = try Self.validateRemoteFileName(rawFileName)
 
         do {
             // Once the server gives us a file name, this scope owns cleanup.
@@ -876,8 +973,9 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                 }
                 guard polling.remaining > 0 else { break }
 
-                guard let pollURL = URL(string: "https://generativelanguage.googleapis.com/v1beta/\(fileName)") else {
-                    throw GoogleAIStudioError.invalidJSONResponse
+                let validatedName = try Self.validateRemoteFileName(fileName)
+                guard let pollURL = URL(string: "https://generativelanguage.googleapis.com/v1beta/\(validatedName)") else {
+                    throw GoogleAIStudioError.fileUploadFailed("Files API 回傳無效的檔案識別碼")
                 }
                 var pollRequest = URLRequest(url: pollURL)
                 pollRequest.httpMethod = "GET"
@@ -944,24 +1042,25 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
             }
             return
         }
-        let cleanupFailure = await Task.detached(priority: .utility) { [self] in
+        let diagnostic = await Task.detached(priority: .utility) { [self] in
             await deleteRemoteFile(
                 fileName: fileName,
                 apiKey: apiKey
             )
         }.value
-        if let cleanupFailure {
-            logger?("warning", "清理 Files API 暫存檔 (\(fileName)) 失敗：\(cleanupFailure)")
+        if let diagnostic {
+            logger?("warning", "清理 Files API 暫存檔未完成（\(diagnostic.logCodeSummary)）。")
         }
     }
 
     /// 刪除 Files API 遠端暫存檔案
-    private func deleteRemoteFile(
+    internal func deleteRemoteFile(
         fileName: String,
         apiKey: String
-    ) async -> String? {
-        guard let deleteURL = URL(string: "https://generativelanguage.googleapis.com/v1beta/\(fileName)") else {
-            return "無法建立 DELETE URL"
+    ) async -> CloudFailureDiagnostic? {
+        guard let validatedName = try? Self.validateRemoteFileName(fileName),
+              let deleteURL = URL(string: "https://generativelanguage.googleapis.com/v1beta/\(validatedName)") else {
+            return CloudFailureDiagnostic(category: .invalidResponse, stage: .cleanup)
         }
 
         var request = URLRequest(url: deleteURL)
@@ -975,11 +1074,11 @@ public final class GoogleAIStudioBackend: @unchecked Sendable {
                 if httpResponse.statusCode == 200 || httpResponse.statusCode == 204 || httpResponse.statusCode == 404 {
                     return nil
                 }
-                return "HTTP \(httpResponse.statusCode)"
+                return CloudFailureDiagnostic.http(httpResponse.statusCode, stage: .cleanup)
             }
-            return "Google 未回傳有效的 HTTP 回應"
+            return CloudFailureDiagnostic(category: .invalidResponse, stage: .cleanup)
         } catch {
-            return error.localizedDescription
+            return CloudFailureDiagnostic.classify(error, stage: .cleanup)
         }
     }
 

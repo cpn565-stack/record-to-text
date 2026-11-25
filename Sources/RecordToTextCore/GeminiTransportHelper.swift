@@ -246,11 +246,12 @@ public enum GeminiTransportHelper {
         throw CloudRequestLimitExceeded(stage: diagnosticStage)
     }
 
-    private static func stageDisplayName(_ stage: CloudDiagnosticStage) -> String {
+    internal static func stageDisplayName(_ stage: CloudDiagnosticStage) -> String {
         switch stage {
         case .generation: return "雲端生成"
         case .upload: return "上傳音訊"
         case .poll: return "查詢雲端檔案狀態"
+        case .cleanup: return "清理雲端暫存檔"
         default: return "雲端請求"
         }
     }
@@ -258,18 +259,7 @@ public enum GeminiTransportHelper {
     /// Formats only allowlisted diagnostic codes/enums so raw URLs, headers or
     /// arbitrary NSError userInfo strings can never enter user-visible logs.
     private static func failureReasonSummary(_ diagnostic: CloudFailureDiagnostic) -> String {
-        let baseMessage = diagnostic.userMessage.hasSuffix("。")
-            ? String(diagnostic.userMessage.dropLast())
-            : diagnostic.userMessage
-        let code: String
-        if let first = diagnostic.errorChain.first {
-            code = "\(first.domain):\(first.code)"
-        } else if let status = diagnostic.httpStatus {
-            code = "HTTP \(status)"
-        } else {
-            code = diagnostic.category.rawValue
-        }
-        return "\(baseMessage)，\(code)"
+        diagnostic.logCodeSummary
     }
 
     private static func transientRetryLogMessage(
@@ -391,6 +381,21 @@ public enum GeminiTransportHelper {
         config.waitsForConnectivity = true
         config.timeoutIntervalForRequest = 300
         config.timeoutIntervalForResource = 1_200
+        return URLSession(configuration: config)
+    }
+
+    /// Short-lived interactive probe session that fails fast when offline instead of waiting 20 minutes.
+    public static func makeInteractiveProbeSession(
+        protocolClasses: [AnyClass]? = nil,
+        timeoutSeconds: TimeInterval = 15
+    ) -> URLSession {
+        let config = URLSessionConfiguration.ephemeral
+        if let protocolClasses {
+            config.protocolClasses = protocolClasses
+        }
+        config.waitsForConnectivity = false
+        config.timeoutIntervalForRequest = timeoutSeconds
+        config.timeoutIntervalForResource = timeoutSeconds
         return URLSession(configuration: config)
     }
 

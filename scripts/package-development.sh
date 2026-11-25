@@ -19,7 +19,7 @@ VERSION="${VERSION}" \
 BUILD_NUMBER="${BUILD_NUMBER}" \
 CONFIGURATION=release \
 UNIVERSAL=0 \
-ADHOC_SIGN=0 \
+ADHOC_SIGN=1 \
   "${SCRIPT_DIR}/build-app.sh"
 
 "${SCRIPT_DIR}/create-dmg.sh" "${APP_PATH}" "${DMG_PATH}"
@@ -36,4 +36,4 @@ shasum -a 256 "${DMG_PATH}" > "${CHECKSUM_PATH}"
 print "Development delivery artifacts:"
 print "  ${DMG_PATH}"
 print "  ${CHECKSUM_PATH}"
-print "This artifact is unsigned and intended for testing, not public Stable distribution."
+print "This artifact is ad-hoc signed for local/development testing, not Developer ID notarized for public Stable distribution."

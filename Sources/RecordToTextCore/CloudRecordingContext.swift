@@ -101,6 +101,7 @@ extension CloudRecordingContext {
         if let error = error as? GoogleAIStudioError {
             switch error {
             case let .invalidAPIKey(s): return GoogleAIStudioError.invalidAPIKey(clean(s))
+            case let .permissionDenied(model, s): return GoogleAIStudioError.permissionDenied(modelID: model, message: clean(s))
             case let .requestFailed(code, s): return GoogleAIStudioError.requestFailed(statusCode: code, message: clean(s))
             case let .rateLimited(s, delay): return GoogleAIStudioError.rateLimited(message: clean(s), retryAfterSeconds: delay)
             case let .quotaExceeded(s): return GoogleAIStudioError.quotaExceeded(clean(s))

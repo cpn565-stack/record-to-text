@@ -20,11 +20,11 @@
 
 三種後端需要的環境不同：
 
-- **Google AI Studio**：在設定中儲存 Gemini API Key。音訊工具由 App 或本機環境提供。
-- **Vertex AI**：需可用的 `gcloud` 登入狀態、GCP 專案與有權限的 Vertex AI 區域。
+- **Google AI Studio**：在設定中儲存 Gemini API Key。`.app` 已內建 `ffmpeg`／`ffprobe`，但最終稿繁體字形統一仍需本機安裝 `opencc`（`brew install opencc`）。
+- **Vertex AI**：需可用的 `gcloud` 登入狀態、GCP 專案、有權限的 Vertex AI 區域，以及本機 `opencc`（`.app` 已內建 `ffmpeg`／`ffprobe`）。
 - **本機 Qwen**：目前需開啟 Developer Mode，並準備 Python／MLX-Audio、OpenCC 與 helper。App 管理的完整 Runtime installer 尚未完成。
 
-下列環境需求主要適用於「本機 Qwen」。
+下方「Python 與 MLX-Audio」及「模型下載」小節適用於「本機 Qwen」；`opencc` 則為所有後端共通需求。
 
 ### 硬體與系統
 
@@ -38,7 +38,7 @@
 
 ### 本機必須安裝的工具
 
-用 [Homebrew](https://brew.sh)（Apple Silicon 預設在 `/opt/homebrew`）：
+用 [Homebrew](https://brew.sh)（Apple Silicon 預設在 `/opt/homebrew`；所有模式皆需 `opencc`，打包版 `.app` 已內建 `ffmpeg`／`ffprobe`，裸跑 SwiftPM CLI 時亦會使用本機 `ffmpeg`）：
 
 ```bash
 brew install ffmpeg opencc
@@ -103,7 +103,7 @@ open /path/to/record-to-text.app
 
 ### 快速自檢清單
 
-在 App 內：**環境檢查**（右上角盾牌 icon）只會檢查當前後端所需元件。雲端模式需 ffmpeg／ffprobe 及對應憑證；本機 Qwen 才需 Python、OpenCC 與 helper。
+在 App 內：**環境檢查**（右上角工具選單 → 環境檢查）只會檢查當前後端所需元件。雲端模式（AI Studio／Vertex AI）需 `ffmpeg`／`ffprobe`（`.app` 已內建）、本機 `opencc` 及對應雲端憑證；本機 Qwen 另需 Python（`mlx_audio`）與 helper。
 
 1. Apple Silicon + macOS 14+  
 2. `ffmpeg` / `ffprobe` / `opencc` 在 PATH（Homebrew）  
@@ -122,7 +122,7 @@ open /path/to/record-to-text.app
 - 先加入錄音，再在「開始轉文字」旁選「切分再依序轉」：前半段先處理，後半段排隊，兩段各自輸出有順序的文字稿；App 不自動合併。
 - 可用「合併文字稿」選取多份 TXT，依分段編號排序產生新檔；原始 TXT 不會被覆寫。
 - 本機管線：`ffprobe → ffmpeg → Qwen ASR helper → OpenCC → 原子寫入 TXT`。
-- 雲端管線：`ffprobe → ffmpeg 壓縮／分段 → Gemini API → 原子寫入 TXT`。
+- 雲端管線：`ffprobe → ffmpeg 壓縮／分段 → Gemini API → OpenCC → 原子寫入 TXT`。
 - 雲端模型選單提供 Gemini 4 系列：**Gemini 4 Neon**（`gemini-4-neon`，預設，思考強度預設高 `high`）、**Gemini 4 Hydrogen**（`gemini-4-hydrogen`，預設極高 `xhigh`）、**Gemini 4 Carbon**（`gemini-4-carbon`）與 **Gemini 4 Argon**（`gemini-4-argon`），AI Studio 與 Vertex AI 皆可選用，設定頁仍保留自訂模型 ID 輸入。Neon 與 Hydrogen 支援低／中／高／極高，Carbon 與 Argon 支援低／中／高；各模型分別記住強度並跨後端共用，重開 App 後保留。Neon 與 Hydrogen 的 Vertex Location 支援 `global`、`us`、`eu`。既有設定使用舊版 Gemini 3.x 預設時會自動遷移至 Neon。詳見 [Hydrogen 支援說明](docs/gemini-4-hydrogen-support-2026-11-13.md)。
 - 雲端模型超過 **20 分鐘**時切成編號片段逐段處理；全部通過 manifest gate 後才交付正式逐字稿。
 - 雲端分段工作失敗或取消時，若已有完成片段，`Temp-Recovery` 會只保留部分 TXT、manifest 與最小 metadata（不保留 MP3），供人工取回。這不是自動斷點續跑；重新加入原始錄音會從頭轉錄。若還沒有任何完成片段，就不會誤稱有部分稿可取回。

@@ -30,16 +30,34 @@ public final class GCloudAuthService: @unchecked Sendable {
     /// can issue shorter-lived ones). Cache conservatively; anything shorter
     /// is recovered by the 401 auto-refresh path in the Vertex backend.
     private static let cachedTokenTTL: TimeInterval = 30 * 60
+    public static let cachedProjectTTL: TimeInterval = 5 * 60
+
+    private static let allowlistedEnvironmentKeys: [String] = [
+        "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "TZ",
+        "CLOUDSDK_CONFIG", "CLOUDSDK_PYTHON", "CLOUDSDK_PYTHON_ARGS", "CLOUDSDK_ACTIVE_CONFIG_NAME",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+        "http_proxy", "https_proxy", "no_proxy",
+        "SSL_CERT_FILE", "SSL_CERT_DIR"
+    ]
+
     private struct CachedToken {
         let token: String
         let expiresAt: Date
     }
 
+    private struct CachedProject {
+        let projectID: String
+        let expiresAt: Date
+    }
+
     private let runner: ProcessRunner
     private let customGCloudPath: String?
+    private let inheritedEnvironmentProvider: @Sendable () -> [String: String]
+    private let nowProvider: @Sendable () -> Date
     private let lock = NSLock()
     private var cachedToken: CachedToken?
-    private var cachedProjectID: String?
+    private var cachedProject: CachedProject?
 
     public var configuredCustomGCloudPath: String? {
         customGCloudPath
@@ -51,6 +69,42 @@ public final class GCloudAuthService: @unchecked Sendable {
     ) {
         self.customGCloudPath = customGCloudPath
         self.runner = runner
+        self.inheritedEnvironmentProvider = { ProcessInfo.processInfo.environment }
+        self.nowProvider = { Date() }
+    }
+
+    internal init(
+        customGCloudPath: String? = nil,
+        runner: ProcessRunner = ProcessRunner(),
+        inheritedEnvironmentProvider: @escaping @Sendable () -> [String: String],
+        nowProvider: @escaping @Sendable () -> Date = { Date() }
+    ) {
+        self.customGCloudPath = customGCloudPath
+        self.runner = runner
+        self.inheritedEnvironmentProvider = inheritedEnvironmentProvider
+        self.nowProvider = nowProvider
+    }
+
+    internal func gcloudEnvironment(executableURL: URL) -> [String: String] {
+        let inherited = inheritedEnvironmentProvider()
+        var environment: [String: String] = [:]
+        for key in Self.allowlistedEnvironmentKeys {
+            if let value = inherited[key], !value.isEmpty {
+                environment[key] = value
+            }
+        }
+        var seenPaths = Set<String>()
+        let pathEntries = [
+            executableURL.deletingLastPathComponent().path,
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin"
+        ].filter { !$0.isEmpty && seenPaths.insert($0).inserted }
+        environment["PATH"] = pathEntries.joined(separator: ":")
+        return environment
     }
 
     /// 尋找系統中的 gcloud 執行檔路徑
@@ -102,9 +156,10 @@ public final class GCloudAuthService: @unchecked Sendable {
         forceRefresh: Bool = false,
         timeout: TimeInterval = 30
     ) async throws -> String {
+        let currentNow = nowProvider()
         if !forceRefresh {
             let cached = lock.withLock { () -> String? in
-                if let cached = cachedToken, cached.expiresAt > Date() {
+                if let cached = cachedToken, cached.expiresAt > currentNow {
                     return cached.token
                 }
                 return nil
@@ -122,6 +177,7 @@ public final class GCloudAuthService: @unchecked Sendable {
             let result = try await runner.run(
                 executableURL: executableURL,
                 arguments: ["auth", "print-access-token"],
+                environment: gcloudEnvironment(executableURL: executableURL),
                 timeout: timeout,
                 inactivityTimeout: 15
             )
@@ -131,10 +187,11 @@ public final class GCloudAuthService: @unchecked Sendable {
                 throw GCloudAuthError.tokenEmpty
             }
 
+            let savedAt = nowProvider()
             lock.withLock {
                 cachedToken = CachedToken(
                     token: token,
-                    expiresAt: Date().addingTimeInterval(Self.cachedTokenTTL)
+                    expiresAt: savedAt.addingTimeInterval(Self.cachedTokenTTL)
                 )
             }
 
@@ -156,13 +213,20 @@ public final class GCloudAuthService: @unchecked Sendable {
         }
     }
 
-    /// 獲取當前 gcloud active project ID（具快取機制）
+    /// 獲取當前 gcloud active project ID（具 5 分鐘快取 TTL）
     public func getDefaultProjectID(
         forceRefresh: Bool = false,
         timeout: TimeInterval = 15
     ) async throws -> String {
+        let currentNow = nowProvider()
         if !forceRefresh {
-            if let cached = lock.withLock({ cachedProjectID }) {
+            let cached = lock.withLock { () -> String? in
+                if let cached = cachedProject, cached.expiresAt > currentNow {
+                    return cached.projectID
+                }
+                return nil
+            }
+            if let cached {
                 return cached
             }
         }
@@ -175,6 +239,7 @@ public final class GCloudAuthService: @unchecked Sendable {
             let result = try await runner.run(
                 executableURL: executableURL,
                 arguments: ["config", "get-value", "project"],
+                environment: gcloudEnvironment(executableURL: executableURL),
                 timeout: timeout,
                 inactivityTimeout: 10
             )
@@ -192,8 +257,12 @@ public final class GCloudAuthService: @unchecked Sendable {
                 throw GCloudAuthError.projectNotFound
             }
 
+            let savedAt = nowProvider()
             lock.withLock {
-                cachedProjectID = project
+                cachedProject = CachedProject(
+                    projectID: project,
+                    expiresAt: savedAt.addingTimeInterval(Self.cachedProjectTTL)
+                )
             }
 
             return project
@@ -218,7 +287,7 @@ public final class GCloudAuthService: @unchecked Sendable {
     public func clearCache() {
         lock.withLock {
             cachedToken = nil
-            cachedProjectID = nil
+            cachedProject = nil
         }
     }
 }

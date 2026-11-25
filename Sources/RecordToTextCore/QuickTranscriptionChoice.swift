@@ -3,7 +3,9 @@ import Foundation
 /// Common engine/model combinations exposed by the main-window
 /// quick selector. Advanced model choices remain available in Settings.
 public enum QuickTranscriptionChoice: String, CaseIterable, Identifiable, Sendable {
+    case qwen3ASR1_7B8bit
     case qwen3ASR1_7BBF16
+    case qwen3ASR0_6B8bit
     case aiStudioGemini4Neon
     case vertexGemini4Neon
     case aiStudioGemini4Hydrogen
@@ -17,8 +19,12 @@ public enum QuickTranscriptionChoice: String, CaseIterable, Identifiable, Sendab
 
     public var displayName: String {
         switch self {
+        case .qwen3ASR1_7B8bit:
+            return "Qwen3-ASR 1.7B 8-bit"
         case .qwen3ASR1_7BBF16:
             return "Qwen3-ASR 1.7B BF16"
+        case .qwen3ASR0_6B8bit:
+            return "Qwen3-ASR 0.6B 8-bit"
         case .aiStudioGemini4Neon:
             return "AI Studio (Gemini 4 Neon)"
         case .vertexGemini4Neon:
@@ -40,7 +46,7 @@ public enum QuickTranscriptionChoice: String, CaseIterable, Identifiable, Sendab
 
     public var backendType: ASRBackendType {
         switch self {
-        case .qwen3ASR1_7BBF16:
+        case .qwen3ASR1_7B8bit, .qwen3ASR1_7BBF16, .qwen3ASR0_6B8bit:
             return .localQwen
         case .vertexGemini4Neon, .vertexGemini4Hydrogen, .vertexGemini4Carbon, .vertexGemini4Argon:
             return .vertexAI
@@ -53,9 +59,15 @@ public enum QuickTranscriptionChoice: String, CaseIterable, Identifiable, Sendab
         var updated = settings
         updated.backendType = backendType
         switch self {
+        case .qwen3ASR1_7B8bit:
+            updated.selectedModels[CPUArchitecture.current.rawValue] =
+                ASRModelDescriptor.appleSiliconDefault.id
         case .qwen3ASR1_7BBF16:
             updated.selectedModels[CPUArchitecture.current.rawValue] =
                 ASRModelDescriptor.appleSiliconBF16.id
+        case .qwen3ASR0_6B8bit:
+            updated.selectedModels[CPUArchitecture.current.rawValue] =
+                ASRModelDescriptor.appleSilicon0_6B8bit.id
         case .aiStudioGemini4Neon:
             updated.googleAIStudioModelID = "gemini-4-neon"
         case .vertexGemini4Neon:
@@ -81,8 +93,12 @@ public enum QuickTranscriptionChoice: String, CaseIterable, Identifiable, Sendab
             return false
         }
         switch self {
+        case .qwen3ASR1_7B8bit:
+            return settings.selectedModelID == ASRModelDescriptor.appleSiliconDefault.id
         case .qwen3ASR1_7BBF16:
             return settings.selectedModelID == ASRModelDescriptor.appleSiliconBF16.id
+        case .qwen3ASR0_6B8bit:
+            return settings.selectedModelID == ASRModelDescriptor.appleSilicon0_6B8bit.id
         case .aiStudioGemini4Neon:
             return settings.googleAIStudioModelID == "gemini-4-neon"
         case .vertexGemini4Neon:

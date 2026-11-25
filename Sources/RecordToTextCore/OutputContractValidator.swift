@@ -37,12 +37,48 @@ public enum OutputContractValidator {
             of: #"(?m)^\[\d{2,}:\d{2}(?::\d{2})? - \d{2,}:\d{2}(?::\d{2})?\][\t ]*$"#,
             with: "", options: .regularExpression)
         let normalized = removingWhitespace(from: withoutHeadings)
-        let block = removingWhitespace(from: recordingContextBlock)
+        let contextCandidates = recordingContextEchoCandidates(from: recordingContextBlock)
+        let hasContextMarkerEcho = !recordingContextBlock.isEmpty
+            && withoutHeadings.contains("【錄音背景開始】")
+            && withoutHeadings.contains("【錄音背景結束】")
+        let hasContextEnvelopeEcho = contextCandidates.contains { candidate in
+            !candidate.isEmpty && (normalized.hasPrefix(candidate) || normalized.hasSuffix(candidate))
+        }
         if hasPromptEcho(text: withoutHeadings, prompt: canonicalPrompt, explicitTerms: terms)
-            || (!block.isEmpty && (normalized.hasPrefix(block) || normalized.hasSuffix(block))) {
+            || hasContextMarkerEcho
+            || hasContextEnvelopeEcho {
             throw OutputContractValidationError.promptEcho(path)
         }
         return text
+    }
+
+    private static func recordingContextEchoCandidates(from block: String) -> [String] {
+        guard !block.isEmpty else { return [] }
+        var candidates: [String] = []
+        let full = removingWhitespace(from: block)
+        if !full.isEmpty {
+            candidates.append(full)
+        }
+        let startMarker = "【錄音背景開始】"
+        let endMarker = "【錄音背景結束】"
+        if let startRange = block.range(of: startMarker),
+           let endRange = block.range(of: endMarker, options: .backwards),
+           startRange.upperBound <= endRange.lowerBound
+        {
+            let tagged = removingWhitespace(from: String(block[startRange.lowerBound..<endRange.upperBound]))
+            if !tagged.isEmpty && !candidates.contains(tagged) {
+                candidates.append(tagged)
+            }
+            let inner = String(block[startRange.upperBound..<endRange.lowerBound])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if inner.hasPrefix("{\"recording_context\":") {
+                let normalizedInner = removingWhitespace(from: inner)
+                if !normalizedInner.isEmpty && !candidates.contains(normalizedInner) {
+                    candidates.append(normalizedInner)
+                }
+            }
+        }
+        return candidates
     }
 
     @discardableResult

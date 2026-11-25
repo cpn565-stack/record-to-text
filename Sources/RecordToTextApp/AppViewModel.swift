@@ -73,11 +73,26 @@ final class AppViewModel: ObservableObject {
     /// for each batch; jobs persist their own immutable value.
     @Published var cloudRecordingContextDraft = ""
     private struct IntakeContext {
-        let settings: AppSettings
+        var settings: AppSettings
         let prompt: PromptBuildResult
         let glossaryID: String?
         let glossaryName: String?
         let recordingContext: String
+
+        mutating func synchronizeEngineSettings(from current: AppSettings) {
+            settings.backendType = current.backendType
+            settings.selectedModels = current.selectedModels
+            settings.googleAIStudioModelID = current.googleAIStudioModelID
+            settings.vertexAIModelID = current.vertexAIModelID
+            settings.vertexAIProjectID = current.vertexAIProjectID
+            settings.vertexAILocation = current.vertexAILocation
+            settings.vertexAIGCSBucket = current.vertexAIGCSBucket
+            settings.vertexAIIncludeSummary = current.vertexAIIncludeSummary
+            settings.geminiThinkingLevelsByModel = current.geminiThinkingLevelsByModel
+            settings.cloudFallbackPolicy = current.cloudFallbackPolicy
+            settings.silenceAwareCloudSegmentation = current.silenceAwareCloudSegmentation
+            settings.localSilenceAwareSegmentation = current.localSilenceAwareSegmentation
+        }
     }
     private var pendingDuplicateIntake: IntakeContext?
     private let outputDirectoryChooser: (() -> URL?)?
@@ -128,14 +143,19 @@ final class AppViewModel: ObservableObject {
     private let credentialStore: any GoogleAIStudioCredentialStoring
     private let saveSettingsValue: (AppSettings) throws -> Void
     private let jobLedgerSaveOverride: ((JobLedgerCollection) throws -> Void)?
+    static let modelDownloadHardTimeout: TimeInterval = 7_200
+    static let modelDownloadInactivityTimeout: TimeInterval = 300
+
     private let fileManager: FileManager
-    private let modelDownloadRunner = ProcessRunner()
+    private let modelDownloadRunner: ProcessRunner
+    private let idleEngineReleaseDelay: Duration
 
     private var queueTask: Task<Void, Never>?
     private var activeExecutionTask: Task<PipelineResult, Error>?
     private var activeEngine: TranscriptionEngine?
     private var reusableEngine: TranscriptionEngine?
     private var reusableEngineRuntime: ResolvedRuntime?
+    private var idleEngineReleaseTask: Task<Void, Never>?
     private var modelDownloadTask: Task<Void, Never>?
     private var modelCacheStatusTask: Task<Void, Never>?
     private var recoveryScanTask: Task<Void, Never>?
@@ -174,7 +194,9 @@ final class AppViewModel: ObservableObject {
         jobLedgerSaveOverride: ((JobLedgerCollection) throws -> Void)? = nil,
         engineFactory: ((ResolvedRuntime) -> TranscriptionEngine)? = nil,
         queueSleep: QueueCompletionSleepCoordinator? = nil,
-        outputDirectoryChooser: (() -> URL?)? = nil
+        outputDirectoryChooser: (() -> URL?)? = nil,
+        modelDownloadRunner: ProcessRunner = ProcessRunner(),
+        idleEngineReleaseDelay: Duration = .seconds(300)
     ) {
         self.paths = paths
         self.systemTempRoot = systemTempRoot
@@ -183,6 +205,8 @@ final class AppViewModel: ObservableObject {
         self.engineFactory = engineFactory
         self.fileManager = fileManager
         self.credentialStore = credentialStore
+        self.modelDownloadRunner = modelDownloadRunner
+        self.idleEngineReleaseDelay = idleEngineReleaseDelay
         let settingsRepository = JSONRepository<AppSettings>(url: paths.settings)
         let jobLedgerRepository = JSONRepository<JobLedgerCollection>(url: paths.jobLedger)
         self.settingsRepository = settingsRepository
@@ -429,6 +453,7 @@ final class AppViewModel: ObservableObject {
         activeExecutionTask?.cancel()
         activeEngine?.cancelCurrentJob()
         reusableEngine?.cancelCurrentJob()
+        idleEngineReleaseTask?.cancel()
         modelDownloadTask?.cancel()
         modelCacheStatusTask?.cancel()
         recoveryScanTask?.cancel()
@@ -633,10 +658,18 @@ final class AppViewModel: ObservableObject {
             \AppSettings.googleAIStudioModelID, \AppSettings.vertexAIModelID,
             \AppSettings.vertexAIProjectID, \AppSettings.vertexAILocation,
             \AppSettings.vertexAIGCSBucket, \AppSettings.vertexAIIncludeSummary,
-            \AppSettings.geminiThinkingLevel, \AppSettings.cloudFallbackPolicy,
+            \AppSettings.geminiThinkingLevel, \AppSettings.geminiThinkingLevelsByModel,
+            \AppSettings.cloudFallbackPolicy,
             \AppSettings.silenceAwareCloudSegmentation,
             \AppSettings.localSilenceAwareSegmentation]
         if engineKeys.contains(keyPath) { synchronizeQueuedEngineSettings() }
+        if (keyPath as AnyKeyPath) == (\AppSettings.backendType as AnyKeyPath),
+           settings.backendType != .localQwen,
+           activeJobID == nil
+        {
+            cancelIdleEngineRelease()
+            reusableEngine?.releaseIdleResources()
+        }
         if (keyPath as AnyKeyPath) == (\AppSettings.recentJobLimit as AnyKeyPath) {
             let cap = max(0, settings.recentJobLimit)
             if recentJobs.count > cap {
@@ -658,6 +691,9 @@ final class AppViewModel: ObservableObject {
                 jobs[index].snapshot = next
                 changed = true
             }
+        }
+        if pendingDuplicateIntake != nil {
+            pendingDuplicateIntake?.synchronizeEngineSettings(from: settings)
         }
         if changed { persistJobs() }
     }
@@ -862,6 +898,10 @@ final class AppViewModel: ObservableObject {
     func selectQuickTranscriptionChoice(_ choice: QuickTranscriptionChoice) {
         settings = choice.applying(to: settings)
         synchronizeQueuedEngineSettings()
+        if settings.backendType != .localQwen, activeJobID == nil {
+            cancelIdleEngineRelease()
+            reusableEngine?.releaseIdleResources()
+        }
         scheduleSettingsPersist()
 
         if choice.backendType == .localQwen {
@@ -2048,6 +2088,7 @@ final class AppViewModel: ObservableObject {
 
     func stopAllForTermination() async {
         setSleepAfterCompletion(false)
+        cancelIdleEngineRelease()
         isTerminating = true
         refreshDockBadge()
         terminationGeneration += 1
@@ -2450,9 +2491,30 @@ final class AppViewModel: ObservableObject {
         manualDrainRequested = false
         queueTask = nil
         refreshQueueSleep()
+        if !isTerminating && !hasActiveJob && !hasQueuedJobs {
+            scheduleIdleEngineRelease()
+        }
+    }
+
+    private func cancelIdleEngineRelease() {
+        idleEngineReleaseTask?.cancel()
+        idleEngineReleaseTask = nil
+    }
+
+    private func scheduleIdleEngineRelease() {
+        idleEngineReleaseTask?.cancel()
+        let delay = idleEngineReleaseDelay
+        idleEngineReleaseTask = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard let self, !Task.isCancelled else { return }
+            guard !self.isTerminating, !self.hasActiveJob, !self.hasQueuedJobs else { return }
+            self.reusableEngine?.releaseIdleResources()
+            self.idleEngineReleaseTask = nil
+        }
     }
 
     private func runJob(_ id: UUID) async {
+        cancelIdleEngineRelease()
         authorizedContinuations.remove(id)
         guard let initialIndex = jobs.firstIndex(where: { $0.id == id }) else {
             return
@@ -2716,7 +2778,7 @@ final class AppViewModel: ObservableObject {
         if let thoughts = usage?.thoughtsTokenCount {
             parts.append("thinking token \(thoughts)")
         }
-        if let cost = usage?.estimatedCostUSD(modelID: effectiveModels.first ?? "") {
+        if let cost = CloudTranscriptionMetadataAggregator.totalEstimatedCostUSD(metadata) {
             parts.append("預估 \(CloudUsageMetadata.formatCostUSD(cost))")
         }
         jobs[index].logLines.append(parts.joined(separator: "；") + "。")
@@ -2989,6 +3051,7 @@ final class AppViewModel: ObservableObject {
                 do {
                     try Self.copyModelFromDefaultHFCache(
                         modelID: modelID,
+                        revision: revision,
                         modelsDirectory: modelsDirectory,
                         fileManager: fm
                     )
@@ -3068,6 +3131,8 @@ final class AppViewModel: ObservableObject {
                 arguments: arguments,
                 environment: environment,
                 requireSuccess: true,
+                timeout: Self.modelDownloadHardTimeout,
+                inactivityTimeout: Self.modelDownloadInactivityTimeout,
                 stdoutLineHandler: { [weak self] line in
                     Task { @MainActor in
                         self?.modelDownloadProgressLine = line
@@ -3115,14 +3180,17 @@ final class AppViewModel: ObservableObject {
         refreshSelectedModelCacheStatus()
     }
 
-    private nonisolated static func copyModelFromDefaultHFCache(
+    internal nonisolated static func copyModelFromDefaultHFCache(
         modelID: String,
+        revision: String? = nil,
+        defaultHubRoot: URL? = nil,
         modelsDirectory: URL,
         fileManager: FileManager
     ) throws {
+        let hubSourceRoot = defaultHubRoot ?? ModelCache.defaultHuggingFaceHub(fileManager: fileManager)
         let source = ModelCache.repositoryDirectory(
             modelID: modelID,
-            hubRoot: ModelCache.defaultHuggingFaceHub(fileManager: fileManager)
+            hubRoot: hubSourceRoot
         )
         let destinationRoot = ModelCache.hubRoot(modelsDirectory: modelsDirectory)
         let destination = ModelCache.repositoryDirectory(
@@ -3138,14 +3206,45 @@ final class AppViewModel: ObservableObject {
             at: destinationRoot,
             withIntermediateDirectories: true
         )
-        if fileManager.fileExists(atPath: destination.path) {
-            try fileManager.removeItem(at: destination)
+        let stagingModelsDirectory = modelsDirectory.appendingPathComponent(
+            ".import-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer {
+            try? fileManager.removeItem(at: stagingModelsDirectory)
         }
-        try fileManager.copyItem(at: source, to: destination)
+        let stagingHubRoot = ModelCache.hubRoot(modelsDirectory: stagingModelsDirectory)
+        try fileManager.createDirectory(
+            at: stagingHubRoot,
+            withIntermediateDirectories: true
+        )
+        let stagedRepository = ModelCache.repositoryDirectory(
+            modelID: modelID,
+            hubRoot: stagingHubRoot
+        )
+        try fileManager.copyItem(at: source, to: stagedRepository)
+
+        guard ModelCache.isDownloaded(
+            modelID: modelID,
+            revision: revision,
+            modelsDirectory: stagingModelsDirectory,
+            fileManager: fileManager
+        ) else {
+            return
+        }
+
+        if fileManager.fileExists(atPath: destination.path) {
+            _ = try fileManager.replaceItemAt(destination, withItemAt: stagedRepository)
+        } else {
+            try fileManager.moveItem(at: stagedRepository, to: destination)
+        }
     }
 
-    private func modelDownloadEnvironment(modelsDirectory: URL) -> [String: String] {
-        let inherited = ProcessInfo.processInfo.environment
+    internal func modelDownloadEnvironment(
+        modelsDirectory: URL,
+        inheritedEnvironment: [String: String] = ProcessInfo.processInfo.environment,
+        fileManager: FileManager? = nil
+    ) -> [String: String] {
         var environment: [String: String] = [:]
         for key in [
             "HOME",
@@ -3154,14 +3253,17 @@ final class AppViewModel: ObservableObject {
             "LC_ALL",
             "TZ",
             "SSL_CERT_FILE",
-            "SSL_CERT_DIR",
-            "HF_TOKEN",
-            "HUGGING_FACE_HUB_TOKEN"
+            "SSL_CERT_DIR"
         ] {
-            if let value = inherited[key], !value.isEmpty {
+            if let value = inheritedEnvironment[key], !value.isEmpty {
                 environment[key] = value
             }
         }
+        ModelCache.applyHuggingFaceTokenEnvironment(
+            &environment,
+            inherited: inheritedEnvironment,
+            fileManager: fileManager ?? self.fileManager
+        )
         let pathParts = [
             runtimeCandidate().python.deletingLastPathComponent().path,
             "/usr/bin",

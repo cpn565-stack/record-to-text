@@ -3,7 +3,10 @@ import CryptoKit
 
 public enum VertexAIError: LocalizedError, Equatable {
     case invalidEndpointURL(String)
+    case unsupportedModelLocation(modelID: String, location: String)
     case authenticationFailed(String)
+    case permissionDenied(projectID: String, location: String, modelID: String)
+    case modelOrLocationNotFound(projectID: String, location: String, modelID: String)
     case audioPayloadTooLarge(sizeBytes: Int, limitBytes: Int)
     case requestFailed(statusCode: Int, message: String)
     case rateLimited(message: String, retryAfterSeconds: Double?)
@@ -23,8 +26,14 @@ public enum VertexAIError: LocalizedError, Equatable {
         switch self {
         case let .invalidEndpointURL(url):
             return "無效的 Vertex AI Endpoint URL：\(url)"
+        case let .unsupportedModelLocation(modelID, location):
+            return "模型 \(modelID) 在 Vertex AI 僅支援 global、us 或 eu 區域（目前設定為 \(location)）。"
         case let .authenticationFailed(reason):
             return "Vertex AI 驗證失敗：\(reason)"
+        case let .permissionDenied(projectID, location, modelID):
+            return "專案 \(projectID) 尚未啟用 Vertex AI API，或目前帳號缺少區域 \(location)／模型 \(modelID) 的 IAM 權限（HTTP 403）。"
+        case let .modelOrLocationNotFound(projectID, location, modelID):
+            return "在區域 \(location) 找不到模型 \(modelID)，或專案 \(projectID) 無權限存取該模型（HTTP 404）。"
         case let .audioPayloadTooLarge(sizeBytes, limitBytes):
             let sizeMB = Double(sizeBytes) / (1024 * 1024)
             let limitMB = Double(limitBytes) / (1024 * 1024)
@@ -223,6 +232,151 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
 
     public func getConfiguration() -> Configuration {
         lock.withLock { config }
+    }
+
+    public static func validateModelLocationCompatibility(
+        modelID: String,
+        location: String
+    ) throws {
+        let trimmedModel = modelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedLocation = location.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedLocation = trimmedLocation.isEmpty ? "global" : trimmedLocation
+        if trimmedModel == "gemini-4-neon" || trimmedModel == "gemini-4-hydrogen" {
+            let supportedLocations: Set<String> = ["global", "us", "eu"]
+            guard supportedLocations.contains(resolvedLocation) else {
+                throw VertexAIError.unsupportedModelLocation(
+                    modelID: trimmedModel,
+                    location: resolvedLocation
+                )
+            }
+        }
+    }
+
+    /// 驗證 gcloud OAuth 憑證、專案與指定區域下之所選模型是否可用（回傳實際解析之 projectID）
+    public func validateConnectionAndModel(
+        projectID: String?,
+        location: String,
+        modelID: String
+    ) async throws -> String {
+        let trimmedLocation = location.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedLocation = trimmedLocation.isEmpty ? "global" : trimmedLocation
+        let trimmedModel = modelID.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        try Self.validateModelLocationCompatibility(
+            modelID: trimmedModel,
+            location: resolvedLocation
+        )
+
+        let authService = lock.withLock { self.authService }
+        let resolvedProjectID: String
+        if let explicit = projectID?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !explicit.isEmpty
+        {
+            resolvedProjectID = explicit
+        } else {
+            do {
+                resolvedProjectID = try await authService.getDefaultProjectID(forceRefresh: true)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let authError as GCloudAuthError where authError == .cancelled {
+                throw CancellationError()
+            } catch {
+                throw VertexAIError.authenticationFailed(error.localizedDescription)
+            }
+        }
+
+        try Self.validateEndpointParameters(
+            projectID: resolvedProjectID,
+            location: resolvedLocation,
+            modelID: trimmedModel
+        )
+
+        let accessToken: String
+        do {
+            accessToken = try await authService.getAccessToken(forceRefresh: true)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let authError as GCloudAuthError where authError == .cancelled {
+            throw CancellationError()
+        } catch {
+            throw VertexAIError.authenticationFailed(error.localizedDescription)
+        }
+
+        let host = resolvedLocation == "global"
+            ? "aiplatform.googleapis.com"
+            : "\(resolvedLocation)-aiplatform.googleapis.com"
+        let baseModelPath = "https://\(host)/v1/projects/\(resolvedProjectID)/locations/\(resolvedLocation)/publishers/google/models/\(trimmedModel)"
+        guard let getURL = URL(string: baseModelPath) else {
+            throw VertexAIError.invalidEndpointURL(baseModelPath)
+        }
+
+        var getRequest = URLRequest(url: getURL)
+        getRequest.httpMethod = "GET"
+        getRequest.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        getRequest.timeoutInterval = 15
+
+        let (getData, getResponse) = try await urlSession.data(for: getRequest)
+        guard let getHTTP = getResponse as? HTTPURLResponse else {
+            throw VertexAIError.invalidJSONResponse
+        }
+        if getHTTP.statusCode == 200 {
+            return resolvedProjectID
+        }
+
+        let finalData: Data
+        let finalHTTP: HTTPURLResponse
+        if getHTTP.statusCode == 404 || getHTTP.statusCode == 405 {
+            guard let countURL = URL(string: "\(baseModelPath):countTokens") else {
+                throw VertexAIError.invalidEndpointURL("\(baseModelPath):countTokens")
+            }
+            var countRequest = URLRequest(url: countURL)
+            countRequest.httpMethod = "POST"
+            countRequest.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+            countRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            countRequest.httpBody = Data(#"{"contents":[{"role":"user","parts":[{"text":"ok"}]}]}"#.utf8)
+            countRequest.timeoutInterval = 15
+
+            let (countData, countResponse) = try await urlSession.data(for: countRequest)
+            guard let countHTTP = countResponse as? HTTPURLResponse else {
+                throw VertexAIError.invalidJSONResponse
+            }
+            if countHTTP.statusCode == 200 {
+                return resolvedProjectID
+            }
+            finalData = countData
+            finalHTTP = countHTTP
+        } else {
+            finalData = getData
+            finalHTTP = getHTTP
+        }
+
+        let errorMsg = GeminiResponseParser.errorMessage(from: finalData)
+        switch finalHTTP.statusCode {
+        case 401:
+            throw VertexAIError.authenticationFailed("OAuth 憑證無效或已過期，請重新執行 gcloud auth login。")
+        case 403:
+            throw VertexAIError.permissionDenied(
+                projectID: resolvedProjectID,
+                location: resolvedLocation,
+                modelID: trimmedModel
+            )
+        case 404:
+            throw VertexAIError.modelOrLocationNotFound(
+                projectID: resolvedProjectID,
+                location: resolvedLocation,
+                modelID: trimmedModel
+            )
+        case 429:
+            if GeminiTransportHelper.isDailyQuotaExceeded(data: finalData, message: errorMsg) {
+                throw VertexAIError.quotaExceeded(errorMsg)
+            }
+            throw VertexAIError.rateLimited(
+                message: errorMsg,
+                retryAfterSeconds: GeminiTransportHelper.retryAfterSeconds(response: finalHTTP, data: finalData)
+            )
+        default:
+            throw VertexAIError.requestFailed(statusCode: finalHTTP.statusCode, message: errorMsg)
+        }
     }
 
     public func transcribeDetailed(
@@ -484,7 +638,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
         // 第二層優先：若有設定 GCS Bucket 則走 GCS 上傳
         if let bucket, !bucket.isEmpty {
             let objectName = "record_to_text_\(UUID().uuidString).mp3"
-            logger?("info", "使用 GCS Bucket (\(bucket)) 串流上傳音訊...")
+            logger?("info", "使用設定的 GCS 儲存貯體串流上傳音訊...")
 
             let uploadedBytes: Int
             do {
@@ -1044,7 +1198,7 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
             // Cleanup has its own bounded allowance and cannot delay failure UI.
             Task.detached(priority: .utility) { [self] in
                 let cleanupBudget = CloudSegmentBudget(limit: .seconds(5))
-                let cleanupFailure = try? await cleanupBudget.withDeadline(stage: "cleanup") {
+                _ = try? await cleanupBudget.withDeadline(stage: "cleanup") {
                     let cleanupToken = (try? await authService.getAccessToken())
                         ?? accessToken
                     return await self.deleteGCSObject(
@@ -1053,13 +1207,10 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                         accessToken: cleanupToken
                     )
                 }
-                if let cleanupFailure {
-                    logger?("warning", "背景清理 GCS 暫存檔 (\(objectName)) 失敗：\(cleanupFailure)")
-                }
             }
             return
         }
-        let cleanupFailure = await Task.detached(priority: .utility) { [self] in
+        let diagnostic = await Task.detached(priority: .utility) { [self] in
             // A generateContent 401 may have refreshed the cached token before
             // a later retry failed. Resolve inside the detached cleanup task so
             // cancellation cannot force DELETE to reuse the stale token.
@@ -1071,19 +1222,21 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                 accessToken: cleanupToken
             )
         }.value
-        if let cleanupFailure {
-            logger?("warning", "清理 GCS 暫存檔 (\(objectName)) 失敗：\(cleanupFailure)")
+        if let diagnostic {
+            logger?("warning", "清理 GCS 暫存檔未完成（\(diagnostic.logCodeSummary)）。")
         }
     }
 
-    private func deleteGCSObject(
+    internal func deleteGCSObject(
         bucket: String,
         objectName: String,
         accessToken: String
-    ) async -> String? {
-        guard let encodedName = objectName.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
-              let deleteURL = URL(string: "https://storage.googleapis.com/storage/v1/b/\(bucket)/o/\(encodedName)") else {
-            return "無法建立 DELETE URL"
+    ) async -> CloudFailureDiagnostic? {
+        guard let validatedBucket = try? Self.normalizedAndValidatedBucket(bucket),
+              let encodedName = objectName.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              !encodedName.isEmpty,
+              let deleteURL = URL(string: "https://storage.googleapis.com/storage/v1/b/\(validatedBucket)/o/\(encodedName)") else {
+            return CloudFailureDiagnostic(category: .invalidResponse, stage: .cleanup)
         }
 
         var request = URLRequest(url: deleteURL)
@@ -1097,11 +1250,11 @@ public final class VertexAIGeminiBackend: @unchecked Sendable {
                 if httpResponse.statusCode == 200 || httpResponse.statusCode == 204 || httpResponse.statusCode == 404 {
                     return nil
                 }
-                return "HTTP \(httpResponse.statusCode)"
+                return CloudFailureDiagnostic.http(httpResponse.statusCode, stage: .cleanup)
             }
-            return "Google Cloud Storage 未回傳有效的 HTTP 回應"
+            return CloudFailureDiagnostic(category: .invalidResponse, stage: .cleanup)
         } catch {
-            return error.localizedDescription
+            return CloudFailureDiagnostic.classify(error, stage: .cleanup)
         }
     }
 

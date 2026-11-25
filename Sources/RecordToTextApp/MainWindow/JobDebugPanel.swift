@@ -221,9 +221,7 @@ enum JobDebugClipboard {
             if let thoughts = usage?.thoughtsTokenCount {
                 lines.append("thinking token：\(thoughts)")
             }
-            if let cost = CloudTranscriptionMetadataAggregator.totalEstimatedCostUSD(metadata)
-                ?? usage?.estimatedCostUSD(modelID: job.snapshot.requestedModelID)
-            {
+            if let cost = CloudTranscriptionMetadataAggregator.totalEstimatedCostUSD(metadata) {
                 lines.append("預估費用：\(CloudUsageMetadata.formatCostUSD(cost))")
             }
             if retries > 0 {

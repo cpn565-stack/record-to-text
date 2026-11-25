@@ -801,6 +801,14 @@ public final class HelperASRBackend {
         )
     }
 
+    public func stopPersistentSession() {
+        recyclePersistentSession()
+    }
+
+    internal var hasPersistentSession: Bool {
+        sessionLock.withLock { persistentSession != nil }
+    }
+
     private func recyclePersistentSession() {
         let oldSession = sessionLock.withLock { () -> PersistentASRHelperSession? in
             let current = persistentSession
@@ -1007,11 +1015,12 @@ public final class HelperASRBackend {
         )
     }
 
-    private func helperEnvironment(
+    internal func helperEnvironment(
         modelCacheDirectory: String,
-        offline: Bool
+        offline: Bool,
+        inheritedEnvironment: [String: String] = ProcessInfo.processInfo.environment,
+        fileManager: FileManager = .default
     ) -> [String: String] {
-        let inherited = ProcessInfo.processInfo.environment
         var environment: [String: String] = [:]
         for key in [
             "HOME",
@@ -1022,10 +1031,15 @@ public final class HelperASRBackend {
             "SSL_CERT_FILE",
             "SSL_CERT_DIR"
         ] {
-            if let value = inherited[key], !value.isEmpty {
+            if let value = inheritedEnvironment[key], !value.isEmpty {
                 environment[key] = value
             }
         }
+        ModelCache.applyHuggingFaceTokenEnvironment(
+            &environment,
+            inherited: inheritedEnvironment,
+            fileManager: fileManager
+        )
         environment["PATH"] = [
             runtime.python.deletingLastPathComponent().path,
             runtime.ffmpeg.deletingLastPathComponent().path,
